@@ -287,6 +287,20 @@ async def test_delete_audio_outside_roots_keeps_file(
     assert outside.is_file()
 
 
+async def test_delete_audio_keeps_registered_file(
+    app: FastAPI, client: httpx.AsyncClient, env: EnvSettings, provider: FakeProvider
+) -> None:
+    upload = await add_upload(app, env)
+    await app.state.db.conn.execute("UPDATE uploads SET registered = 1 WHERE id = ?", (upload.id,))
+    await app.state.db.conn.commit()
+    assert (await app.state.db.get_upload(upload.id)).registered is True
+    job = (await client.post("/api/jobs", json={"upload_id": upload.id})).json()
+    await wait_status(client, job["id"], {"succeeded", "failed"})
+    assert (await client.delete(f"/api/jobs/{job['id']}?delete_audio=true")).status_code == 204
+    assert _is_file(upload.path)  # the user's own file stays
+    assert await app.state.db.get_upload(upload.id) is None
+
+
 async def test_delete_running_job(
     app: FastAPI, client: httpx.AsyncClient, env: EnvSettings
 ) -> None:

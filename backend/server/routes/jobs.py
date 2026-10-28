@@ -209,11 +209,15 @@ def _inside_roots(path: Path, roots: list[Path]) -> bool:
     return any(real.is_relative_to(root) and real != root for root in roots)
 
 
-def _remove_audio_files(env: EnvSettings, upload_id: str, stored_path: str) -> None:
-    """Blocking file removal (run in a thread)."""
+def _remove_audio_files(
+    env: EnvSettings, upload_id: str, stored_path: str, *, registered: bool
+) -> None:
+    """Blocking file removal (run in a thread). Registered files belong to the user and stay."""
     cached = env.data_dir / "cache" / "audio" / f"{upload_id}.mp3"
     cached.unlink(missing_ok=True)
     path = Path(stored_path)
+    if registered:
+        return
     if _inside_roots(path, env.upload_roots) and path.is_file():
         path.unlink(missing_ok=True)
     else:
@@ -235,6 +239,8 @@ async def delete_job(
     if delete_audio and job.upload_id is not None:
         upload = await db.get_upload(job.upload_id)
         if upload is not None and await db.count_jobs_for_upload(upload.id) == 0:
-            await asyncio.to_thread(_remove_audio_files, env, upload.id, upload.path)
+            await asyncio.to_thread(
+                _remove_audio_files, env, upload.id, upload.path, registered=upload.registered
+            )
             await db.delete_upload(upload.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

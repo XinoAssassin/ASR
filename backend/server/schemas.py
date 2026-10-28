@@ -101,12 +101,16 @@ class UploadOut(BaseModel):
     original_name: str
     size: int = Field(ge=0, description="Bytes.")
     created_at: datetime
+    registered: bool = Field(
+        default=False,
+        description="Registered from an existing server file; never deleted by the backend.",
+    )
     probe: ProbeInfo | None = None
 
 
 class UploadInitIn(BaseModel):
     filename: str = Field(min_length=1, max_length=255)
-    size: int = Field(gt=0, le=MAX_UPLOAD_SIZE, description="Total bytes.")
+    size: int = Field(gt=0, description="Total bytes; over MAX_UPLOAD_SIZE is rejected with 413.")
     target_dir: str = Field(
         max_length=4096,
         description="Absolute path, or relative to the first upload root; must stay inside a root.",

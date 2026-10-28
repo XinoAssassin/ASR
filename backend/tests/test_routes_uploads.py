@@ -289,8 +289,7 @@ async def test_chunked_over_cap(client: httpx.AsyncClient) -> None:
         "/api/uploads/init",
         json={"filename": "a.wav", "size": 2 * 1024**3 + 1, "target_dir": ""},
     )
-    # Rejected by the frozen UploadInitIn schema (le=MAX_UPLOAD_SIZE) before storage's 413.
-    assert r.status_code in (413, 422)
+    assert r.status_code == 413
 
 
 @pytest.mark.parametrize(
@@ -334,6 +333,7 @@ async def test_register_inside_root(client: httpx.AsyncClient, env: EnvSettings)
     assert r.status_code == 201, r.text
     assert r.json()["path"] == str(path)
     assert r.json()["original_name"] == "memo.wav"
+    assert r.json()["registered"] is True
     r2 = await client.post("/api/uploads/register", json={"path": str(path)})
     assert r2.status_code == 201
     assert r2.json()["id"] != r.json()["id"]

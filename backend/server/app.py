@@ -5,6 +5,7 @@ Tests call ``create_app(env)`` with an explicit ``EnvSettings`` and run the life
 (``asgi_lifespan.LifespanManager``).
 """
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -29,6 +30,9 @@ def create_app(env: EnvSettings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # The core library reads ASR_DECODER from the process env; keep it in sync with
+        # values that came from a .env file.
+        os.environ["ASR_DECODER"] = env.decoder
         ensure_dirs(env)
         db = await Database.open(env.db_path)
         job_manager = JobManager(db=db, env=env)

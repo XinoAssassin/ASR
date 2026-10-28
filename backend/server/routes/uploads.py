@@ -85,7 +85,12 @@ async def _close_and_discard(fh: BinaryIO, path: FsPath) -> None:
 
 
 async def _register(
-    db: DbDep, path: FsPath, original_name: str, *, delete_on_failure: bool
+    db: DbDep,
+    path: FsPath,
+    original_name: str,
+    *,
+    delete_on_failure: bool,
+    registered: bool = False,
 ) -> UploadOut:
     """Probe a stored file and insert the upload row."""
     try:
@@ -106,6 +111,7 @@ async def _register(
         original_name=original_name,
         size=info.size,
         created_at=datetime.now(UTC),
+        registered=registered,
         probe=info,
     )
     await db.insert_upload(upload)
@@ -354,7 +360,7 @@ async def register_upload(body: UploadRegisterIn, env: EnvDep, db: DbDep) -> Upl
         path = await run_in_threadpool(storage.resolve_register_path, body.path, env.upload_roots)
     except storage.StorageError as exc:
         raise _http(exc) from exc
-    return await _register(db, path, path.name, delete_on_failure=False)
+    return await _register(db, path, path.name, delete_on_failure=False, registered=True)
 
 
 @router.get("/{upload_id}", response_model=UploadOut)

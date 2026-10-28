@@ -27,7 +27,7 @@ from server.schemas import JobOut, JobStatus, TermSetOut, TranscriptOut, UploadO
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SEGMENTS = TypeAdapter(list[Segment])
 _SPEAKERS = TypeAdapter(list[Speaker])
@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS uploads (
     original_name TEXT NOT NULL,
     size          INTEGER NOT NULL,
     created_at    TEXT NOT NULL,
-    probe_json    TEXT
+    probe_json    TEXT,
+    registered    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -205,7 +206,13 @@ class Database:
         await conn.executescript(SCHEMA)
         async with conn.execute("SELECT MAX(version) FROM schema_version") as cur:
             row = await cur.fetchone()
-        if row is None or row[0] is None:
+        current = row[0] if row is not None else None
+        if current is not None and current < 2:
+            # v2: uploads.registered (files registered in place must never be deleted).
+            await conn.execute(
+                "ALTER TABLE uploads ADD COLUMN registered INTEGER NOT NULL DEFAULT 0"
+            )
+        if current is None or current < SCHEMA_VERSION:
             await conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                 (SCHEMA_VERSION, _ts(utcnow())),
@@ -229,8 +236,9 @@ class Database:
     # ---------------------------------------------------------------------------- uploads
     async def insert_upload(self, upload: UploadOut) -> None:
         await self.conn.execute(
-            "INSERT INTO uploads (id, path, original_name, size, created_at, probe_json)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO uploads"
+            " (id, path, original_name, size, created_at, probe_json, registered)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 upload.id,
                 upload.path,
@@ -238,6 +246,7 @@ class Database:
                 upload.size,
                 _ts(upload.created_at),
                 upload.probe.model_dump_json() if upload.probe else None,
+                int(upload.registered),
             ),
         )
         await self.conn.commit()
@@ -253,6 +262,7 @@ class Database:
             original_name=row["original_name"],
             size=row["size"],
             created_at=datetime.fromisoformat(row["created_at"]),
+            registered=bool(row["registered"]),
             probe=ProbeInfo.model_validate_json(row["probe_json"]) if row["probe_json"] else None,
         )
 
