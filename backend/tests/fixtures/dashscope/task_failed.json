@@ -1,0 +1,11 @@
+{
+  "request_id": "f9e1afad-94d3-997e-a83b-000000000007",
+  "output": {
+    "task_id": "c2e5d63b-96e1-4607-bb91-000000000001",
+    "task_status": "FAILED",
+    "submit_time": "2026-10-29 16:30:59.170",
+    "end_time": "2026-10-29 16:31:02.375",
+    "code": "InvalidFile.DecodeFailed",
+    "message": "The audio file cannot be decoded."
+  }
+}

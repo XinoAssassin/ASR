@@ -1,0 +1,19 @@
+{
+  "request_id": "f9e1afad-94d3-997e-a83b-000000000005",
+  "output": {
+    "task_id": "c2e5d63b-96e1-4607-bb91-000000000001",
+    "task_status": "SUCCEEDED",
+    "submit_time": "2026-10-29 15:11:40.041",
+    "scheduled_time": "2026-10-29 15:11:40.071",
+    "end_time": "2026-10-29 15:11:52.903",
+    "results": [
+      {
+        "file_url": "oss://dashscope-instant/acct0000/2026-10-29/abcd1234/meeting.m4a",
+        "transcription_url": "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/pre/filetrans-16k/20261029/15%3A11/409a4b92-445b-4dd8-8c1d-f110954d82d8-1.json?Expires=1761811500&OSSAccessKeyId=ACCESS_KEY_ID_PLACEHOLDER&Signature=SIGNATURE_PLACEHOLDER",
+        "subtask_status": "SUCCEEDED"
+      }
+    ],
+    "task_metrics": {"TOTAL": 1, "SUCCEEDED": 1, "FAILED": 0}
+  },
+  "usage": {"duration": 20}
+}

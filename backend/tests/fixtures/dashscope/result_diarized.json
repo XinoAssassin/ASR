@@ -1,0 +1,79 @@
+{
+  "file_url": "oss://dashscope-instant/acct0000/2026-10-29/abcd1234/meeting.m4a",
+  "properties": {
+    "audio_format": "aac",
+    "channels": [
+      0
+    ],
+    "original_sampling_rate": 48000,
+    "original_duration_in_milliseconds": 15200
+  },
+  "transcripts": [
+    {
+      "channel_id": 0,
+      "content_duration_in_milliseconds": 14600,
+      "text": "Hello world, 这里是阿里巴巴语音实验室。好的，我先汇报一下项目进度。我补充一点 Kubernetes 的部署情况。前端这边 Vue 3 的迁移已经完成了。那我们下周再对一下 roadmap。",
+      "sentences": [
+        {
+          "begin_time": 100,
+          "end_time": 3820,
+          "text": "Hello world, 这里是阿里巴巴语音实验室。",
+          "sentence_id": 1,
+          "speaker_id": 0,
+          "words": [
+            {
+              "begin_time": 100,
+              "end_time": 596,
+              "text": "Hello ",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 596,
+              "end_time": 844,
+              "text": "world",
+              "punctuation": ", "
+            },
+            {
+              "begin_time": 844,
+              "end_time": 3820,
+              "text": "这里是阿里巴巴语音实验室",
+              "punctuation": "。"
+            }
+          ]
+        },
+        {
+          "begin_time": 4000,
+          "end_time": 6500,
+          "text": "好的，我先汇报一下项目进度。",
+          "sentence_id": 2,
+          "speaker_id": 1,
+          "words": []
+        },
+        {
+          "begin_time": 9800,
+          "end_time": 12000,
+          "text": "我补充一点 Kubernetes 的部署情况。",
+          "sentence_id": 3,
+          "speaker_id": 3,
+          "words": []
+        },
+        {
+          "begin_time": 6600,
+          "end_time": 9700,
+          "text": "前端这边 Vue 3 的迁移已经完成了。",
+          "sentence_id": 4,
+          "speaker_id": 2,
+          "words": []
+        },
+        {
+          "begin_time": 12100,
+          "end_time": 15000,
+          "text": "那我们下周再对一下 roadmap。",
+          "sentence_id": 5,
+          "speaker_id": 0,
+          "words": []
+        }
+      ]
+    }
+  ]
+}

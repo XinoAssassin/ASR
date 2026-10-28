@@ -1,0 +1,56 @@
+{
+  "file_url": "oss://dashscope-instant/acct0000/2026-10-29/abcd1234/call.flac",
+  "properties": {
+    "audio_format": "flac",
+    "channels": [
+      0,
+      1
+    ],
+    "original_sampling_rate": 16000,
+    "original_duration_in_milliseconds": 8000
+  },
+  "transcripts": [
+    {
+      "channel_id": 0,
+      "content_duration_in_milliseconds": 4000,
+      "text": "您好，请问有什么可以帮您？我查一下。",
+      "sentences": [
+        {
+          "begin_time": 0,
+          "end_time": 2000,
+          "text": "您好，请问有什么可以帮您？",
+          "sentence_id": 1,
+          "words": [
+            {
+              "begin_time": 0,
+              "end_time": 800,
+              "text": "您好",
+              "punctuation": "，"
+            }
+          ]
+        },
+        {
+          "begin_time": 5000,
+          "end_time": 7000,
+          "text": "我查一下。",
+          "sentence_id": 2,
+          "words": []
+        }
+      ]
+    },
+    {
+      "channel_id": 1,
+      "content_duration_in_milliseconds": 2500,
+      "text": "我的订单还没到。",
+      "sentences": [
+        {
+          "begin_time": 2100,
+          "end_time": 4600,
+          "text": "我的订单还没到。",
+          "sentence_id": 1,
+          "words": []
+        }
+      ]
+    }
+  ]
+}

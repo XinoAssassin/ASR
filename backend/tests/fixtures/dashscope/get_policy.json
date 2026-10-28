@@ -1,0 +1,15 @@
+{
+  "request_id": "52f4383a-c67d-9f8c-0000-000000000001",
+  "data": {
+    "policy": "POLICY_PLACEHOLDER",
+    "signature": "SIGNATURE_PLACEHOLDER",
+    "upload_dir": "dashscope-instant/acct0000/2026-10-29/abcd1234",
+    "upload_host": "https://dashscope-file-mgr.oss-cn-beijing.aliyuncs.com",
+    "expire_in_seconds": 300,
+    "max_file_size_mb": 1024,
+    "capacity_limit_mb": 999999999,
+    "oss_access_key_id": "ACCESS_KEY_ID_PLACEHOLDER",
+    "x_oss_object_acl": "private",
+    "x_oss_forbid_overwrite": "true"
+  }
+}

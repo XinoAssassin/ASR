@@ -1,0 +1,9 @@
+{
+  "request_id": "f9e1afad-94d3-997e-a83b-000000000004",
+  "output": {
+    "task_id": "c2e5d63b-96e1-4607-bb91-000000000001",
+    "task_status": "RUNNING",
+    "submit_time": "2026-10-29 15:11:40.041",
+    "scheduled_time": "2026-10-29 15:11:40.071"
+  }
+}

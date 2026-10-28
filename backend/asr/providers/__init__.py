@@ -2,13 +2,27 @@
 
 from typing import Any
 
-from asr.providers.base import ProviderName, TranscriptionProvider
+from asr.providers.base import ProviderError, ProviderName, TranscriptionProvider
+
+LOCAL_UNAVAILABLE = "Local provider is not available until M5"
 
 
 def get_provider(name: ProviderName, **config: Any) -> TranscriptionProvider:
     """Instantiate a provider by name.
 
-    ``cloud`` -> ``DashScopeFiletransProvider(**config)``; ``local`` raises
-    ``ProviderError("not available until M5")``.
+    ``cloud`` -> ``DashScopeFiletransProvider(**config)`` (keyword arguments per EXECUTION_LOG
+    §3.3); ``local`` raises ``ProviderError`` until M5.
     """
-    raise NotImplementedError
+    if name == "cloud":
+        from asr.providers.cloud import DashScopeFiletransProvider
+
+        try:
+            return DashScopeFiletransProvider(**config)
+        except TypeError:
+            raise ProviderError("Invalid cloud provider configuration") from None
+    if name == "local":
+        raise ProviderError(LOCAL_UNAVAILABLE)
+    raise ProviderError(f"Unknown provider: {name!r}")
+
+
+__all__ = ["LOCAL_UNAVAILABLE", "get_provider"]
