@@ -31,7 +31,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Dirs */
+        /**
+         * List Dirs
+         * @description Immediate subdirectories (hidden and unreadable ones skipped), sorted, at most 1000.
+         */
         get: operations["list_dirs_api_fs_dirs_get"];
         put?: never;
         post?: never;
@@ -104,7 +107,11 @@ export interface paths {
         get: operations["get_job_api_jobs__job_id__get"];
         put?: never;
         post?: never;
-        /** Delete Job */
+        /**
+         * Delete Job
+         * @description Cancels the job if active. With ``delete_audio`` the upload (record, stored file, browser
+         *     MP3 cache) is removed too, unless another job still references it.
+         */
         delete: operations["delete_job_api_jobs__job_id__delete"];
         options?: never;
         head?: never;
@@ -171,7 +178,11 @@ export interface paths {
         };
         /** Get Settings */
         get: operations["get_settings_api_settings_get"];
-        /** Update Settings */
+        /**
+         * Update Settings
+         * @description Partial update; omitted fields keep their value. ``cloud.api_key`` is write-only:
+         *     non-empty sets the override, ``""`` clears it (the env value applies again).
+         */
         put: operations["update_settings_api_settings_put"];
         post?: never;
         delete?: never;
@@ -209,7 +220,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Test Cloud */
+        /**
+         * Test Cloud
+         * @description Check the effective DashScope key against the effective endpoint.
+         */
         post: operations["test_cloud_api_settings_test_cloud_post"];
         delete?: never;
         options?: never;
@@ -244,7 +258,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Import Term Set */
+        /**
+         * Import Term Set
+         * @description Create a term set from pasted text / a .txt file's contents (see ``parse_terms``).
+         */
         post: operations["import_term_set_api_term_sets_import_post"];
         delete?: never;
         options?: never;
@@ -288,6 +305,8 @@ export interface paths {
         /**
          * Patch Transcript
          * @description Apply ops to ``segments`` only; ``original`` is immutable (rule 8).
+         *
+         *     All ops are validated before anything is written (all-or-nothing).
          */
         patch: operations["patch_transcript_api_transcripts__transcript_id__patch"];
         trace?: never;
@@ -318,7 +337,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Revert Transcript */
+        /**
+         * Revert Transcript
+         * @description ``segments <- original``. Speaker names/colours are kept; any speaker id used by the
+         *     original but missing from the list is added back.
+         */
         post: operations["revert_transcript_api_transcripts__transcript_id__revert_post"];
         delete?: never;
         options?: never;
@@ -334,7 +357,10 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Update Speakers */
+        /**
+         * Update Speakers
+         * @description Rename / recolour existing speakers; speakers not listed are unchanged.
+         */
         put: operations["update_speakers_api_transcripts__transcript_id__speakers_put"];
         post?: never;
         delete?: never;
@@ -355,6 +381,9 @@ export interface paths {
         /**
          * Upload File
          * @description Single-request multipart upload (curl; the UI uses chunked upload, D11).
+         *
+         *     Form fields: ``file`` (the audio/video file) and ``target_dir`` (absolute, or relative to the
+         *     first upload root).
          */
         post: operations["upload_file_api_uploads_post"];
         delete?: never;
@@ -372,7 +401,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Init Upload */
+        /**
+         * Init Upload
+         * @description Start a chunked upload: ``total_parts`` parts of ``part_size`` bytes (last one shorter).
+         */
         post: operations["init_upload_api_uploads_init_post"];
         delete?: never;
         options?: never;
@@ -409,7 +441,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Complete Upload */
+        /**
+         * Complete Upload
+         * @description Assemble the parts in order into ``target_dir`` and probe the result.
+         */
         post: operations["complete_upload_api_uploads__session_id__complete_post"];
         delete?: never;
         options?: never;
@@ -428,6 +463,9 @@ export interface paths {
         /**
          * Upload Part
          * @description Raw part body (``application/octet-stream``); read via ``request.stream()``.
+         *
+         *     Every part must be exactly ``part_size`` bytes except the last. Re-sending a part replaces
+         *     it (idempotent).
          */
         put: operations["upload_part_api_uploads__session_id__parts__n__put"];
         post?: never;
@@ -458,16 +496,6 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** Body_upload_file_api_uploads_post */
-        Body_upload_file_api_uploads_post: {
-            /**
-             * File
-             * @description Audio/video file.
-             */
-            file: string;
-            /** Target Dir */
-            target_dir: string;
-        };
         /** CloudOptions */
         CloudOptions: {
             /**
@@ -1021,7 +1049,7 @@ export interface components {
             filename: string;
             /**
              * Size
-             * @description Total bytes.
+             * @description Total bytes; over MAX_UPLOAD_SIZE is rejected with 413.
              */
             size: number;
             /**
@@ -1059,6 +1087,12 @@ export interface components {
              */
             path: string;
             probe?: components["schemas"]["ProbeInfo"] | null;
+            /**
+             * Registered
+             * @description Registered from an existing server file; never deleted by the backend.
+             * @default false
+             */
+            registered: boolean;
             /**
              * Size
              * @description Bytes.
@@ -1797,7 +1831,7 @@ export interface operations {
     export_transcript_api_transcripts__transcript_id__export_get: {
         parameters: {
             query?: {
-                format?: "txt" | "srt" | "vtt" | "json";
+                format?: ("txt" | "srt" | "vtt" | "json") | "docx";
                 timestamps?: boolean;
                 merge_same_speaker?: boolean;
             };
@@ -1821,14 +1855,12 @@ export interface operations {
                     "text/vtt": string;
                 };
             };
-            /** @description Validation Error */
+            /** @description Invalid parameters, or `docx` (not implemented yet). */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
+                content?: never;
             };
         };
     };
@@ -1907,7 +1939,16 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "multipart/form-data": components["schemas"]["Body_upload_file_api_uploads_post"];
+                "multipart/form-data": {
+                    /**
+                     * File
+                     * Format: binary
+                     * @description Audio/video file.
+                     */
+                    file: string;
+                    /** Target Dir */
+                    target_dir: string;
+                };
             };
         };
         responses: {
@@ -1918,15 +1959,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UploadOut"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
