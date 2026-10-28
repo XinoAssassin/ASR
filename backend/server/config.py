@@ -155,10 +155,26 @@ class EnvSettings(BaseSettings):
         return self.data_dir / "asr.db"
 
 
+class ConfigError(ValueError):
+    """Invalid environment configuration; the message never contains submitted values."""
+
+
 def load_env(env_files: tuple[Path, ...] | None = None) -> EnvSettings:
-    """Read settings from the environment and ``env_files`` (default ``ENV_FILES``)."""
+    """Read settings from the environment and ``env_files`` (default ``ENV_FILES``).
+
+    Pydantic's ``ValidationError`` text includes the offending input, which for model-level
+    validators is the whole settings dict with ``ASR_API_KEY`` / ``DASHSCOPE_API_KEY``. Re-raise
+    with location and message only, and without chaining, so secrets never reach stderr.
+    """
     files = ENV_FILES if env_files is None else env_files
-    return EnvSettings(_env_file=files or None)  # type: ignore[call-arg]
+    try:
+        return EnvSettings(_env_file=files or None)  # type: ignore[call-arg]
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{'.'.join(str(p) for p in err['loc']) or 'settings'}: {err['msg']}"
+            for err in exc.errors(include_input=False, include_url=False)
+        )
+        raise ConfigError(f"invalid configuration: {problems}") from None
 
 
 @lru_cache(maxsize=1)

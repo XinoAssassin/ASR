@@ -1,9 +1,8 @@
 import httpx
 import pytest
-from pydantic import ValidationError
 
 from asr import __version__
-from server.config import EnvSettings
+from server.config import ConfigError, EnvSettings
 from tests.conftest import ALLOWED_ORIGIN, API_KEY, ClientFactory, EnvFactory
 
 
@@ -81,5 +80,5 @@ async def test_unauthorized_response_carries_cors_headers(
 
 
 def test_cors_wildcard_rejected(env_factory: EnvFactory) -> None:
-    with pytest.raises(ValidationError):
+    with pytest.raises(ConfigError, match="explicit origins"):
         env_factory(ASR_CORS_ORIGINS="*")

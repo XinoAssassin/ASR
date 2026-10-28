@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 from pathlib import Path
 
 import httpx
@@ -144,7 +145,7 @@ def test_resolve_stored_file_returns_realpath(env: EnvSettings) -> None:
 
 # ------------------------------------------------------------------ upload resource limits (L3)
 async def test_chunked_session_cap(
-    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+    client: httpx.AsyncClient, env: EnvSettings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(storage, "MAX_OPEN_SESSIONS", 2)
     body = {"filename": "a.wav", "size": 10, "target_dir": ""}
@@ -152,6 +153,11 @@ async def test_chunked_session_cap(
         assert (await client.post("/api/uploads/init", json=body)).status_code == 201
     r = await client.post("/api/uploads/init", json=body)
     assert r.status_code == 429
+    # Abandoned sessions stop counting once idle, so they cannot lock out new uploads.
+    old = time.time() - storage.ACTIVE_SESSION_S - 60
+    for d in storage.sessions_dir(env.data_dir).iterdir():
+        os.utime(d, (old, old))
+    assert (await client.post("/api/uploads/init", json=body)).status_code == 201
 
 
 async def test_chunked_init_checks_free_space(
@@ -171,6 +177,22 @@ async def test_chunked_init_checks_free_space(
 
 
 # ------------------------------------------------------------- data dir vs upload roots (L4)
+def test_config_errors_do_not_leak_secrets(env_factory: EnvFactory, tmp_path: Path) -> None:
+    secrets = ("sk-0123456789abcdef0123456789abcdef", "my-very-secret-asr-key-XYZ")
+    with pytest.raises(ValueError) as info:
+        env_factory(
+            ASR_DATA_DIR=str(tmp_path / "data"),
+            ASR_UPLOAD_ROOTS=str(tmp_path),
+            DASHSCOPE_API_KEY=secrets[0],
+            ASR_API_KEY=secrets[1],
+        )
+    text = str(info.value) + repr(info.value)
+    assert "contains ASR_DATA_DIR" in text
+    assert info.value.__cause__ is None and info.value.__suppress_context__
+    for secret in secrets:
+        assert secret[4:12] not in text
+
+
 @pytest.mark.parametrize("root", ["data", ".", "data/uploads"])
 def test_root_must_not_contain_data_dir(env_factory: EnvFactory, tmp_path: Path, root: str) -> None:
     roots = str(tmp_path / root)

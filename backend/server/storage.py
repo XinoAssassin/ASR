@@ -33,7 +33,8 @@ from asr.audio.formats import is_accepted
 from server.schemas import MAX_UPLOAD_SIZE
 
 PART_SIZE = 8 * 1024 * 1024  # 8 MiB (EXECUTION_LOG D11)
-MAX_OPEN_SESSIONS = 16  # concurrent chunked uploads; stale ones are cleaned after 24 h
+MAX_OPEN_SESSIONS = 16  # concurrently *active* chunked uploads; stale ones are cleaned after 24 h
+ACTIVE_SESSION_S = 30 * 60  # a session with no part written for this long no longer counts
 FREE_SPACE_MARGIN = 256 * 1024 * 1024  # keep this much disk free after an upload
 SESSION_TTL_S = 24 * 3600
 SESSIONS_DIRNAME = "upload-sessions"
@@ -332,6 +333,21 @@ def _write_json_atomic(path: Path, data: dict[str, object]) -> None:
     os.replace(tmp, path)
 
 
+def _active_sessions(data_dir: Path) -> int:
+    """Sessions that received a part (or were created) recently; abandoned uploads (closed tab,
+    cancelled) stop counting after ``ACTIVE_SESSION_S`` and cannot block new uploads."""
+    sessions = sessions_dir(data_dir)
+    if not sessions.is_dir():
+        return 0
+    cutoff = time.time() - ACTIVE_SESSION_S
+    count = 0
+    for p in sessions.iterdir():
+        with contextlib.suppress(OSError):
+            if p.is_dir() and p.stat().st_mtime >= cutoff:  # part renames bump the dir mtime
+                count += 1
+    return count
+
+
 def create_session(
     data_dir: Path, roots: Sequence[Path], *, filename: str, size: int, target_dir: str
 ) -> UploadSession:
@@ -344,8 +360,7 @@ def create_session(
         raise UnsupportedFormatError(f"unsupported file type: {Path(filename).suffix or '(none)'}")
     target = resolve_target_dir(target_dir, roots)
     cleanup_stale_sessions(data_dir)
-    sessions = sessions_dir(data_dir)
-    if sessions.is_dir() and sum(1 for p in sessions.iterdir() if p.is_dir()) >= MAX_OPEN_SESSIONS:
+    if _active_sessions(data_dir) >= MAX_OPEN_SESSIONS:
         raise TooManySessionsError(
             f"too many uploads in progress (max {MAX_OPEN_SESSIONS}); finish or wait for them"
         )
