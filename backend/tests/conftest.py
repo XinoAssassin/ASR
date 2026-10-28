@@ -52,6 +52,7 @@ def env_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Env
             "ASR_UPLOAD_ROOTS": str(tmp_path / "uploads"),
             "ASR_MODEL_CACHE_DIR": str(tmp_path / "models"),
             "ASR_CORS_ORIGINS": ALLOWED_ORIGIN,
+            "ASR_ALLOWED_HOSTS": "test",  # httpx base_url host; auth is off by default
         }
         for name, value in {**defaults, **env_vars}.items():
             monkeypatch.setenv(name, value)

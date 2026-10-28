@@ -5,13 +5,17 @@ Tests call ``create_app(env)`` with an explicit ``EnvSettings`` and run the life
 (``asgi_lifespan.LifespanManager``).
 """
 
+import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from asr import __version__
 from server.auth import API_KEY_HEADER, EXEMPT_PATHS, ApiKeyMiddleware
@@ -19,6 +23,8 @@ from server.config import EnvSettings, ensure_dirs, get_env
 from server.db import Database
 from server.jobs import JobManager
 from server.routes import ROUTERS
+
+log = logging.getLogger(__name__)
 
 CORS_ALLOW_HEADERS = [API_KEY_HEADER, "Content-Type", "Range", "Last-Event-ID"]
 CORS_EXPOSE_HEADERS = ["Content-Range", "Accept-Ranges", "Content-Length", "Content-Disposition"]
@@ -58,7 +64,19 @@ def create_app(env: EnvSettings | None = None) -> FastAPI:
 
     # Order matters: the last middleware added is the outermost. CORS wraps auth so that 401
     # responses carry CORS headers and preflight requests are answered before auth runs.
-    app.add_middleware(ApiKeyMiddleware, api_key=env.api_key)
+    app.add_middleware(
+        ApiKeyMiddleware,
+        api_key=env.api_key,
+        allowed_hosts=env.allowed_hosts,
+        allowed_origins=env.cors_origins,
+    )
+    if not env.api_key_required:
+        log.warning(
+            "ASR_API_KEY is empty: API authentication is DISABLED. Only loopback Host names%s are "
+            "accepted; set ASR_API_KEY before exposing this server on a network.",
+            f" and {', '.join(env.allowed_hosts)}" if env.allowed_hosts else "",
+        )
+    app.add_exception_handler(RequestValidationError, _validation_error_handler)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=env.cors_origins,
@@ -71,6 +89,14 @@ def create_app(env: EnvSettings | None = None) -> FastAPI:
 
     _document_api_key(app)
     return app
+
+
+async def _validation_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """FastAPI's 422 without ``input`` / ``ctx``: the default echoes submitted values back, which
+    would return a rejected DashScope key to the browser (AGENTS.md rule 3)."""
+    raw = exc.errors() if isinstance(exc, RequestValidationError) else []
+    errors = [{k: v for k, v in err.items() if k not in ("input", "ctx")} for err in raw]
+    return JSONResponse({"detail": jsonable_encoder(errors)}, status_code=422)
 
 
 def _document_api_key(app: FastAPI) -> None:

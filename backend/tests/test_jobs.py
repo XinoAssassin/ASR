@@ -371,7 +371,7 @@ async def test_startup_recovery(env: EnvSettings, monkeypatch: pytest.MonkeyPatc
     app = create_app(env)
     async with (
         LifespanManager(app),
-        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c,
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c,
     ):
         running = (await c.get("/api/jobs/was-running")).json()
         assert running["status"] == "failed" and running["error"] == INTERRUPTED

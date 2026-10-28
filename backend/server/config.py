@@ -64,6 +64,12 @@ class EnvSettings(BaseSettings):
         validation_alias="ASR_CORS_ORIGINS",
         description="Comma-separated allow-list of browser origins. '*' is rejected.",
     )
+    allowed_hosts: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        validation_alias="ASR_ALLOWED_HOSTS",
+        description="Comma-separated extra Host names accepted while auth is disabled "
+        "(loopback names are always accepted; '*' accepts any host).",
+    )
     upload_roots: Annotated[list[Path], NoDecode] = Field(
         default_factory=list,
         validation_alias="ASR_UPLOAD_ROOTS",
@@ -98,6 +104,13 @@ class EnvSettings(BaseSettings):
             return origins
         return v
 
+    @field_validator("allowed_hosts", mode="before")
+    @classmethod
+    def _split_hosts(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return [h.strip().lower() for h in v.split(",") if h.strip()]
+        return v
+
     @field_validator("upload_roots", mode="before")
     @classmethod
     def _split_roots(cls, v: Any) -> Any:
@@ -121,6 +134,13 @@ class EnvSettings(BaseSettings):
             r = Path(root).expanduser().resolve()
             if r not in resolved:
                 resolved.append(r)
+        for r in resolved:
+            # A root at or above the data dir would expose asr.db, caches and upload sessions to
+            # uploads, register and the directory picker. Roots below the data dir are fine.
+            if data_dir == r or r in data_dir.parents:
+                raise ValueError(
+                    f"upload root {r} contains ASR_DATA_DIR {data_dir}; use a separate directory"
+                )
         object.__setattr__(self, "data_dir", data_dir)
         object.__setattr__(self, "upload_roots", resolved)
         object.__setattr__(self, "model_cache_dir", self.model_cache_dir.expanduser().resolve())
