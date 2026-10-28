@@ -1,27 +1,6 @@
 {
   "components": {
     "schemas": {
-      "Body_upload_file_api_uploads_post": {
-        "properties": {
-          "file": {
-            "contentMediaType": "application/octet-stream",
-            "description": "Audio/video file.",
-            "title": "File",
-            "type": "string"
-          },
-          "target_dir": {
-            "maxLength": 4096,
-            "title": "Target Dir",
-            "type": "string"
-          }
-        },
-        "required": [
-          "file",
-          "target_dir"
-        ],
-        "title": "Body_upload_file_api_uploads_post",
-        "type": "object"
-      },
       "CloudOptions": {
         "properties": {
           "keep_dialect": {
@@ -1458,9 +1437,8 @@
             "type": "string"
           },
           "size": {
-            "description": "Total bytes.",
+            "description": "Total bytes; over MAX_UPLOAD_SIZE is rejected with 413.",
             "exclusiveMinimum": 0.0,
-            "maximum": 2147483648.0,
             "title": "Size",
             "type": "integer"
           },
@@ -1534,6 +1512,12 @@
                 "type": "null"
               }
             ]
+          },
+          "registered": {
+            "default": false,
+            "description": "Registered from an existing server file; never deleted by the backend.",
+            "title": "Registered",
+            "type": "boolean"
           },
           "size": {
             "description": "Bytes.",
@@ -1719,6 +1703,7 @@
     },
     "/api/fs/dirs": {
       "get": {
+        "description": "Immediate subdirectories (hidden and unreadable ones skipped), sorted, at most 1000.",
         "operationId": "list_dirs_api_fs_dirs_get",
         "parameters": [
           {
@@ -1936,6 +1921,7 @@
     },
     "/api/jobs/{job_id}": {
       "delete": {
+        "description": "Cancels the job if active. With ``delete_audio`` the upload (record, stored file, browser\nMP3 cache) is removed too, unless another job still references it.",
         "operationId": "delete_job_api_jobs__job_id__delete",
         "parameters": [
           {
@@ -2168,6 +2154,7 @@
         ]
       },
       "put": {
+        "description": "Partial update; omitted fields keep their value. ``cloud.api_key`` is write-only:\nnon-empty sets the override, ``\"\"`` clears it (the env value applies again).",
         "operationId": "update_settings_api_settings_put",
         "requestBody": {
           "content": {
@@ -2235,6 +2222,7 @@
     },
     "/api/settings/test-cloud": {
       "post": {
+        "description": "Check the effective DashScope key against the effective endpoint.",
         "operationId": "test_cloud_api_settings_test_cloud_post",
         "responses": {
           "200": {
@@ -2320,6 +2308,7 @@
     },
     "/api/term-sets/import": {
       "post": {
+        "description": "Create a term set from pasted text / a .txt file's contents (see ``parse_terms``).",
         "operationId": "import_term_set_api_term_sets_import_post",
         "requestBody": {
           "content": {
@@ -2526,7 +2515,7 @@
         ]
       },
       "patch": {
-        "description": "Apply ops to ``segments`` only; ``original`` is immutable (rule 8).",
+        "description": "Apply ops to ``segments`` only; ``original`` is immutable (rule 8).\n\nAll ops are validated before anything is written (all-or-nothing).",
         "operationId": "patch_transcript_api_transcripts__transcript_id__patch",
         "parameters": [
           {
@@ -2595,15 +2584,23 @@
             "name": "format",
             "required": false,
             "schema": {
-              "default": "txt",
-              "enum": [
-                "txt",
-                "srt",
-                "vtt",
-                "json"
+              "anyOf": [
+                {
+                  "enum": [
+                    "txt",
+                    "srt",
+                    "vtt",
+                    "json"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "const": "docx",
+                  "type": "string"
+                }
               ],
-              "title": "Format",
-              "type": "string"
+              "default": "txt",
+              "title": "Format"
             }
           },
           {
@@ -2654,14 +2651,7 @@
             "description": "Exported file (Content-Disposition: attachment)."
           },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Invalid parameters, or `docx` (not implemented yet)."
           }
         },
         "summary": "Export Transcript",
@@ -2672,6 +2662,7 @@
     },
     "/api/transcripts/{transcript_id}/revert": {
       "post": {
+        "description": "``segments <- original``. Speaker names/colours are kept; any speaker id used by the\noriginal but missing from the list is added back.",
         "operationId": "revert_transcript_api_transcripts__transcript_id__revert_post",
         "parameters": [
           {
@@ -2714,6 +2705,7 @@
     },
     "/api/transcripts/{transcript_id}/speakers": {
       "put": {
+        "description": "Rename / recolour existing speakers; speakers not listed are unchanged.",
         "operationId": "update_speakers_api_transcripts__transcript_id__speakers_put",
         "parameters": [
           {
@@ -2766,13 +2758,32 @@
     },
     "/api/uploads": {
       "post": {
-        "description": "Single-request multipart upload (curl; the UI uses chunked upload, D11).",
+        "description": "Single-request multipart upload (curl; the UI uses chunked upload, D11).\n\nForm fields: ``file`` (the audio/video file) and ``target_dir`` (absolute, or relative to the\nfirst upload root).",
         "operationId": "upload_file_api_uploads_post",
         "requestBody": {
           "content": {
             "multipart/form-data": {
               "schema": {
-                "$ref": "#/components/schemas/Body_upload_file_api_uploads_post"
+                "properties": {
+                  "file": {
+                    "contentMediaType": "application/octet-stream",
+                    "description": "Audio/video file.",
+                    "format": "binary",
+                    "title": "File",
+                    "type": "string"
+                  },
+                  "target_dir": {
+                    "maxLength": 4096,
+                    "title": "Target Dir",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file",
+                  "target_dir"
+                ],
+                "title": "Body_upload_file_api_uploads_post",
+                "type": "object"
               }
             }
           },
@@ -2788,16 +2799,6 @@
               }
             },
             "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Upload File",
@@ -2808,6 +2809,7 @@
     },
     "/api/uploads/init": {
       "post": {
+        "description": "Start a chunked upload: ``total_parts`` parts of ``part_size`` bytes (last one shorter).",
         "operationId": "init_upload_api_uploads_init_post",
         "requestBody": {
           "content": {
@@ -2891,6 +2893,7 @@
     },
     "/api/uploads/{session_id}/complete": {
       "post": {
+        "description": "Assemble the parts in order into ``target_dir`` and probe the result.",
         "operationId": "complete_upload_api_uploads__session_id__complete_post",
         "parameters": [
           {
@@ -2933,7 +2936,7 @@
     },
     "/api/uploads/{session_id}/parts/{n}": {
       "put": {
-        "description": "Raw part body (``application/octet-stream``); read via ``request.stream()``.",
+        "description": "Raw part body (``application/octet-stream``); read via ``request.stream()``.\n\nEvery part must be exactly ``part_size`` bytes except the last. Re-sending a part replaces\nit (idempotent).",
         "operationId": "upload_part_api_uploads__session_id__parts__n__put",
         "parameters": [
           {
