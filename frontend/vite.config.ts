@@ -33,9 +33,12 @@ function copyPublicDir(): Plugin {
   }
 }
 
-// Dev: the SPA calls same-origin `/api/...`; Vite proxies it to the backend on :8000.
+// Dev: the SPA calls same-origin `/api/...`; Vite proxies it to the backend on :8000
+// (override with ASR_DEV_BACKEND=http://host:port, e.g. for Playwright runs).
 // Prod: `/config.js` (public/config.js, rendered by deploy/frontend-entrypoint.sh in Docker)
 // supplies the backend URL.
+const devBackend = process.env.ASR_DEV_BACKEND || 'http://localhost:8000'
+
 export default defineConfig({
   plugins: [vue(), copyPublicDir()],
   resolve: {
@@ -48,13 +51,13 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      '/api': { target: 'http://localhost:8000', changeOrigin: false },
+      '/api': { target: devBackend, changeOrigin: false },
     },
   },
   preview: {
     port: 4173,
     proxy: {
-      '/api': { target: 'http://localhost:8000', changeOrigin: false },
+      '/api': { target: devBackend, changeOrigin: false },
     },
   },
 })

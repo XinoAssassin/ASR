@@ -9,7 +9,7 @@ const { t } = useI18n()
 <template>
   <NResult status="404" :title="t('views.notFound.title')">
     <template #footer>
-      <RouterLink to="/">
+      <RouterLink :to="{ name: 'upload' }">
         <NButton>{{ t('views.notFound.back') }}</NButton>
       </RouterLink>
     </template>

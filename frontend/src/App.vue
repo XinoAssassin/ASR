@@ -1,28 +1,39 @@
 <script setup lang="ts">
 import {
   type MenuOption,
+  NAlert,
+  NButton,
   NConfigProvider,
+  NDialogProvider,
+  NGlobalStyle,
   NLayout,
   NLayoutContent,
   NLayoutHeader,
   NMenu,
   NMessageProvider,
   NTag,
+  NTooltip,
+  darkTheme,
   dateEnUS,
   dateZhCN,
   enUS,
+  useOsTheme,
   zhCN,
 } from 'naive-ui'
-import { computed, h, onMounted } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 
+import { getBackendUrl } from '@/api'
+import { LOCALE_STORAGE_KEY, type AppLocale } from '@/locales'
 import { useHealthStore } from '@/stores/health'
 
 const { t, locale } = useI18n()
 const route = useRoute()
 const health = useHealthStore()
+const osTheme = useOsTheme()
 
+const theme = computed(() => (osTheme.value === 'dark' ? darkTheme : null))
 const naiveLocale = computed(() => (locale.value === 'en' ? enUS : zhCN))
 const naiveDateLocale = computed(() => (locale.value === 'en' ? dateEnUS : dateZhCN))
 
@@ -35,7 +46,8 @@ const navItems = [
 const menuOptions = computed<MenuOption[]>(() =>
   navItems.map((item) => ({
     key: item.key,
-    label: () => h(RouterLink, { to: item.to }, { default: () => t(item.label) }),
+    label: () =>
+      h(RouterLink, { to: item.to, 'data-testid': `nav-${item.key}` }, { default: () => t(item.label) }),
   })),
 )
 
@@ -55,24 +67,77 @@ const healthTag = computed(() => {
   }
 })
 
-onMounted(() => {
-  void health.check()
+const healthTooltip = computed(() => {
+  const url = getBackendUrl() || t('health.sameOrigin')
+  if (health.state === 'connected' && health.info) {
+    return `${url} · v${health.info.version} · ${health.info.decoder}`
+  }
+  return health.error ? `${url} — ${health.error}` : url
 })
+
+function toggleLocale(): void {
+  const next: AppLocale = locale.value === 'en' ? 'zh-CN' : 'en'
+  locale.value = next
+  document.documentElement.lang = next
+  try {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, next)
+  } catch {
+    // storage unavailable: the choice lasts for this page only
+  }
+}
+
+onMounted(() => {
+  document.documentElement.lang = locale.value
+  health.startPolling()
+})
+onBeforeUnmount(() => health.stopPolling())
 </script>
 
 <template>
-  <NConfigProvider :locale="naiveLocale" :date-locale="naiveDateLocale">
+  <NConfigProvider :theme="theme" :locale="naiveLocale" :date-locale="naiveDateLocale">
+    <NGlobalStyle />
     <NMessageProvider>
-      <NLayout class="app-layout">
-        <NLayoutHeader bordered class="app-header">
-          <RouterLink to="/" class="app-title">{{ t('app.title') }}</RouterLink>
-          <NMenu mode="horizontal" :options="menuOptions" :value="activeKey" class="app-menu" />
-          <NTag :type="healthTag.type" size="small" round>{{ healthTag.text }}</NTag>
-        </NLayoutHeader>
-        <NLayoutContent class="app-content">
-          <RouterView />
-        </NLayoutContent>
-      </NLayout>
+      <NDialogProvider>
+        <NLayout class="app-layout">
+          <NLayoutHeader bordered class="app-header">
+            <RouterLink to="/upload" class="app-title">{{ t('app.title') }}</RouterLink>
+            <NMenu mode="horizontal" :options="menuOptions" :value="activeKey" class="app-menu" />
+            <NTooltip>
+              <template #trigger>
+                <NTag
+                  :type="healthTag.type"
+                  size="small"
+                  round
+                  class="health-tag"
+                  data-testid="health-indicator"
+                  :data-state="health.state"
+                  @click="health.check()"
+                >
+                  {{ healthTag.text }}
+                </NTag>
+              </template>
+              {{ healthTooltip }}
+            </NTooltip>
+            <NButton size="small" quaternary data-testid="locale-toggle" @click="toggleLocale">
+              {{ locale === 'en' ? '中文' : 'EN' }}
+            </NButton>
+          </NLayoutHeader>
+          <NLayoutContent class="app-content">
+            <NAlert
+              v-if="health.unauthorized && route.name !== 'settings'"
+              type="warning"
+              closable
+              class="auth-banner"
+              data-testid="auth-banner"
+              @close="health.clearUnauthorized()"
+            >
+              {{ t('errors.unauthorized') }}
+              <RouterLink :to="{ name: 'settings' }">{{ t('errors.goToSettings') }}</RouterLink>
+            </NAlert>
+            <RouterView />
+          </NLayoutContent>
+        </NLayout>
+      </NDialogProvider>
     </NMessageProvider>
   </NConfigProvider>
 </template>
@@ -109,7 +174,16 @@ body,
   flex: 1;
 }
 
+.health-tag {
+  cursor: pointer;
+}
+
 .app-content {
   padding: 24px;
+}
+
+.auth-banner {
+  max-width: 1080px;
+  margin: 0 auto 16px;
 }
 </style>

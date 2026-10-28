@@ -1,34 +1,61 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
-import { api, type Schemas } from '@/api/client'
+import { getHealth, toApiError, type HealthOut } from '@/api'
 
 export type HealthState = 'idle' | 'checking' | 'connected' | 'error'
 
+const POLL_MS = 30_000
+
 export const useHealthStore = defineStore('health', () => {
   const state = ref<HealthState>('idle')
-  const info = ref<Schemas['HealthOut'] | null>(null)
+  const info = ref<HealthOut | null>(null)
   const error = ref<string | null>(null)
+  /** Set when any request got 401; cleared when the API key changes or a check succeeds with auth. */
+  const unauthorized = ref(false)
+  let timer: ReturnType<typeof setInterval> | null = null
 
   async function check(): Promise<void> {
-    state.value = 'checking'
-    error.value = null
+    if (state.value !== 'connected') state.value = 'checking'
     try {
-      const result = await api.GET('/api/health')
-      if (result.data) {
-        info.value = result.data
-        state.value = 'connected'
-      } else {
-        info.value = null
-        state.value = 'error'
-        error.value = `HTTP ${result.response.status}`
-      }
+      info.value = await getHealth()
+      state.value = 'connected'
+      error.value = null
     } catch (e) {
       info.value = null
       state.value = 'error'
-      error.value = e instanceof Error ? e.message : String(e)
+      error.value = toApiError(e).message
     }
   }
 
-  return { state, info, error, check }
+  function startPolling(): void {
+    if (timer) return
+    void check()
+    timer = setInterval(() => void check(), POLL_MS)
+  }
+
+  function stopPolling(): void {
+    if (timer) clearInterval(timer)
+    timer = null
+  }
+
+  function markUnauthorized(): void {
+    unauthorized.value = true
+  }
+
+  function clearUnauthorized(): void {
+    unauthorized.value = false
+  }
+
+  return {
+    state,
+    info,
+    error,
+    unauthorized,
+    check,
+    startPolling,
+    stopPolling,
+    markUnauthorized,
+    clearUnauthorized,
+  }
 })

@@ -51,6 +51,11 @@ export function getApiKey(): string | null {
   return readStorage(STORAGE_KEYS.apiKey)?.trim() || null
 }
 
+/** The backend URL from config.js alone (what applies when the Settings override is cleared). */
+export function getDefaultBackendUrl(): string {
+  return normalizeBaseUrl(window.__ASR_CONFIG__?.backendUrl)
+}
+
 /** Absolute (or same-origin relative) URL for a backend path such as `/api/jobs/1/events`. */
 export function apiUrl(path: string): string {
   return `${getBackendUrl()}${path}`
@@ -62,11 +67,29 @@ export function authHeaders(): Record<string, string> {
   return key ? { [API_KEY_HEADER]: key } : {}
 }
 
+type UnauthorizedListener = () => void
+const unauthorizedListeners = new Set<UnauthorizedListener>()
+
+/** Register a callback fired whenever the backend answers 401 (missing / wrong X-API-Key). */
+export function onUnauthorized(listener: UnauthorizedListener): () => void {
+  unauthorizedListeners.add(listener)
+  return () => unauthorizedListeners.delete(listener)
+}
+
+/** Called by every transport (typed client, XHR uploads, SSE, blob fetches) on a 401. */
+export function notifyUnauthorized(): void {
+  for (const listener of unauthorizedListeners) listener()
+}
+
 const authMiddleware: Middleware = {
   onRequest({ request }) {
     const key = getApiKey()
     if (key) request.headers.set(API_KEY_HEADER, key)
     return request
+  },
+  onResponse({ response }) {
+    if (response.status === 401) notifyUnauthorized()
+    return response
   },
 }
 
@@ -84,6 +107,13 @@ export function setBackendUrl(url: string | null): void {
   writeStorage(STORAGE_KEYS.backendUrl, normalizeBaseUrl(url) || null)
   api = createApiClient()
 }
+
+/** Raw localStorage override (empty when config.js / same origin applies). */
+export function getBackendUrlOverride(): string {
+  return normalizeBaseUrl(readStorage(STORAGE_KEYS.backendUrl))
+}
+
+export { normalizeBaseUrl, readStorage, writeStorage }
 
 /** Persist (or clear) the X-API-Key used for every request. */
 export function setApiKey(key: string | null): void {

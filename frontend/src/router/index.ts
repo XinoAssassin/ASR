@@ -1,7 +1,7 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
 const routes: RouteRecordRaw[] = [
-  { path: '/', name: 'home', component: () => import('@/views/HomeView.vue') },
+  { path: '/', redirect: { name: 'upload' } },
   { path: '/upload', name: 'upload', component: () => import('@/views/UploadView.vue') },
   { path: '/jobs', name: 'jobs', component: () => import('@/views/JobsView.vue') },
   {
