@@ -37,6 +37,7 @@ from asr.providers.base import (
     Transcript,
     TranscriptionProvider,
 )
+from server import storage
 from server.config import EffectiveSettings, EnvSettings, load_effective_settings
 from server.db import Database, utcnow
 from server.schemas import JobOut, JobStatus
@@ -357,9 +358,16 @@ class JobManager:
             upload = await self.db.get_upload(job.upload_id)
             if upload is None:
                 raise ProviderError("the uploaded audio no longer exists")
-            path = Path(upload.path)
-            if not await asyncio.to_thread(path.is_file):
-                raise ProviderError("the uploaded audio file is missing on the server")
+            try:
+                path = await asyncio.to_thread(
+                    storage.resolve_stored_file, upload.path, self.env.upload_roots
+                )
+            except storage.NotFoundError:
+                raise ProviderError("the uploaded audio file is missing on the server") from None
+            except storage.StorageError:
+                raise ProviderError(
+                    "the uploaded audio file resolves outside the upload roots"
+                ) from None
             source = AudioSource(path=path, probe=upload.probe)
         elif job.file_url is not None:
             source = AudioSource(url=job.file_url)

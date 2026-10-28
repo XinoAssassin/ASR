@@ -33,6 +33,8 @@ from asr.audio.formats import is_accepted
 from server.schemas import MAX_UPLOAD_SIZE
 
 PART_SIZE = 8 * 1024 * 1024  # 8 MiB (EXECUTION_LOG D11)
+MAX_OPEN_SESSIONS = 16  # concurrent chunked uploads; stale ones are cleaned after 24 h
+FREE_SPACE_MARGIN = 256 * 1024 * 1024  # keep this much disk free after an upload
 SESSION_TTL_S = 24 * 3600
 SESSIONS_DIRNAME = "upload-sessions"
 TMP_DIRNAME = "tmp"
@@ -100,6 +102,18 @@ class ConflictError(StorageError):
     status_code = 409
 
 
+class TooManySessionsError(StorageError):
+    """Too many chunked uploads in progress (HTTP 429)."""
+
+    status_code = 429
+
+
+class InsufficientStorageError(StorageError):
+    """Not enough free disk space for the declared upload (HTTP 507)."""
+
+    status_code = 507
+
+
 # --------------------------------------------------------------------------------- path checks
 def _norm(path: str | os.PathLike[str]) -> str:
     return os.path.normcase(os.path.realpath(path))
@@ -119,6 +133,21 @@ def containing_root(path: str | os.PathLike[str], roots: Sequence[Path]) -> Path
         if _is_within(real, _norm(root)):
             return Path(os.path.realpath(root))
     return None
+
+
+def resolve_stored_file(path: str | os.PathLike[str], roots: Sequence[Path]) -> Path:
+    """Re-validate a stored upload path right before it is read.
+
+    Files inside a root can be replaced by a symlink after upload / register, so the realpath must
+    still lie inside a root. Returns the realpath, so the caller opens the checked file rather than
+    following the link again.
+    """
+    real = Path(os.path.realpath(path))
+    if containing_root(real, roots) is None:
+        raise PathNotAllowedError("the stored audio file resolves outside the upload roots")
+    if not real.is_file():
+        raise NotFoundError("audio file no longer exists")
+    return real
 
 
 def _check_raw_path(path: str) -> None:
@@ -315,6 +344,15 @@ def create_session(
         raise UnsupportedFormatError(f"unsupported file type: {Path(filename).suffix or '(none)'}")
     target = resolve_target_dir(target_dir, roots)
     cleanup_stale_sessions(data_dir)
+    sessions = sessions_dir(data_dir)
+    if sessions.is_dir() and sum(1 for p in sessions.iterdir() if p.is_dir()) >= MAX_OPEN_SESSIONS:
+        raise TooManySessionsError(
+            f"too many uploads in progress (max {MAX_OPEN_SESSIONS}); finish or wait for them"
+        )
+    # Parts are written under data_dir and then moved into the target directory.
+    for where in (data_dir, target):
+        if shutil.disk_usage(where).free < size + FREE_SPACE_MARGIN:
+            raise InsufficientStorageError("not enough free disk space for this upload")
     session = UploadSession(
         session_id=secrets.token_urlsafe(24),
         filename=safe_filename(filename),

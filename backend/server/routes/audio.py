@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse
 
 from asr.audio.decode import AudioDecodeError
 from asr.audio.transcode import transcode_for_browser
+from server import storage
 from server.deps import DbDep, EnvDep
 
 router = APIRouter(prefix="/api/audio", tags=["audio"])
@@ -57,9 +58,10 @@ async def get_audio(upload_id: str, env: EnvDep, db: DbDep) -> FileResponse:
     upload = await db.get_upload(upload_id)
     if upload is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown upload")
-    source = Path(upload.path)
-    if not await run_in_threadpool(source.is_file):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "audio file no longer exists")
+    try:
+        source = await run_in_threadpool(storage.resolve_stored_file, upload.path, env.upload_roots)
+    except storage.StorageError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
 
     cache = env.data_dir / CACHE_SUBDIR / f"{upload_id}.mp3"
     if not await run_in_threadpool(_is_fresh, cache, source):
