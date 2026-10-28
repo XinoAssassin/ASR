@@ -128,7 +128,7 @@ def test_happy_path_temp_upload(router, work_dir, tmp_path, monkeypatch):
     assert transcript.provider == "cloud"
     assert [s.id for s in transcript.speakers] == [f"SPEAKER_0{i}" for i in range(4)]
     assert transcript.duration == pytest.approx(15.2)
-    assert transcript.language == "zh"
+    assert transcript.language is None
     starts = [s.start for s in transcript.segments]
     assert starts == sorted(starts)
     first = transcript.segments[0]
@@ -330,9 +330,10 @@ def test_select_right_channel(router, work_dir, tmp_path, monkeypatch):
     options = _options()
     options.preprocess.channels = "right"
     make_provider(work_dir).transcribe(AudioSource(path=make_audio(tmp_path)), options, Recorder())
-    assert fake.calls == []
+    (call,) = fake.calls  # extracted to mono: DashScope diarizes mono audio only
+    assert call["channel"] == 1 and call["channels"] == 1
     params = submitted_body(routes)["parameters"]
-    assert params["channel_id"] == [1]
+    assert params["channel_id"] == [0]
     assert params["diarization_enabled"] is True
 
 

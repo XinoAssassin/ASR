@@ -60,6 +60,24 @@ def test_transcode_flac_mono_is_channel_mean(tmp_path: Path, backend: str) -> No
     assert float(np.abs(x[500:-500]).max()) == pytest.approx(0.8, abs=0.01)
 
 
+def test_transcode_extracts_single_channel(tmp_path: Path, backend: str) -> None:
+    t = np.arange(48_000) / 48_000
+    left = (0.8 * np.sin(2 * np.pi * 300 * t)).astype(np.float32)
+    right = np.zeros_like(left)
+    src = write_audio(tmp_path, "wav_f32", samples=np.stack([left, right]))
+    for k, peak in ((0, 0.8), (1, 0.0)):
+        dst = transcode.transcode_audio(
+            src, tmp_path / f"c{k}.flac", fmt="flac", sample_rate=16_000, channels=None, channel=k
+        )
+        assert decode.probe(dst).channels == 1
+        x = decode.decode_pcm16k(dst)
+        assert float(np.abs(x[500:-500]).max()) == pytest.approx(peak, abs=0.01)
+    with pytest.raises(ValueError):
+        transcode.transcode_audio(
+            src, tmp_path / "bad.flac", fmt="flac", sample_rate=16_000, channels=None, channel=2
+        )
+
+
 def test_transcode_selects_stream(tmp_path: Path, backend: str) -> None:
     from tests.test_audio_fixtures import write_multistream
 

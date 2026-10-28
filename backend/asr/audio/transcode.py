@@ -39,10 +39,12 @@ def transcode_audio(
     channels: int | None,
     stream_index: int = 0,
     bitrate: int | None = None,
+    channel: int | None = None,
 ) -> Path:
     """Transcode one audio stream of ``src`` into ``dst``; ``channels=None`` keeps the layout.
 
-    ``channels=1`` downmixes (channel mean). MP3 carries at most two channels and only the
+    ``channels=1`` downmixes (channel mean); ``channel=k`` instead extracts source channel ``k``
+    as mono (``channels`` must then be ``None`` or 1). MP3 carries at most two channels and only the
     MPEG sample rates in ``MP3_RATES``; FLAC is 16-bit. ``bitrate`` (bits/s) applies to MP3
     only. Returns ``dst``. Raises ``ValueError`` for invalid parameters and
     ``AudioDecodeError`` when ``src`` cannot be decoded.
@@ -56,6 +58,12 @@ def transcode_audio(
         raise ValueError("sample_rate must be positive")
 
     meta = decode.stream_meta(src, stream_index)
+    if channel is not None:
+        if channels not in (None, 1):
+            raise ValueError("channel=k produces mono output; channels must be None or 1")
+        if not 0 <= channel < meta.channels:
+            raise ValueError(f"channel {channel} out of range for {meta.channels} channels")
+        channels = 1
     out_channels = meta.channels if channels is None else channels
     if out_channels not in (1, meta.channels):
         raise ValueError(f"channels must be None or 1 (or {meta.channels}), got {channels}")
@@ -78,6 +86,7 @@ def transcode_audio(
                 out_channels=out_channels,
                 stream_index=stream_index,
                 bitrate=bitrate,
+                channel=channel,
             )
         else:
             _transcode_pyav(
@@ -88,6 +97,7 @@ def transcode_audio(
                 out_channels=out_channels,
                 stream_index=stream_index,
                 bitrate=bitrate,
+                channel=channel,
             )
         with contextlib.suppress(OSError):  # mkstemp creates 0600; drvfs refuses chmod
             tmp.chmod(0o644)
@@ -139,6 +149,7 @@ def _transcode_pyav(
     out_channels: int,
     stream_index: int,
     bitrate: int | None,
+    channel: int | None = None,
 ) -> None:
     layout = _layout_name(out_channels)
     written = 0
@@ -147,7 +158,9 @@ def _transcode_pyav(
         if fmt == "mp3":
             stream.bit_rate = bitrate or BROWSER_MP3_BITRATE.get(out_channels, 96_000)
         for block in decode.iter_decoded(src, rate=sample_rate, stream_index=stream_index):
-            if out_channels == 1 and block.shape[0] > 1:
+            if channel is not None:
+                block = block[channel : channel + 1]
+            elif out_channels == 1 and block.shape[0] > 1:
                 block = block.mean(axis=0, dtype=np.float32, keepdims=True)
             if block.shape[0] != out_channels:
                 raise AudioDecodeError(f"channel count changed while decoding {src.name}")
@@ -174,6 +187,7 @@ def _transcode_imageio(
     out_channels: int,
     stream_index: int,
     bitrate: int | None,
+    channel: int | None = None,
 ) -> None:
     args = [
         decode.bundled_ffmpeg_exe(),
@@ -192,7 +206,9 @@ def _transcode_imageio(
         "-map_metadata",
         "-1",
     ]
-    if out_channels == 1 and in_channels > 1:
+    if channel is not None:
+        args += ["-af", f"pan=mono|c0=c{channel}"]
+    elif out_channels == 1 and in_channels > 1:
         # Plain channel mean; ``-ac 1`` would use FFmpeg's -3 dB-per-channel downmix matrix.
         gain = 1.0 / in_channels
         terms = "+".join(f"{gain:.6f}*c{i}" for i in range(in_channels))

@@ -322,7 +322,7 @@ class DashScopeFiletransProvider:
                 return to_transcript(
                     results,
                     per_channel=prepared.per_channel,
-                    language=options.language_hints[0] if options.language_hints else None,
+                    language=None,  # the result JSON carries no detected language
                     fallback_duration=prepared.duration,
                     warnings=warnings,
                 )
@@ -379,18 +379,22 @@ class DashScopeFiletransProvider:
         size = path.stat().st_size
 
         multi = probe.channels > 1
-        mono_target = resolved.mode in ("mono", "downmix") and multi
+        # DashScope diarizes mono audio only, so a selected channel is extracted to mono too.
+        select_channel = resolved.channel_ids[0] if resolved.mode == "select" else None
+        mono_target = (resolved.mode in ("mono", "downmix") and multi) or select_channel is not None
         need = mono_target or size > policy.max_bytes or stream_index != 0
         upload_path, upload_name = path, path.name
         if need:
             reason = (
-                "Downmixing to 16 kHz mono FLAC"
+                f"Extracting channel {select_channel} to 16 kHz mono FLAC"
+                if select_channel is not None
+                else "Downmixing to 16 kHz mono FLAC"
                 if mono_target
                 else "Transcoding to 16 kHz FLAC to fit the upload limit"
             )
             report("preparing", P_TRANSCODING, reason)
             upload_path = self._transcode(
-                path, probe, stream_index, mono_target, policy, temp_files
+                path, probe, stream_index, mono_target, policy, temp_files, select_channel
             )
             upload_name = f"{path.stem}{upload_path.suffix}"
             if time.monotonic() - policy_at > self._policy_ttl(policy):
@@ -398,9 +402,7 @@ class DashScopeFiletransProvider:
 
         if resolved.mode == "per_channel":
             channel_ids, per_channel = list(resolved.channel_ids), True
-        elif resolved.mode == "select":
-            channel_ids, per_channel = list(resolved.channel_ids), False
-        else:
+        else:  # mono, downmix, and select (already extracted to mono above)
             channel_ids, per_channel = [0], False
         return _Prepared(
             path=upload_path,
@@ -425,8 +427,9 @@ class DashScopeFiletransProvider:
         mono: bool,
         policy: UploadPolicy,
         temp_files: list[Path],
+        channel: int | None = None,
     ) -> Path:
-        """16 kHz FLAC (mono when downmixing); MP3 if the FLAC is still above the cap."""
+        """16 kHz FLAC (mono when downmixing or extracting ``channel``); MP3 if still too big."""
         self.work_dir.mkdir(parents=True, exist_ok=True)
         out_channels = 1 if mono else probe.channels
         stem = f"cloud-{uuid.uuid4().hex[:12]}"
@@ -440,6 +443,7 @@ class DashScopeFiletransProvider:
                 sample_rate=TARGET_RATE,
                 channels=1 if mono else None,
                 stream_index=stream_index,
+                channel=channel,
             )
         except ValueError as exc:
             raise ProviderError(f"Cannot transcode the audio file: {redact(str(exc))}") from None
@@ -457,6 +461,7 @@ class DashScopeFiletransProvider:
                     sample_rate=TARGET_RATE,
                     channels=1 if mono else None,
                     stream_index=stream_index,
+                    channel=channel,
                     bitrate=64_000 if out_channels == 1 else 96_000,
                 )
             except ValueError as exc:
