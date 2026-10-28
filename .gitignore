@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Runtime data (uploads, SQLite, model caches, logs)
+data/
+*.db
+*.db-journal
+models/
+.modelscope/
+.cache/
+logs/
+*.log
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Test audio fixtures larger than a few seconds live outside git
+tests/fixtures/*.wav
+tests/fixtures/*.mp3
+tests/fixtures/*.m4a
+!tests/fixtures/README.md
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local test audio (keep out of git)
+/*.m4a
+/*.wav
+/*.mp3
+

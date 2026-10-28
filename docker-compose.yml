@@ -1,0 +1,44 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend-cpu
+      # For NVIDIA hosts: target: backend-cuda, and uncomment the deploy block below.
+    environment:
+      ASR_UPLOAD_ROOTS: /data/uploads
+      ASR_DATA_DIR: /data
+      ASR_MODEL_CACHE_DIR: /models
+      ASR_API_KEY: ${ASR_API_KEY:-}
+      ASR_CORS_ORIGINS: ${ASR_CORS_ORIGINS:-http://localhost:8080}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      ASR_DEVICE: cpu
+    volumes:
+      - asr-data:/data
+      - asr-models:/models
+    ports:
+      - "8000:8000"
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: frontend
+    environment:
+      # Backend base URL baked into the static site at runtime via config.js
+      ASR_BACKEND_URL: ${ASR_BACKEND_URL:-http://localhost:8000}
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+
+volumes:
+  asr-data:
+  asr-models:
