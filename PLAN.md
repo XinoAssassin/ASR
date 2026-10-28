@@ -49,7 +49,7 @@ Browser ──HTTP(S)──▶ Frontend static site (nginx / any static host)
 ```
 
 - Fully separated: the frontend only knows the backend base URL (editable in Settings, persisted in the browser); the backend enables CORS with a configurable allow-list.
-- The backend is network-exposed, so it carries a simple `X-API-Key` header check (set via env/settings; empty disables it for single-machine use).
+- The backend is network-exposed, so it carries a simple `X-API-Key` header check (set via env; empty disables it for single-machine use, in which case only loopback `Host` names / `ASR_ALLOWED_HOSTS` are accepted and cross-site writes are refused — `docs/EXECUTION_LOG.md` D24).
 - Cloud calls are made by the **backend**: the DashScope key never reaches the browser, and the filetrans API requires the audio as a URL, so the server must relay the file anyway. Browser-direct cloud calls are rejected (key leakage, CORS, no file URL).
 
 ### 4.2 Provider abstraction

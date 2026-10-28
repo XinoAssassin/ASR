@@ -228,6 +228,11 @@ Errors: FastAPI default `{"detail": ...}`; 401 for missing/wrong `X-API-Key`, 40
 | D21 | `num_speakers=1` disables diarization (DashScope `speaker_count` is 2–100); `context` goes to `input.context` as ≤ 5 × 400-char messages; `Transcript.language` stays `None` (the result has no detected language) | Verified against the official filetrans HTTP API docs |
 | D22 | `UploadOut.registered` (schema v2): files registered in place are never deleted by `DELETE /api/jobs?delete_audio=true` | They are the user's own files, not uploads |
 | D23 | Unit-test fixtures for HTTP live in `backend/tests/fixtures/dashscope/` (modelled on the documented shapes, no real data); providers are injected in tests via `JobManager.provider_factory` / `server.jobs.default_provider_factory` | — |
+| D24 | Auth-disabled mode (empty `ASR_API_KEY`) accepts only loopback `Host` names plus `ASR_ALLOWED_HOSTS`, and refuses state-changing requests whose `Origin` is neither in `ASR_CORS_ORIGINS` nor loopback; a startup warning says auth is off | Phase 4 review M1: DNS rebinding and cross-site multipart POST (a CORS "simple" request) |
+| D25 | docker-compose publishes ports on `${ASR_BIND_ADDR:-127.0.0.1}` | Same finding; LAN exposure is an explicit opt-in together with `ASR_API_KEY` |
+| D26 | 422 responses drop `input` / `ctx` from validation errors | Review L1: a rejected DashScope key was echoed to the browser |
+| D27 | Stored upload paths are re-resolved and must stay inside a root before the audio route or a job reads them | Review L2: symlink swap after upload/register |
+| D28 | Chunked init: max 16 open sessions (429), free-space check on data dir and target (507); upload roots must not contain `ASR_DATA_DIR` (startup error) | Review L3 / L4 |
 
 ### Follow-ups (not in M0–M3 scope)
 - `JobOut.upload_name` / `JobOut.duration` to avoid one `GET /api/uploads/{id}` per row in the Jobs table.
@@ -247,5 +252,5 @@ Windows one). On native Windows delete both symlinks and run `uv sync` / `pnpm i
 - [x] Phase 0 — breakdown and contracts
 - [x] Phase 1 — scaffold (M0): ruff/pytest (8) green, typecheck/build clean, health via proxy OK; Docker not built (no daemon)
 - [x] Phase 2 — backend-core, backend-jobs, cloud-provider, frontend: 491 backend tests, 23 vitest, typecheck/build clean
-- [ ] Phase 3 — integrate, verify
-- [ ] Phase 4 — security review
+- [x] Phase 3 — integrate, verify: verifier at dbc5d3c — 9/10 rows PASS, M2-b and `docker compose build` BLOCKED (no key / no daemon); re-verification after Phase 4 in §6
+- [x] Phase 4 — security review: 0 High, 1 Medium, 4 Low, all fixed with regression tests (`backend/tests/test_security.py`)
