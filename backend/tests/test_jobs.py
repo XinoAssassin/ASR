@@ -263,6 +263,26 @@ async def test_cancel_while_running(
     assert (await client.post(f"/api/jobs/{job['id']}/cancel")).status_code == 409
 
 
+async def test_retry_right_after_cancel_runs_again(
+    app: FastAPI, client: httpx.AsyncClient, env: EnvSettings
+) -> None:
+    """The terminal status is only visible once the run is released, so an immediate retry is
+    never dropped as a duplicate of the finishing run."""
+    blocker = FakeProvider(block=True)
+    install(app, blocker)
+    upload = await add_upload(app, env)
+    job = (await client.post("/api/jobs", json={"upload_id": upload.id})).json()
+    await wait_for(blocker.started.is_set)
+    await client.post(f"/api/jobs/{job['id']}/cancel")
+    await wait_status(client, job["id"], {"cancelled"})
+    assert not app.state.job_manager.is_running(job["id"])
+
+    install(app, FakeProvider())
+    assert (await client.post(f"/api/jobs/{job['id']}/retry")).status_code == 200
+    done = await wait_status(client, job["id"], {"succeeded", "failed"})
+    assert done["status"] == "succeeded"
+
+
 async def test_cancel_while_queued_then_retry(
     app: FastAPI, client: httpx.AsyncClient, env: EnvSettings
 ) -> None:

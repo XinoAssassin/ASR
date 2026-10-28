@@ -87,6 +87,7 @@ class _Running:
     job: JobOut
     cancel: threading.Event = field(default_factory=threading.Event)
     finished: bool = False
+    released: bool = False
     last_write: float = 0.0
     flush_handle: asyncio.TimerHandle | None = None
     pending: set[asyncio.Task[None]] = field(default_factory=set)
@@ -300,7 +301,7 @@ class JobManager:
             return
         state = _Running(job=placeholder)
         self._running[job_id] = state
-        work_dir = self.env.data_dir / "work" / job_id
+        work_dir = self._work_dir(job_id)
         secrets: list[str] = []
         try:
             job = await self.db.transition_job(
@@ -345,8 +346,7 @@ class JobManager:
             state.finished = True
             if state.flush_handle is not None:
                 state.flush_handle.cancel()
-            self._running.pop(job_id, None)
-            shutil.rmtree(work_dir, ignore_errors=True)
+            await self._release(state)
 
     async def _execute(
         self, state: _Running, settings: EffectiveSettings, work_dir: Path
@@ -449,13 +449,32 @@ class JobManager:
             self._publish(job)
 
     async def _settle(self, state: _Running) -> None:
-        """Stop progress writes and wait for in-flight ones before the final write."""
+        """Stop progress writes and wait for in-flight ones before the final write.
+
+        Also releases the run's bookkeeping *before* the terminal status becomes visible: a retry
+        issued as soon as a client sees ``cancelled`` / ``failed`` must find the job no longer
+        running, or its queue entry would be dropped as a duplicate.
+        """
         state.finished = True
         if state.flush_handle is not None:
             state.flush_handle.cancel()
             state.flush_handle = None
         if state.pending:
             await asyncio.gather(*state.pending, return_exceptions=True)
+        await self._release(state)
+
+    def _work_dir(self, job_id: str) -> Path:
+        return self.env.data_dir / "work" / job_id
+
+    async def _release(self, state: _Running) -> None:
+        """Forget the run and remove its work dir; idempotent, never touches a newer run."""
+        if state.released:
+            return
+        state.released = True
+        job_id = state.job.id
+        if self._running.get(job_id) is state:
+            del self._running[job_id]
+        await asyncio.to_thread(shutil.rmtree, self._work_dir(job_id), True)
 
     # ---------------------------------------------------------------------------- finish
     async def _finish(self, state: _Running, *, status: JobStatus, error: str | None) -> None:
