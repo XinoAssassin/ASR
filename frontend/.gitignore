@@ -1,0 +1,5 @@
+# No trailing slash: on WSL/drvfs checkouts node_modules is a symlink (scripts/wsl-install.sh).
+/node_modules
+/dist
+/.vite
+*.local

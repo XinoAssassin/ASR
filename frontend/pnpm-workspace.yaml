@@ -1,0 +1,4 @@
+# pnpm settings (no workspace packages).
+# Do not auto-install before `pnpm run`: with the WSL mirror install (scripts/wsl-install.sh) the
+# check always reports a mismatch. Run `pnpm install` yourself after changing dependencies.
+verifyDepsBeforeRun: false
