@@ -102,9 +102,10 @@ CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8000"]
 
 # ------------------------------------------------------------- frontend build
 FROM node:26-alpine AS frontend-build
-RUN corepack enable
+# Node >= 25 no longer bundles corepack; pin pnpm to frontend/package.json "packageManager".
+RUN npm install -g pnpm@12.14.0
 WORKDIR /app/frontend
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 COPY frontend/ ./

@@ -1,0 +1,39 @@
+# Keep the build context small and free of secrets / local state.
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+
+# Python
+**/.venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+
+# Node
+**/node_modules
+frontend/dist
+frontend/.vite
+
+# Runtime data, models, audio
+data
+backend/data
+models
+backend/models
+tests/fixtures
+backend/tests/fixtures
+**/*.m4a
+**/*.wav
+**/*.mp3
+**/*.flac
+**/*.db
+**/*.log
+
+# Editors / OS
+.vscode
+.idea
+**/.DS_Store
+**/Thumbs.db
