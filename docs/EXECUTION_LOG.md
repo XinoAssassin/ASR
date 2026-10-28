@@ -219,11 +219,23 @@ Errors: FastAPI default `{"detail": ...}`; 401 for missing/wrong `X-API-Key`, 40
 | D12 | Browser audio is a cached MP3 transcode, generated lazily on first `GET /api/audio/{id}` and served with `FileResponse` (Range) | Universal playback incl. Safari; Range seeking |
 | D13 | Jobs left `running` at server start are marked `failed` ("interrupted by restart"); retry re-queues the same job | Simplest consistent state |
 | D14 | `PATCH /api/transcripts` implements `edit_text` / `set_speaker` only; `split` / `merge_segments` arrive with M7 | M7 scope; contract left open for the extra ops |
+| D15 | Path params are named `{upload_id}`, `{session_id}`, `{job_id}`, `{transcript_id}`, `{term_set_id}`; `TranscriptPatch.ops` is a discriminated union | Phase 1; wire format unchanged |
+| D16 | `file_transfer` accepts `temp_upload` or `public_url` only; `oss` is rejected until implemented | Phase 1; no silent fallback |
+| D17 | Effective provider = `JobCreate.provider` → `options.provider` (if set) → settings default | Phase 1 |
+| D18 | Chunked-upload sessions live on disk (`storage.py`), not in SQLite | Phase 1 |
+| D19 | torch pinned `==2.14.1` in both extras (newest on the cu126 index) | Phase 1 |
+
+### drvfs workarounds (WSL only)
+`/mnt/d` refuses `chmod`/`utime`, which breaks in-repo venv and node_modules installs. Hence:
+`backend/.venv` → symlink to `~/.local/share/asr/backend-venv`; `frontend/node_modules` → symlink into
+`~/.local/share/asr/frontend-env`, installed with `PNPM=~/.local/bin/pnpm sh scripts/wsl-install.sh`
+(never a plain `pnpm install` from WSL). Use Linux pnpm at `~/.local/bin/pnpm` (the `pnpm` on PATH is the
+Windows one). On native Windows delete both symlinks and run `uv sync` / `pnpm install`.
 
 ## 5. Progress
 
 - [x] Phase 0 — breakdown and contracts
-- [ ] Phase 1 — scaffold (M0)
+- [x] Phase 1 — scaffold (M0): ruff/pytest (8) green, typecheck/build clean, health via proxy OK; Docker not built (no daemon)
 - [ ] Phase 2 — backend-core, backend-jobs, cloud-provider, frontend
 - [ ] Phase 3 — integrate, verify
 - [ ] Phase 4 — security review
