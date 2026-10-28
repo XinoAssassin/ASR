@@ -224,6 +224,16 @@ Errors: FastAPI default `{"detail": ...}`; 401 for missing/wrong `X-API-Key`, 40
 | D17 | Effective provider = `JobCreate.provider` → `options.provider` (if set) → settings default | Phase 1 |
 | D18 | Chunked-upload sessions live on disk (`storage.py`), not in SQLite | Phase 1 |
 | D19 | torch pinned `==2.14.1` in both extras (newest on the cu126 index) | Phase 1 |
+| D20 | Amends D8: `select k` (left/right) extracts channel k to 16 kHz mono FLAC and sends `channel_id=[0]` with diarization on; `stream_index != 0` always transcodes; FLAC still over the cap falls back to MP3 (64/96 kbit/s) before failing | DashScope diarizes mono audio only (official docs) |
+| D21 | `num_speakers=1` disables diarization (DashScope `speaker_count` is 2–100); `context` goes to `input.context` as ≤ 5 × 400-char messages; `Transcript.language` stays `None` (the result has no detected language) | Verified against the official filetrans HTTP API docs |
+| D22 | `UploadOut.registered` (schema v2): files registered in place are never deleted by `DELETE /api/jobs?delete_audio=true` | They are the user's own files, not uploads |
+| D23 | Unit-test fixtures for HTTP live in `backend/tests/fixtures/dashscope/` (modelled on the documented shapes, no real data); providers are injected in tests via `JobManager.provider_factory` / `server.jobs.default_provider_factory` | — |
+
+### Follow-ups (not in M0–M3 scope)
+- `JobOut.upload_name` / `JobOut.duration` to avoid one `GET /api/uploads/{id}` per row in the Jobs table.
+- `POST /api/uploads/register` could return the existing upload for an already-registered path.
+- `GET /api/uploads/{id}?stream_index=` to re-probe another track of a multi-track file (OBS selector, M6+).
+- Confirm on a live run: `max_file_size_mb` for this model, and getPolicy on the Qianwen / workspace endpoints.
 
 ### drvfs workarounds (WSL only)
 `/mnt/d` refuses `chmod`/`utime`, which breaks in-repo venv and node_modules installs. Hence:
@@ -236,6 +246,6 @@ Windows one). On native Windows delete both symlinks and run `uv sync` / `pnpm i
 
 - [x] Phase 0 — breakdown and contracts
 - [x] Phase 1 — scaffold (M0): ruff/pytest (8) green, typecheck/build clean, health via proxy OK; Docker not built (no daemon)
-- [ ] Phase 2 — backend-core, backend-jobs, cloud-provider, frontend
+- [x] Phase 2 — backend-core, backend-jobs, cloud-provider, frontend: 491 backend tests, 23 vitest, typecheck/build clean
 - [ ] Phase 3 — integrate, verify
 - [ ] Phase 4 — security review
