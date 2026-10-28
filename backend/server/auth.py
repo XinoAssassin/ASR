@@ -8,8 +8,9 @@ An empty ``ASR_API_KEY`` disables the key check (single-machine use). Because an
 visits can then reach the API, open mode adds two browser-facing guards:
 
 - the ``Host`` header must be a loopback name or listed in ``ASR_ALLOWED_HOSTS`` (DNS rebinding);
-- state-changing requests carrying an ``Origin`` outside ``ASR_CORS_ORIGINS`` are refused
-  (cross-site "simple" requests such as a multipart form POST bypass CORS preflight).
+- state-changing requests carrying an ``Origin`` that is neither in ``ASR_CORS_ORIGINS`` nor a
+  loopback origin are refused (cross-site "simple" requests such as a multipart form POST bypass
+  CORS preflight; a page on another site can never send a loopback ``Origin``).
 """
 
 import hmac
@@ -34,6 +35,11 @@ def _header(scope: Scope, name: bytes) -> str | None:
         if key == name:
             return value.decode("latin-1")
     return None
+
+
+def _is_loopback_origin(origin: str) -> bool:
+    scheme, sep, rest = origin.strip().lower().partition("://")
+    return bool(sep) and scheme in ("http", "https") and host_name(rest) in LOOPBACK_HOSTS
 
 
 def host_name(host_header: str) -> str:
@@ -81,6 +87,7 @@ class ApiKeyMiddleware:
             scope.get("method") not in _SAFE_METHODS
             and origin is not None
             and origin.rstrip("/") not in self.allowed_origins
+            and not _is_loopback_origin(origin)
         ):
             return JSONResponse({"detail": "Cross-site request refused"}, status_code=403)
         return None

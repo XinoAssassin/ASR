@@ -46,6 +46,20 @@ async def test_open_mode_rejects_cross_site_writes(client: httpx.AsyncClient) ->
         "/api/uploads", data={"target_dir": ""}, files=files, headers={"Origin": ALLOWED_ORIGIN}
     )
     assert r.status_code == 201
+    # Loopback origins (the same SPA opened as 127.0.0.1, another dev port) are local.
+    files = {"file": ("local.wav", wav_bytes(0.2))}
+    for origin in ("http://127.0.0.1:5173", "http://[::1]:8080", "http://localhost:4000"):
+        r = await client.post(
+            "/api/uploads", data={"target_dir": ""}, files=files, headers={"Origin": origin}
+        )
+        assert r.status_code == 201, origin
+    r = await client.post(
+        "/api/uploads",
+        data={"target_dir": ""},
+        files=files,
+        headers={"Origin": "http://localhost.evil.example"},
+    )
+    assert r.status_code == 403
     # Safe methods are left to CORS (the browser cannot read the response).
     r = await client.get("/api/fs/roots", headers={"Origin": "http://evil.example"})
     assert r.status_code == 200
