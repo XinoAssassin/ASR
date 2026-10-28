@@ -1,0 +1,210 @@
+"""Settings overlay, masking, endpoint allow-list, api_key write-only semantics, test-cloud."""
+
+from typing import Any
+
+import httpx
+import pytest
+from pydantic import SecretStr
+
+from asr.providers import cloud as cloud_provider
+from asr.providers.base import ConnectionTestResult
+from server.config import EnvSettings, effective_settings, mask_secret
+from tests.conftest import ClientFactory, EnvFactory
+
+ENV_KEY = "sk-envkey-abcdefgh1111"
+NEW_KEY = "sk-test-1234567890abcd"
+
+
+@pytest.fixture(autouse=True)
+def fake_cloud(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Stand-ins for the cloud provider helpers (no network)."""
+    calls: list[dict[str, Any]] = []
+
+    def is_allowed(url: str) -> bool:
+        return url in cloud_provider.ALLOWED_ENDPOINTS or url.endswith(
+            ".cn-beijing.maas.aliyuncs.com"
+        )
+
+    def test_connection(**kwargs: Any) -> ConnectionTestResult:
+        calls.append(kwargs)
+        return ConnectionTestResult(ok=True, message="ok", max_file_size_mb=2048)
+
+    monkeypatch.setattr(cloud_provider, "is_allowed_endpoint", is_allowed)
+    monkeypatch.setattr(cloud_provider, "test_connection", test_connection)
+    return calls
+
+
+def test_mask_secret() -> None:
+    assert mask_secret(None) is None
+    assert mask_secret("") is None
+    assert mask_secret(SecretStr("")) is None
+    assert mask_secret(SecretStr(NEW_KEY)) == "sk-****abcd"
+    assert mask_secret("abcdefghijklmnop") == "****mnop"
+    assert mask_secret("short") == "****"
+
+
+def test_effective_settings_overlay(env: EnvSettings) -> None:
+    eff = effective_settings(env, {})
+    assert eff.provider_default == "cloud" and eff.cloud_model == env.cloud_model
+    eff = effective_settings(
+        env,
+        {
+            "cloud.model": "m2",
+            "cloud.api_key": NEW_KEY,
+            "provider_default": "bogus",  # invalid stored values are ignored
+            "local.device": "cuda",
+        },
+    )
+    assert eff.cloud_model == "m2"
+    assert eff.cloud_api_key.get_secret_value() == NEW_KEY
+    assert eff.provider_default == "cloud"
+    assert eff.local_device == "cuda"
+    assert NEW_KEY not in repr(eff) and NEW_KEY not in str(eff)
+
+
+async def test_get_defaults(client: httpx.AsyncClient, env: EnvSettings) -> None:
+    body = (await client.get("/api/settings")).json()
+    assert body == {
+        "provider_default": "cloud",
+        "api_key_required": False,
+        "upload_roots": [str(r) for r in env.upload_roots],
+        "local": {
+            "asr_model": None,
+            "diarize_model": None,
+            "device": "cpu",
+            "model_cache_dir": str(env.model_cache_dir),
+        },
+        "cloud": {
+            "endpoint": "https://dashscope.aliyuncs.com",
+            "model": "qwen-audio-3.1-asr-flash-filetrans",
+            "file_transfer": "temp_upload",
+            "api_key_set": False,
+            "api_key_masked": None,
+        },
+    }
+
+
+async def test_api_key_set_and_clear(env_factory: EnvFactory, make_client: ClientFactory) -> None:
+    async with make_client(env_factory(DASHSCOPE_API_KEY=ENV_KEY)) as c:
+        body = (await c.get("/api/settings")).json()
+        assert body["cloud"]["api_key_set"] is True
+        assert body["cloud"]["api_key_masked"] == "sk-****1111"
+
+        resp = await c.put("/api/settings", json={"cloud": {"api_key": NEW_KEY}})
+        assert resp.status_code == 200
+        assert NEW_KEY not in resp.text
+        assert resp.json()["cloud"]["api_key_masked"] == "sk-****abcd"
+
+        # Omitted leaves it.
+        resp = await c.put("/api/settings", json={"cloud": {"model": "other-model"}})
+        assert resp.json()["cloud"]["api_key_masked"] == "sk-****abcd"
+        assert resp.json()["cloud"]["model"] == "other-model"
+
+        # "" clears the override -> env value applies again.
+        resp = await c.put("/api/settings", json={"cloud": {"api_key": ""}})
+        assert resp.json()["cloud"]["api_key_masked"] == "sk-****1111"
+
+        for path in ("/api/settings", "/openapi.json"):
+            text = (await c.get(path)).text
+            assert NEW_KEY not in text and ENV_KEY not in text
+
+
+async def test_api_key_clear_without_env(client: httpx.AsyncClient) -> None:
+    await client.put("/api/settings", json={"cloud": {"api_key": NEW_KEY}})
+    assert (await client.get("/api/settings")).json()["cloud"]["api_key_set"] is True
+    body = (await client.put("/api/settings", json={"cloud": {"api_key": ""}})).json()
+    assert body["cloud"] == {**body["cloud"], "api_key_set": False, "api_key_masked": None}
+    bad = await client.put("/api/settings", json={"cloud": {"api_key": "sk-a b"}})
+    assert bad.status_code == 422
+    assert "sk-a b" not in bad.text
+
+
+async def test_partial_update(client: httpx.AsyncClient) -> None:
+    resp = await client.put(
+        "/api/settings",
+        json={
+            "provider_default": "local",
+            "local": {"asr_model": "Qwen/Qwen3-ASR-0.6B", "device": "cuda"},
+            "cloud": {
+                "endpoint": "https://cn-beijing.maas.qianwenaiapi.com/",
+                "file_transfer": "public_url",
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["provider_default"] == "local"
+    assert body["local"]["asr_model"] == "Qwen/Qwen3-ASR-0.6B"
+    assert body["local"]["device"] == "cuda"
+    assert body["local"]["diarize_model"] is None
+    assert body["cloud"]["endpoint"] == "https://cn-beijing.maas.qianwenaiapi.com"
+    assert body["cloud"]["file_transfer"] == "public_url"
+    assert (await client.get("/api/settings")).json() == body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"cloud": {"endpoint": "https://evil.example.com"}},
+        {"cloud": {"endpoint": "http://dashscope.aliyuncs.com"}},
+        {"cloud": {"file_transfer": "oss"}},
+        {"cloud": {"model": ""}},
+        {"cloud": {"model": "   "}},
+        {"provider_default": "other"},
+        {"local": {"device": "tpu"}},
+    ],
+)
+async def test_rejected_updates(client: httpx.AsyncClient, body: dict[str, Any]) -> None:
+    before = (await client.get("/api/settings")).json()
+    assert (await client.put("/api/settings", json=body)).status_code == 422
+    assert (await client.get("/api/settings")).json() == before
+
+
+async def test_env_only_fields_ignored(client: httpx.AsyncClient, env: EnvSettings) -> None:
+    resp = await client.put(
+        "/api/settings", json={"api_key_required": True, "upload_roots": ["/etc"]}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["api_key_required"] is False
+    assert body["upload_roots"] == [str(r) for r in env.upload_roots]
+
+
+async def test_test_cloud_without_key_makes_no_call(
+    client: httpx.AsyncClient, fake_cloud: list[dict[str, Any]]
+) -> None:
+    body = (await client.post("/api/settings/test-cloud")).json()
+    assert body["ok"] is False and "not configured" in body["message"]
+    assert fake_cloud == []
+
+
+async def test_test_cloud_uses_effective_settings(
+    client: httpx.AsyncClient, fake_cloud: list[dict[str, Any]]
+) -> None:
+    await client.put("/api/settings", json={"cloud": {"api_key": NEW_KEY, "model": "m"}})
+    resp = await client.post("/api/settings/test-cloud")
+    assert resp.json() == {"ok": True, "message": "ok", "max_file_size_mb": 2048}
+    assert fake_cloud == [
+        {"api_key": NEW_KEY, "endpoint": "https://dashscope.aliyuncs.com", "model": "m"}
+    ]
+    assert NEW_KEY not in resp.text
+
+
+async def test_test_cloud_exception_is_generic(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def boom(**kwargs: Any) -> ConnectionTestResult:
+        raise RuntimeError(f"leak {kwargs['api_key']}")
+
+    monkeypatch.setattr(cloud_provider, "test_connection", boom)
+    await client.put("/api/settings", json={"cloud": {"api_key": NEW_KEY}})
+    resp = await client.post("/api/settings/test-cloud")
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is False
+    assert NEW_KEY not in resp.text and NEW_KEY not in caplog.text
+
+
+async def test_local_models(client: httpx.AsyncClient) -> None:
+    models = (await client.get("/api/settings/local-models")).json()
+    assert models and all(m["downloaded"] is False for m in models)
+    assert {m["kind"] for m in models} == {"asr", "aligner", "vad", "diarization"}

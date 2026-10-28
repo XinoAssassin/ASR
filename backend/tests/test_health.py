@@ -26,7 +26,7 @@ async def test_lifespan_creates_dirs_and_db(client: httpx.AsyncClient, env: EnvS
 
 async def test_no_key_configured_allows_protected_routes(client: httpx.AsyncClient) -> None:
     resp = await client.get("/api/settings")
-    assert resp.status_code == 501  # stub until backend-jobs; not 401
+    assert resp.status_code == 200  # not 401
 
 
 async def test_api_key_enforced(api_key_env: EnvSettings, make_client: ClientFactory) -> None:
@@ -39,7 +39,7 @@ async def test_api_key_enforced(api_key_env: EnvSettings, make_client: ClientFac
         assert (await c.get("/api/settings", headers={"X-API-Key": "wrong"})).status_code == 401
         # Header only, never the query string (D6).
         assert (await c.get(f"/api/settings?api_key={API_KEY}")).status_code == 401
-        assert (await c.get("/api/settings", headers={"X-API-Key": API_KEY})).status_code == 501
+        assert (await c.get("/api/settings", headers={"X-API-Key": API_KEY})).status_code == 200
 
         assert (await c.get("/openapi.json")).status_code == 200
 
