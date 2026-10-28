@@ -254,3 +254,23 @@ Windows one). On native Windows delete both symlinks and run `uv sync` / `pnpm i
 - [x] Phase 2 — backend-core, backend-jobs, cloud-provider, frontend: 491 backend tests, 23 vitest, typecheck/build clean
 - [x] Phase 3 — integrate, verify: verifier at dbc5d3c — 9/10 rows PASS, M2-b and `docker compose build` BLOCKED (no key / no daemon); re-verification after Phase 4 in §6
 - [x] Phase 4 — security review: 0 High, 1 Medium, 4 Low, all fixed with regression tests (`backend/tests/test_security.py`)
+
+## 6. Final verification (2026-10-29)
+
+Independent verifier on a clean clone at `dbc5d3c` (all rows), re-run at `1a37b63` after the Phase 4
+fixes (M1-a, M3-a, M3-b, guards, compose). Two later fixes (`4f8f5ab` config-error secret leak found
+by the re-run, `a628bbb` job release race) were checked by the lead from a clean clone of `a628bbb`:
+ruff clean, pytest 506 passed / 4 skipped (×3), typecheck / build / vitest 23 clean, OpenAPI and TS
+client unchanged on regeneration.
+
+| Row | Result | Notes |
+|---|---|---|
+| M0-a health | PASS | |
+| M0-b dev page reaches backend | PASS | Vite proxy + headless Chromium shows "已连接" |
+| M0-c `docker compose build` | BLOCKED | No Docker daemon / compose plugin on this host. Static checks pass (lock resolves cpu+cuda extras, COPY paths, base image tags exist, frontend stage emulated) |
+| M1-a ruff + pytest incl. traversal / probe | PASS | |
+| M1-b curl flow on the test clip | PASS | Upload → probe (aac 48 kHz 2 ch, 1888 s, downmix, r = 1.0) → audio Range 206 → job → SSE → clean 401 failure with an invalid key |
+| M2-a offline cloud tests | PASS | Fixtures are modelled on documented shapes, not recorded traffic |
+| M2-b live 4-speaker Transcript | BLOCKED | No `DASHSCOPE_API_KEY`. Run `cd backend && uv run python scripts/live_cloud_test.py ../ASR_4people-test.m4a --num-speakers 4` |
+| M3-a typecheck / build | PASS | |
+| M3-b browser flow | PASS (fake provider) / BLOCKED (real cloud) | Real UI + backend up to a failed cloud job; full upload → SSE → transcript → seek → export with a stand-in provider, with and without `ASR_API_KEY` |
