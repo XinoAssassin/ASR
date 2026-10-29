@@ -1,0 +1,313 @@
+"""Local provider: [0] decode -> [1] VAD -> [2] ASR -> [3] align -> [4] diarize -> [5] merge.
+
+Channel policy (PLAN §4.5 [0b]): mono / downmix / a selected channel give one track; ``per_channel``
+gives one track per channel, where channel 0 is diarized (remote side, possibly several people) and
+every other channel is one known speaker (local mic, the other phone party). Models load lazily and
+are cached per process; jobs run one at a time on the local worker.
+"""
+
+from __future__ import annotations
+
+import os
+import threading
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Protocol
+
+import numpy as np
+
+from asr.audio import channels as audio_channels
+from asr.audio import decode as audio_decode
+from asr.audio.preprocess import clipping_ratio, peak_safety_gain
+from asr.providers.base import (
+    AudioSource,
+    JobOptions,
+    ProgressCallback,
+    ProgressEvent,
+    ProviderError,
+    Transcript,
+    make_speakers,
+    speaker_id,
+)
+from asr.providers.local.device import resolve_dtype
+from asr.providers.local.merge import ChunkResult, SpeakerTurn, Token, build_segments
+from asr.providers.local.models import ModelNotDownloaded, spec
+from asr.providers.local.vad import SAMPLE_RATE, cut, merge_segments
+
+MAX_CHUNK_S = 25.0
+CLIPPING_WARN_RATIO = 1e-3
+
+
+# ------------------------------------------------------------------------------- engine protocols
+class Vad(Protocol):
+    def segments(self, audio: np.ndarray) -> list[tuple[float, float]]: ...
+
+
+class AsrEngine(Protocol):
+    def transcribe(
+        self,
+        chunks: Sequence[np.ndarray],
+        *,
+        language: str | None = ...,
+        terms: Sequence[str] = ...,
+        context: str | None = ...,
+    ) -> list[str]: ...
+
+
+class Aligner(Protocol):
+    def align(self, audio: np.ndarray, text: str, *, language: str = ...) -> list[Any]: ...
+
+
+class Diarizer(Protocol):
+    def diarize(
+        self, audio: np.ndarray, speech: Sequence[tuple[float, float]], *, num_speakers: int | None
+    ) -> list[Any]: ...
+
+
+@dataclass
+class LocalEngines:
+    vad: Vad
+    asr: AsrEngine
+    aligner: Aligner | None  # None when the ASR engine emits its own timestamps (Paraformer)
+    diarizer: Diarizer
+
+
+def default_asr_model(device: str = "cpu") -> str:
+    """M4 decision (docs/M4_BAKEOFF.md): 1.7B where bf16 is native, 0.6B otherwise."""
+    return (
+        "qwen3-asr-1.7b" if resolve_dtype("auto", device=device) == "bfloat16" else "qwen3-asr-0.6b"
+    )
+
+
+def configure_threads() -> int:
+    """CPU inference threads: ``ASR_TORCH_THREADS``, default min(16, CPU count) (M4 setting)."""
+    import torch
+
+    raw = os.environ.get("ASR_TORCH_THREADS", "").strip()
+    threads = int(raw) if raw.isdigit() and int(raw) > 0 else min(16, os.cpu_count() or 4)
+    torch.set_num_threads(threads)
+    return threads
+
+
+_ENGINE_CACHE: dict[tuple[str, str, str, str], LocalEngines] = {}
+_ENGINE_LOCK = threading.Lock()
+
+
+def load_engines(cache_dir: Path, asr_model: str, *, device: str, dtype: str) -> LocalEngines:
+    """Load (or reuse) the models for one ASR choice. Never downloads (AGENTS rule 6)."""
+    key = (str(cache_dir), asr_model, device, dtype)
+    with _ENGINE_LOCK:
+        if key in _ENGINE_CACHE:
+            return _ENGINE_CACHE[key]
+        if device == "cpu":
+            configure_threads()
+        try:
+            s = spec(asr_model)
+        except KeyError as exc:
+            raise ProviderError(str(exc.args[0])) from None
+        if s.kind != "asr":
+            raise ProviderError(f"{asr_model!r} is not an ASR model")
+        try:
+            from asr.providers.local.diar_campplus import CamPlusDiarizer
+            from asr.providers.local.vad import FsmnVad
+
+            if s.engine == "funasr":
+                from asr.providers.local.asr_paraformer import ParaformerAsr
+
+                asr: Any = ParaformerAsr(cache_dir, device=device)
+                aligner: Aligner | None = None
+            else:
+                from asr.providers.local.align import ForcedAligner
+                from asr.providers.local.asr_transformers import TransformersAsr
+
+                asr = TransformersAsr(cache_dir, asr_model, device=device, dtype=dtype)
+                aligner = ForcedAligner(cache_dir, device=device, dtype=dtype)
+            engines = LocalEngines(
+                vad=FsmnVad(cache_dir, device=device),
+                asr=asr,
+                aligner=aligner,
+                diarizer=CamPlusDiarizer(cache_dir, device=device),
+            )
+        except ModelNotDownloaded as exc:
+            raise ProviderError(str(exc)) from None
+        _ENGINE_CACHE.clear()  # keep one model set in memory at a time
+        _ENGINE_CACHE[key] = engines
+        return engines
+
+
+# --------------------------------------------------------------------------------------- provider
+@dataclass
+class _Track:
+    channel: int | None  # None = downmix of all channels
+    diarize: bool
+    audio: np.ndarray
+
+
+class LocalPipelineProvider:
+    name = "local"
+
+    def __init__(
+        self,
+        *,
+        cache_dir: Path,
+        asr_model: str | None = None,
+        device: str = "cpu",
+        dtype: str = "auto",
+        engines: LocalEngines | None = None,
+        max_chunk: float = MAX_CHUNK_S,
+    ) -> None:
+        self.cache_dir = Path(cache_dir)
+        self.device = device
+        self.dtype = dtype
+        self.asr_model = asr_model or default_asr_model(device)
+        self._engines = engines
+        self.max_chunk = max_chunk
+
+    def transcribe(
+        self, source: AudioSource, options: JobOptions, progress: ProgressCallback
+    ) -> Transcript:
+        if source.path is None:
+            raise ProviderError("The local provider needs an uploaded file, not a URL")
+        warnings: list[str] = []
+
+        def report(stage: str, value: float, message: str | None = None) -> None:
+            progress(
+                ProgressEvent(stage=stage, progress=min(max(value, 0.0), 1.0), message=message)
+            )
+
+        report("decoding", 0.01, "Decoding audio")
+        tracks, duration = self._decode(Path(source.path), source, options, warnings)
+        engines = self._engines or load_engines(
+            self.cache_dir, self.asr_model, device=self.device, dtype=self.dtype
+        )
+        terms = [t.term for t in options.terms]
+        language = _language(options.language_hints)
+        single_speaker = options.num_speakers == 1
+
+        all_segments = []
+        next_label = 0
+        share = 0.95 / len(tracks)
+        for index, track in enumerate(tracks):
+            base = 0.03 + index * share
+
+            def at(fraction: float, base: float = base) -> float:
+                return base + fraction * share
+
+            report("vad", at(0.0), "Detecting speech")
+            speech = engines.vad.segments(track.audio)
+            spans = merge_segments(speech, max_len=self.max_chunk)
+            pieces = cut(track.audio, spans)
+
+            chunks = self._recognise(
+                engines, pieces, spans, terms, options.context, language, report, at, warnings
+            )
+
+            if track.diarize and not single_speaker and speech:
+                report("diarizing", at(0.85), "Identifying speakers")
+                raw_turns = engines.diarizer.diarize(
+                    track.audio, speech, num_speakers=options.num_speakers
+                )
+                labels = sorted({t.label for t in raw_turns})
+                names = {lab: speaker_id(next_label + i) for i, lab in enumerate(labels)}
+                next_label += max(len(labels), 1)
+                turns = [SpeakerTurn(t.start, t.end, names[t.label]) for t in raw_turns]
+                fallback = names[labels[0]] if labels else speaker_id(next_label - 1)
+            else:
+                fixed = speaker_id(next_label)
+                next_label += 1
+                for c in chunks:
+                    c.speaker = fixed
+                turns, fallback = [], fixed
+
+            report("merging", at(0.97), "Building transcript")
+            all_segments.extend(build_segments(chunks, turns, default_speaker=fallback))
+
+        all_segments.sort(key=lambda s: (s.start, s.end))
+        segments = [s.model_copy(update={"id": f"seg_{i:05d}"}) for i, s in enumerate(all_segments)]
+        report("merging", 1.0, "Done")
+        return Transcript(
+            provider="local",
+            duration=duration,
+            language=None,
+            speakers=make_speakers(s.speaker_id for s in segments),
+            segments=segments,
+            warnings=warnings,
+        )
+
+    # ---------------------------------------------------------------------------------- stages
+    def _decode(
+        self, path: Path, source: AudioSource, options: JobOptions, warnings: list[str]
+    ) -> tuple[list[_Track], float]:
+        stream = options.preprocess.stream_index
+        try:
+            probe = source.probe or audio_decode.probe(path, stream)
+            resolved = audio_channels.resolve_channels(probe, options.preprocess.channels)
+        except ValueError as exc:
+            raise ProviderError(f"Cannot read the audio file: {exc}") from None
+        if resolved.mode == "per_channel":
+            plan = [(ch, i == 0) for i, ch in enumerate(resolved.channel_ids)]
+        elif resolved.mode == "select":
+            plan = [(resolved.channel_ids[0], True)]
+        else:
+            plan = [(None, True)]
+        tracks = []
+        for channel, diarize in plan:
+            try:
+                audio = audio_decode.decode_pcm16k(path, channel=channel, stream_index=stream)
+            except ValueError as exc:
+                raise ProviderError(f"Cannot decode the audio file: {exc}") from None
+            ratio = clipping_ratio(audio)
+            if ratio > CLIPPING_WARN_RATIO:
+                where = "" if channel is None else f" (channel {channel})"
+                warnings.append(f"Audio clips on {ratio:.2%} of samples{where}")
+            if options.preprocess.peak_gain:
+                audio, _ = peak_safety_gain(audio)
+            tracks.append(_Track(channel=channel, diarize=diarize, audio=audio))
+        duration = max((len(t.audio) for t in tracks), default=0) / SAMPLE_RATE
+        return tracks, duration
+
+    def _recognise(
+        self,
+        engines: LocalEngines,
+        pieces: list[np.ndarray],
+        spans: list[tuple[float, float]],
+        terms: list[str],
+        context: str | None,
+        language: str | None,
+        report: Callable[[str, float, str | None], None],
+        at: Callable[[float], float],
+        warnings: list[str],
+    ) -> list[ChunkResult]:
+        chunks: list[ChunkResult] = []
+        timed = getattr(engines.asr, "transcribe_timed", None)
+        n = max(len(pieces), 1)
+        for i, (piece, (start, end)) in enumerate(zip(pieces, spans, strict=True)):
+            report("asr", at(0.05 + 0.6 * i / n), f"Recognising speech ({i + 1}/{n})")
+            if timed is not None:
+                text, raw = timed([piece], terms=terms)[0]
+                tokens = [Token(t, start + a, start + b) for t, a, b in raw]
+            else:
+                text = engines.asr.transcribe(
+                    [piece], language=language, terms=terms, context=context
+                )[0]
+                tokens = []
+                if engines.aligner is not None and text.strip():
+                    report("aligning", at(0.05 + 0.6 * (i + 0.5) / n), f"Aligning ({i + 1}/{n})")
+                    try:
+                        aligned = engines.aligner.align(piece, text, language=language or "zh")
+                    except ValueError as exc:  # e.g. a language the aligner does not support
+                        if not any(w.startswith("Word timestamps unavailable") for w in warnings):
+                            warnings.append(f"Word timestamps unavailable: {exc}")
+                        aligned = []
+                    tokens = [Token(t.text, start + t.start, start + t.end) for t in aligned]
+            chunks.append(ChunkResult(start=start, end=end, text=text, tokens=tokens))
+        return chunks
+
+
+def _language(hints: Sequence[str]) -> str | None:
+    """Chinese-primary: force zh when it is among the hints, else the first hint, else auto."""
+    cleaned = [h.strip().lower() for h in hints if h.strip()]
+    if "zh" in cleaned:
+        return "zh"
+    return cleaned[0] if cleaned else None

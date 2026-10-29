@@ -55,3 +55,41 @@ class ParaformerAsr:
             result = self._model.generate(**kwargs)
             texts.append(result[0].get("text", "").strip() if result else "")
         return texts
+
+    def transcribe_timed(
+        self, chunks: Sequence[np.ndarray], *, terms: Sequence[str] = ()
+    ) -> list[tuple[str, list[tuple[str, float, float]]]]:
+        """Text plus per-token ``(token, start, end)`` in seconds relative to each chunk.
+
+        Paraformer emits one timestamp per space-separated token (CJK character or Latin word),
+        so no forced alignment is needed.
+        """
+        hotword = " ".join(t.replace(" ", "") for t in terms) or None
+        out: list[tuple[str, list[tuple[str, float, float]]]] = []
+        for audio in chunks:
+            if len(audio) < SAMPLE_RATE // 10:
+                out.append(("", []))
+                continue
+            kwargs: dict[str, object] = {"input": audio.astype(np.float32), "fs": SAMPLE_RATE}
+            if hotword:
+                kwargs["hotword"] = hotword
+            result = self._model.generate(**kwargs)
+            raw = result[0] if result else {}
+            words = raw.get("text", "").split()
+            stamps = raw.get("timestamp") or []
+            if len(stamps) != len(words):
+                out.append((join_tokens(words), []))
+                continue
+            tokens = [(w, b / 1000.0, e / 1000.0) for w, (b, e) in zip(words, stamps, strict=True)]
+            out.append((join_tokens(words), tokens))
+        return out
+
+
+def join_tokens(tokens: Sequence[str]) -> str:
+    """CJK characters join directly; consecutive Latin words keep a space between them."""
+    text = ""
+    for tok in tokens:
+        if text and tok[:1].isascii() and text[-1:].isascii() and tok[:1].isalnum():
+            text += " "
+        text += tok
+    return text

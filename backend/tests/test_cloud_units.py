@@ -8,7 +8,7 @@ import httpx
 import pytest
 import respx
 
-from asr.providers import LOCAL_UNAVAILABLE, get_provider
+from asr.providers import get_provider
 from asr.providers.base import JobOptions, ProviderError, Term
 from asr.providers.cloud import (
     ALLOWED_ENDPOINTS,
@@ -251,10 +251,13 @@ def test_get_provider_cloud(tmp_path):
     assert p.name == "cloud"
 
 
-def test_get_provider_local_and_unknown():
-    with pytest.raises(ProviderError, match="M5"):
-        get_provider("local")
-    assert "M5" in LOCAL_UNAVAILABLE
+def test_get_provider_local_and_unknown(tmp_path):
+    from asr.providers.local.pipeline import LocalPipelineProvider
+
+    local = get_provider("local", cache_dir=tmp_path, asr_model="qwen3-asr-0.6b")
+    assert isinstance(local, LocalPipelineProvider) and local.name == "local"
+    with pytest.raises(ProviderError, match="Invalid local provider"):
+        get_provider("local", bogus=1)
     with pytest.raises(ProviderError):
         get_provider("other")  # type: ignore[arg-type]
 

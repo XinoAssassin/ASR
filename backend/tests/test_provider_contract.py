@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 import respx
 
-from asr.providers import get_provider
 from asr.providers.base import (
     AudioSource,
     JobCancelled,
@@ -43,6 +42,7 @@ class ProviderCase:
     # (tmp_path, monkeypatch) -> context manager yielding (provider, source)
     setup: Callable[[Path, pytest.MonkeyPatch], object]
     cancel_stage: str | None = None
+    first_stage: str = "preparing"
 
 
 @contextmanager
@@ -57,12 +57,18 @@ def _cloud(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple]:
 
 @contextmanager
 def _local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple]:
-    yield get_provider("local"), AudioSource(path=make_audio(tmp_path / "in"))
+    from asr.providers.local.pipeline import LocalPipelineProvider
+    from tests.test_audio_fixtures import write_audio
+    from tests.test_local_pipeline import fake_engines
+
+    provider = LocalPipelineProvider(cache_dir=tmp_path / "models", engines=fake_engines())
+    (tmp_path / "in").mkdir()
+    yield provider, AudioSource(path=write_audio(tmp_path / "in", "wav_s16", seconds=4.0))
 
 
 CASES = [
     ProviderCase("cloud", available=True, setup=_cloud, cancel_stage="recognizing"),
-    ProviderCase("local", available=False, setup=_local),
+    ProviderCase("local", available=True, setup=_local, cancel_stage="asr", first_stage="decoding"),
 ]
 
 OPTIONS = JobOptions(num_speakers=4, terms=[Term(term="Kubernetes", weight=5)])
@@ -141,4 +147,4 @@ def test_job_cancelled_on_first_progress(case, tmp_path, monkeypatch):
     if not case.available:
         pytest.skip("provider not available yet")
     with pytest.raises(JobCancelled):
-        _run(case, tmp_path, monkeypatch, Recorder(cancel_on="preparing"))
+        _run(case, tmp_path, monkeypatch, Recorder(cancel_on=case.first_stage))
