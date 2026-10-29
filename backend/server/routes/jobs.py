@@ -15,11 +15,11 @@ from sse_starlette import EventSourceResponse
 from asr.providers.base import JobOptions, LocalOptions, ProviderName, Term
 from asr.providers.local import models as local_models
 from asr.providers.local.pipeline import default_asr_model
+from asr.terms import merge_terms
 from server.config import EffectiveSettings, EnvSettings, load_effective_settings
 from server.db import Database, utcnow
 from server.deps import DbDep, EnvDep, JobManagerDep
 from server.jobs import MISSING_KEY, TERMINAL_STATUSES
-from server.routes.term_sets import merge_terms
 from server.schemas import JobCreate, JobList, JobOut, JobStatus
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])

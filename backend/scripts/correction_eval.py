@@ -19,7 +19,7 @@ from pathlib import Path
 from asr.correct import TermCorrector
 from asr.eval.metrics import mixed_error_rate, term_recall
 from asr.providers.base import Term
-from server.routes.term_sets import parse_terms
+from asr.terms import parse_terms
 
 
 def main() -> None:

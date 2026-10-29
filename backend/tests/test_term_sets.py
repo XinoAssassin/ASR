@@ -3,7 +3,7 @@
 import httpx
 
 from asr.providers.base import Term
-from server.routes.term_sets import merge_terms, parse_terms
+from asr.terms import merge_terms, parse_terms
 
 
 def test_parse_formats() -> None:
