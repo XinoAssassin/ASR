@@ -199,11 +199,19 @@ const asrModelOptions = computed(() => [
   { label: t('settings.local.auto'), value: '' },
   ...localModels.value
     .filter((m) => m.kind === 'asr')
-    .map((m) => ({
-      label: m.downloaded ? m.id : `${m.id}（${t('settings.local.notDownloaded')}）`,
-      value: m.id,
-    })),
+    .map((m) => {
+      const notes = [
+        isWhisper(m.id) && t('settings.local.englishOnly'),
+        !m.downloaded && t('settings.local.notDownloaded'),
+      ].filter(Boolean)
+      return { label: notes.length ? `${m.id}（${notes.join('，')}）` : m.id, value: m.id }
+    }),
 ])
+
+/** faster-whisper engines (M11): English only, need the backend's `whisper` extra. */
+function isWhisper(id: string): boolean {
+  return id.startsWith('faster-whisper')
+}
 
 watch(
   () => settings.server,
@@ -224,7 +232,12 @@ const STATUS_TYPE = {
 
 const modelColumns = computed<DataTableColumns<LocalModelOut>>(() => [
   { title: t('settings.local.modelKey'), key: 'id' },
-  { title: t('settings.local.modelName'), key: 'name' },
+  {
+    title: t('settings.local.modelName'),
+    key: 'name',
+    render: (row) =>
+      isWhisper(row.id) ? `${row.name}（${t('settings.local.whisperNote')}）` : row.name,
+  },
   { title: t('settings.local.kind'), key: 'kind' },
   {
     title: t('settings.local.size'),

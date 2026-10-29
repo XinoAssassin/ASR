@@ -21,6 +21,8 @@ export type TranscriptOp = Schemas['TranscriptPatch']['ops'][number]
 export type Correction = Schemas['Correction']
 export type SpeakerUpdate = Schemas['SpeakerUpdate']
 export type LlmSuggestionsOut = Schemas['LlmSuggestionsOut']
+export type TranscriptSummary = Schemas['TranscriptSummary']
+export type ActionItem = Schemas['ActionItem']
 export type TermSetIn = Schemas['TermSetIn']
 export type Segment = Schemas['Segment']
 export type Speaker = Schemas['Speaker']
@@ -142,6 +144,22 @@ export const requestLlmSuggestions = (
       body: { segment_ids: segmentIds },
     }),
   )
+
+/** Opt-in LLM summary (costs money, sends the text to DashScope); replaces any previous one. */
+export const createSummary = (transcriptId: string): Promise<TranscriptSummary> =>
+  unwrap(
+    api.POST('/api/transcripts/{transcript_id}/summary', {
+      params: { path: { transcript_id: transcriptId } },
+    }),
+  )
+
+export const deleteSummary = (transcriptId: string): Promise<void> =>
+  unwrapVoid(
+    api.DELETE('/api/transcripts/{transcript_id}/summary', {
+      params: { path: { transcript_id: transcriptId } },
+    }),
+  )
+
 // term sets --------------------------------------------------------------------------------------
 
 export const listTermSets = (): Promise<TermSetOut[]> => unwrap(api.GET('/api/term-sets'))

@@ -7,6 +7,8 @@ import { computed, ref } from 'vue'
 
 import {
   audioPath,
+  createSummary,
+  deleteSummary,
   downloadExport,
   fetchBlob,
   getJob,
@@ -50,6 +52,7 @@ export const useTranscriptStore = defineStore('transcript', () => {
   const saveState = ref<SaveState>('idle')
   const saveError = ref<ApiError | null>(null)
   const llmRunning = ref(false)
+  const summaryRunning = ref(false)
   const pendingText = new Map<string, string>()
   let autosaveTimer: ReturnType<typeof setTimeout> | null = null
   // Every mutation runs on this chain, so the server sees edits in the order they were made.
@@ -210,6 +213,29 @@ export const useTranscriptStore = defineStore('transcript', () => {
     }
   }
 
+  /** Generate (or regenerate) the LLM summary of what is on screen now. */
+  async function summarize(): Promise<void> {
+    await flush()
+    summaryRunning.value = true
+    try {
+      await enqueue(async () => {
+        const id = transcript.value!.id
+        const summary = await createSummary(id)
+        if (transcript.value?.id === id) transcript.value = { ...transcript.value, summary }
+      })
+    } finally {
+      summaryRunning.value = false
+    }
+  }
+
+  async function removeSummary(): Promise<void> {
+    await enqueue(async () => {
+      const id = transcript.value!.id
+      await deleteSummary(id)
+      if (transcript.value?.id === id) transcript.value = { ...transcript.value, summary: null }
+    })
+  }
+
   async function exportAs(options: ExportOptions): Promise<string> {
     if (!transcript.value) throw new Error('No transcript')
     await flush() // export what the user sees
@@ -251,6 +277,7 @@ export const useTranscriptStore = defineStore('transcript', () => {
     saveState,
     saveError,
     llmRunning,
+    summaryRunning,
     load,
     exportAs,
     reset,
@@ -261,5 +288,7 @@ export const useTranscriptStore = defineStore('transcript', () => {
     nextSpeakerId,
     revert,
     suggestWithLlm,
+    summarize,
+    removeSummary,
   }
 })

@@ -411,6 +411,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/transcripts/{transcript_id}/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Summary */
+        get: operations["get_summary_api_transcripts__transcript_id__summary_get"];
+        put?: never;
+        /**
+         * Create Summary
+         * @description M11: summarise the current segments with the DashScope LLM (overview, key points,
+         *     decisions, action items) and store the result, replacing an earlier one. Opt-in: it costs
+         *     money and sends the transcript text and speaker names to the cloud.
+         */
+        post: operations["create_summary_api_transcripts__transcript_id__summary_post"];
+        /** Delete Summary */
+        delete: operations["delete_summary_api_transcripts__transcript_id__summary_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/uploads": {
         parameters: {
             query?: never;
@@ -538,6 +562,21 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** ActionItem */
+        ActionItem: {
+            /**
+             * Due
+             * @description Deadline as said in the meeting.
+             */
+            due?: string | null;
+            /**
+             * Owner
+             * @description Speaker name or person named in the meeting, when stated.
+             */
+            owner?: string | null;
+            /** Task */
+            task: string;
+        };
         /** CloudOptions */
         CloudOptions: {
             /**
@@ -1254,6 +1293,8 @@ export interface components {
             segments: components["schemas"]["Segment"][];
             /** Speakers */
             speakers: components["schemas"]["Speaker"][];
+            /** @description LLM summary (M11), null until requested. Stale when `updated_at` is later than `summary.created_at`. */
+            summary?: components["schemas"]["TranscriptSummary"] | null;
             /**
              * Updated At
              * Format: date-time
@@ -1266,6 +1307,33 @@ export interface components {
         TranscriptPatch: {
             /** Ops */
             ops: (components["schemas"]["EditTextOp"] | components["schemas"]["SetSpeakerOp"] | components["schemas"]["SplitOp"] | components["schemas"]["MergeOp"] | components["schemas"]["ReplaceOp"] | components["schemas"]["MergeSpeakersOp"] | components["schemas"]["ReviewCorrectionOp"])[];
+        };
+        /** TranscriptSummary */
+        TranscriptSummary: {
+            /** Action Items */
+            action_items?: components["schemas"]["ActionItem"][];
+            /**
+             * Chunks
+             * @description Transcript chunks summarised (map step).
+             * @default 1
+             */
+            chunks: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Decisions */
+            decisions?: string[];
+            /** Key Points */
+            key_points?: string[];
+            /**
+             * Model
+             * @description Chat model that wrote the summary.
+             */
+            model: string;
+            /** Overview */
+            overview: string;
         };
         /** UploadInitIn */
         UploadInitIn: {
@@ -2225,6 +2293,104 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TranscriptOut"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_summary_api_transcripts__transcript_id__summary_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                transcript_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TranscriptSummary"];
+                };
+            };
+            /** @description Transcript not found, or no summary yet. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_summary_api_transcripts__transcript_id__summary_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                transcript_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TranscriptSummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_summary_api_transcripts__transcript_id__summary_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                transcript_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

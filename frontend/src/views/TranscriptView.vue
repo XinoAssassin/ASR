@@ -29,6 +29,7 @@ import type { Correction, ExportFormat, Segment, Speaker } from '@/api'
 import CorrectionsPanel from '@/components/CorrectionsPanel.vue'
 import SegmentRow from '@/components/SegmentRow.vue'
 import SpeakerPanel from '@/components/SpeakerPanel.vue'
+import SummaryPanel from '@/components/SummaryPanel.vue'
 import WaveformPlayer, { type WaveRegion } from '@/components/WaveformPlayer.vue'
 import { useApiErrors } from '@/composables/useApiErrors'
 import { useTermSetsStore } from '@/stores/termSets'
@@ -272,6 +273,31 @@ async function addAlias(c: Correction, termSetId: string | null): Promise<void> 
     message.success(t('proofread.aliasAdded', { alias: c.before, term: c.after, set: set.name }))
   } catch (e) {
     notify(e, t('proofread.aliasFailed'))
+  }
+}
+
+// --- summary (M11) -----------------------------------------------------------------------------
+
+const summaryStale = computed(() => {
+  const tr = store.transcript
+  return !!tr?.summary && Date.parse(tr.updated_at) > Date.parse(tr.summary.created_at)
+})
+
+async function summarize(): Promise<void> {
+  try {
+    await store.summarize()
+    message.success(t('summary.done'))
+  } catch (e) {
+    notify(e, t('summary.failed'))
+  }
+}
+
+async function removeSummary(): Promise<void> {
+  try {
+    await store.removeSummary()
+    message.success(t('summary.removed'))
+  } catch (e) {
+    notify(e, t('summary.failed'))
   }
 }
 
@@ -521,6 +547,15 @@ onBeforeUnmount(() => {
                 @rename="renameSpeaker"
                 @merge="mergeSpeakers"
                 @add="addSpeaker"
+              />
+            </NCard>
+            <NCard size="small" :title="t('summary.title')">
+              <SummaryPanel
+                :summary="store.transcript.summary ?? null"
+                :stale="summaryStale"
+                :running="store.summaryRunning"
+                @generate="summarize"
+                @remove="removeSummary"
               />
             </NCard>
             <NCard size="small" :title="t('proofread.corrections')">
