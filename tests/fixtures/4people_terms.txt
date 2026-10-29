@@ -1,0 +1,18 @@
+# Term list for the M4 bake-off on ASR_4people-test.m4a (gaming podcast, Bilibili EP.78).
+# One term per line; terms absent from the evaluated window are skipped by the scorer.
+Nadya
+Ryoma
+Townfall
+jump scare
+寂静岭
+生化危机
+街霸
+死或生
+魂游
+2D
+ROG
+MMO
+DLC
+DOOM
+Prey
+RPG

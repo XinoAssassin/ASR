@@ -33,6 +33,9 @@ logs/
 tests/fixtures/*.wav
 tests/fixtures/*.mp3
 tests/fixtures/*.m4a
+tests/fixtures/*.ass
+tests/fixtures/*.srt
+tests/fixtures/*.vtt
 !tests/fixtures/README.md
 
 # Editors / OS
