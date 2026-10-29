@@ -86,10 +86,16 @@ def test_transcribe_cloud_txt_and_json(cloud_env, tmp_path, monkeypatch):
     assert data["provider"] == "cloud" and len(data["speakers"]) == 4
 
 
-def test_transcribe_local_is_clear_error(tmp_path):
-    result = runner.invoke(app, ["transcribe", str(make_audio(tmp_path)), "--provider", "local"])
+def test_transcribe_local_needs_models(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASR_MODEL_CACHE_DIR", str(tmp_path / "models"))
+    audio = make_audio(tmp_path)
+    result = runner.invoke(
+        app, ["transcribe", str(audio), "--provider", "local", "--asr-model", "qwen3-asr-0.6b"]
+    )
     assert result.exit_code == 2
-    assert "M5" in result.output
+    assert "asr models download" in result.output and "qwen3-asr-0.6b" in result.output
+    url = runner.invoke(app, ["transcribe", "https://example.com/a.mp3", "--provider", "local"])
+    assert url.exit_code == 2 and "not a URL" in url.output
 
 
 def test_transcribe_without_key(tmp_path, monkeypatch):
