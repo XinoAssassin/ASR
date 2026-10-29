@@ -87,6 +87,9 @@ Both providers emit the same `Transcript` (§5.4); the frontend never branches o
 [3] Align        Qwen3-ForcedAligner-0.6B → character timestamps (funasr route has its own; skip)
 [4] Diarize      FunASR CAM++ (default) / pyannote.audio 3.1 (optional, HF token)
 [5] Merge        each character/sentence takes the speaker with max time overlap; merge adjacent same-speaker runs
+[5b] Correct     applied to local and cloud transcripts alike (docs/research/post-correction.md):
+                 L1 phoneme-level term replace (aliases + blacklist, default on), repetition filter (default on),
+                 L2 generic homophone CSC (off), L3 LLM pass with glossary (off); every edit is a Correction record
 [6] Output       Transcript → txt / srt / vtt / json / docx
 ```
 
@@ -342,12 +345,12 @@ Same-machine convenience: the desktop app can optionally spawn the backend (`asr
 | M3 | Frontend v1: Upload (with directory picker), Jobs, Transcript (waveform + dialogue + seek), export, Settings (backend URL / provider / cloud key) | Browser flow: upload → cloud transcribe → view → export |
 | M4 ✅ | Local ASR bake-off: 3–5 min of own audio across Qwen3-ASR-0.6B/1.7B, Fun-ASR-Nano, SeACo-Paraformer (CER / term recall / RTF); pick default | Results table in `docs/` — done 2026-10-29, `docs/M4_BAKEOFF.md` (incl. 5 DashScope HTTP models as baselines) |
 | M5 | Local provider: preprocess + VAD + ASR + align + CAM++ + merge wired into the queue; CLI wrapper | Local output has the same Transcript shape as cloud; speaker mis-assignment < 10% |
-| M6 | Term sets both ways (local context/hotwords, cloud vocabulary); local model management in Settings; CUDA verification; preprocessing toggles in UI | Visible term-recall gain; `device=cuda` works on an NVIDIA host |
-| M7 | Frontend v2: speaker rename / merge / reassign / split, autosave + revert, term highlight + replace, search, shortcuts | Proofreading a 10-min recording without leaving the page |
+| M6 | Term sets both ways (local context/hotwords, cloud vocabulary); [5b] L1 term correction (term aliases + blacklist) + repetition filter; local model management in Settings; CUDA verification; preprocessing toggles in UI | Visible term-recall gain; `device=cuda` works on an NVIDIA host |
+| M7 | Frontend v2: speaker rename / merge / reassign / split, autosave + revert, term highlight + replace, correction review (accept / reject, "add as alias"), [5b] L3 LLM correction pass, search, shortcuts | Proofreading a 10-min recording without leaving the page |
 | M8 | Polish and deployment: production Docker images, `asr serve`, batch mode, logging, deployment guide | Backend and frontend run on two separate machines |
 | M9 | Desktop app v1 (Windows): Tauri shell around the SPA, WASAPI loopback + mic 2-track recording to 16 kHz FLAC with drift handling, tray / hotkey / level meters, auto-upload + auto-job, local copy retained | A 30-min Teams/Feishu call recorded end-to-end lands as a per-channel job; channels stay in sync (< 50 ms drift at the end) |
 | M10 | Desktop app v2: per-process loopback (Windows), macOS ScreenCaptureKit capture, optional backend sidecar, installers | Record only the meeting app while other sounds are excluded; macOS build records a FaceTime/Zoom call |
-| M11 (optional) | pyannote comparison, faster-whisper English-only backend, LLM correction and summary, Linux desktop capture | — |
+| M11 (optional) | pyannote comparison, faster-whisper English-only backend, [5b] L2 generic homophone correction (pycorrector), LLM summary, Linux desktop capture | — |
 
 Order rationale: the cloud provider comes first (M2–M3) because it gives the fastest end-to-end path and fixes the Transcript contract; the local pipeline (M4–M6) is built against the same contract, so the frontend does not change.
 
