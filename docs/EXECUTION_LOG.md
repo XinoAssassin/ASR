@@ -238,7 +238,7 @@ Errors: FastAPI default `{"detail": ...}`; 401 for missing/wrong `X-API-Key`, 40
 - `JobOut.upload_name` / `JobOut.duration` to avoid one `GET /api/uploads/{id}` per row in the Jobs table.
 - `POST /api/uploads/register` could return the existing upload for an already-registered path.
 - `GET /api/uploads/{id}?stream_index=` to re-probe another track of a multi-track file (OBS selector, M6+).
-- Confirm on a live run: `max_file_size_mb` for this model, and getPolicy on the Qianwen / workspace endpoints.
+- ~~Confirm on a live run: `max_file_size_mb` and getPolicy on the Qianwen endpoint~~ — confirmed 2026-10-29: getPolicy works on `cn-beijing.maas.qianwenaiapi.com`, limit 1024 MB. The workspace endpoint is still unverified.
 
 ### drvfs workarounds (WSL only)
 `/mnt/d` refuses `chmod`/`utime`, which breaks in-repo venv and node_modules installs. Hence:
@@ -271,6 +271,6 @@ client unchanged on regeneration.
 | M1-a ruff + pytest incl. traversal / probe | PASS | |
 | M1-b curl flow on the test clip | PASS | Upload → probe (aac 48 kHz 2 ch, 1888 s, downmix, r = 1.0) → audio Range 206 → job → SSE → clean 401 failure with an invalid key |
 | M2-a offline cloud tests | PASS | Fixtures are modelled on documented shapes, not recorded traffic |
-| M2-b live 4-speaker Transcript | BLOCKED | No `DASHSCOPE_API_KEY`. Run `cd backend && uv run python scripts/live_cloud_test.py ../ASR_4people-test.m4a --num-speakers 4` |
+| M2-b live 4-speaker Transcript | PASS (2026-10-29) | Qianwen endpoint `cn-beijing.maas.qianwenaiapi.com`, speaker count **auto**: 4 speakers, 496 segments, 1888 s, ~2 min end to end (stereo downmixed to 16 kHz mono FLAC, temp upload, poll, fetch). Known flaw: two self-introductions in the opening line merged into one segment |
 | M3-a typecheck / build | PASS | |
 | M3-b browser flow | PASS (fake provider) / BLOCKED (real cloud) | Real UI + backend up to a failed cloud job; full upload → SSE → transcript → seek → export with a stand-in provider, with and without `ASR_API_KEY` |
