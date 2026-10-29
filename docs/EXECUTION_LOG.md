@@ -412,3 +412,22 @@ installer `ASR Recorder_0.1.0_x64-setup.exe` (3.3 MiB).
 is the virtual remote-audio device, whose clock equals QPC), a real Teams / Feishu call, tray and
 hotkey by hand (no UI automation), the SPA recorder page inside the real WebView.
 
+## 14. M10 desktop app v2 (2026-10-30)
+
+Rust (`desktop/`) + SPA (e25bbf0, 101e5b0) against the M10 contract additions (0da9a09, 6394ed9).
+
+| Check | Result |
+|---|---|
+| fmt / clippy -D warnings / tests | Linux 34 pass (1 ignored: needs a Pulse server), Windows 33 pass; macOS recorder lib clippy clean for aarch64-apple-darwin |
+| Missing mic → system-only with warning; tray / hotkey replays stored options | implemented; unit-tested; in-app toggle not run (no endpoint) |
+| Per-app capture: chirp player captured, 1 kHz tone from a second process | 16/16 chirps, tone −200 dBFS (absent), drift 0.00 ms |
+| Whole-device control run of the same test | **not run**: the RDP session disconnected and took the only endpoint with it |
+| Sidecar: Node stand-in (graceful, ignores signal → killed after 10 s, app killed → child dies), real `asr serve` via wsl.exe | PASS |
+| NSIS installer: silent install / start / silent uninstall (recordings and app data kept) | PASS |
+| Linux Pulse capture through WSLg | one 4 s capture OK before WSLg's server stopped answering |
+| macOS ScreenCaptureKit | compiles (recorder lib); Tauri shell needs Apple's toolchain; never run |
+
+To finish M10 on a machine with audio: `selftest2.exe --process-test --seconds 40 --gap-at 20 --gap 8`
+(built with `--features selftest`, see desktop/README.md), a manual tray / Ctrl+Alt+R check, and a real
+Teams / Feishu call with a microphone (also the open item of M9).
+
