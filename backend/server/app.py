@@ -6,7 +6,6 @@ Tests call ``create_app(env)`` with an explicit ``EnvSettings`` and run the life
 """
 
 import logging
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -19,7 +18,7 @@ from fastapi.responses import JSONResponse
 
 from asr import __version__
 from server.auth import API_KEY_HEADER, EXEMPT_PATHS, ApiKeyMiddleware
-from server.config import EnvSettings, ensure_dirs, get_env
+from server.config import EnvSettings, apply_core_environ, ensure_dirs, get_env
 from server.db import Database
 from server.jobs import JobManager
 from server.model_downloads import ModelDownloads
@@ -37,9 +36,9 @@ def create_app(env: EnvSettings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        # The core library reads ASR_DECODER from the process env; keep it in sync with
-        # values that came from a .env file.
-        os.environ["ASR_DECODER"] = env.decoder
+        # The core library reads ASR_DECODER / ASR_TORCH_THREADS / ASR_LOCAL_DTYPE from the
+        # process env; keep them in sync with values that came from a .env file.
+        apply_core_environ(env)
         ensure_dirs(env)
         db = await Database.open(env.db_path)
         job_manager = JobManager(db=db, env=env)

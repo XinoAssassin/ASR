@@ -50,6 +50,10 @@ class SecretRedactingFilter(logging.Filter):
         return True
 
 
+# uvicorn adds ``color_message`` (the message with ANSI colour codes) to its records.
+_SKIPPED_EXTRAS = frozenset({"color_message"})
+
+
 class JsonFormatter(logging.Formatter):
     """One JSON object per line: ts, level, logger, msg, extra fields, exc."""
 
@@ -61,7 +65,11 @@ class JsonFormatter(logging.Formatter):
             "msg": record.getMessage(),
         }
         for key, value in vars(record).items():
-            if key not in _STANDARD_ATTRS and not key.startswith("_"):
+            if (
+                key not in _STANDARD_ATTRS
+                and key not in _SKIPPED_EXTRAS
+                and not key.startswith("_")
+            ):
                 entry[key] = value if isinstance(value, str | int | float | bool) else str(value)
         if record.exc_text:
             entry["exc"] = record.exc_text

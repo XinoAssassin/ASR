@@ -97,6 +97,19 @@ class EnvSettings(BaseSettings):
         description="DashScope chat model for [5b] L3 correction suggestions.",
     )
 
+    torch_threads: int | None = Field(
+        default=None,
+        ge=1,
+        le=1024,
+        validation_alias="ASR_TORCH_THREADS",
+        description="CPU inference threads for the local models; default min(16, CPU count).",
+    )
+    local_dtype: Literal["auto", "float32", "bfloat16", "float16"] = Field(
+        default="auto",
+        validation_alias="ASR_LOCAL_DTYPE",
+        description="Local model dtype; auto = bfloat16 where native, else float32.",
+    )
+
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
         default="INFO", validation_alias="ASR_LOG_LEVEL"
     )
@@ -111,6 +124,16 @@ class EnvSettings(BaseSettings):
     @classmethod
     def _upper_level(cls, v: Any) -> Any:
         return v.strip().upper() if isinstance(v, str) else v
+
+    @field_validator("torch_threads", mode="before")
+    @classmethod
+    def _empty_threads(cls, v: Any) -> Any:
+        return None if isinstance(v, str) and not v.strip() else v
+
+    @field_validator("local_dtype", mode="before")
+    @classmethod
+    def _lower_dtype(cls, v: Any) -> Any:
+        return (v.strip().lower() or "auto") if isinstance(v, str) else v
 
     @field_validator("log_file", mode="before")
     @classmethod
@@ -206,6 +229,42 @@ def load_env(env_files: tuple[Path, ...] | None = None) -> EnvSettings:
 def get_env() -> EnvSettings:
     """Process-wide cached settings. Call ``get_env.cache_clear()`` after changing the env."""
     return load_env()
+
+
+def core_environ(env: EnvSettings) -> dict[str, str | None]:
+    """Variables the Web-free core library reads from ``os.environ`` (None = unset)."""
+    return {
+        "ASR_DECODER": env.decoder,
+        "ASR_TORCH_THREADS": None if env.torch_threads is None else str(env.torch_threads),
+        "ASR_LOCAL_DTYPE": env.local_dtype,
+    }
+
+
+def apply_core_environ(env: EnvSettings) -> None:
+    """Mirror ``core_environ`` into the process env, so ``.env`` values reach the core library."""
+    for name, value in core_environ(env).items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+def load_env_files_into_environ(env_files: tuple[Path, ...] | None = None) -> list[str]:
+    """Copy variables from the ``.env`` files (default ``ENV_FILES``; later files win) into
+    ``os.environ`` for CLI commands. Real environment variables win. Returns the names set
+    (never the values)."""
+    from dotenv import dotenv_values
+
+    merged: dict[str, str] = {}
+    for path in ENV_FILES if env_files is None else env_files:
+        if path.is_file():
+            merged.update(
+                {k: v for k, v in dotenv_values(path, encoding="utf-8").items() if v is not None}
+            )
+    added = [name for name in merged if name not in os.environ]
+    for name in added:
+        os.environ[name] = merged[name]
+    return added
 
 
 def ensure_dirs(env: EnvSettings) -> None:

@@ -40,6 +40,13 @@ EnvFactory = Callable[..., EnvSettings]
 ClientFactory = Callable[..., AbstractAsyncContextManager[httpx.AsyncClient]]
 
 
+@pytest.fixture(autouse=True)
+def _no_dotenv_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The developer's ``.env`` (with real keys) must never reach a test, including CLI tests
+    whose startup hook loads ``config.ENV_FILES`` into ``os.environ``."""
+    monkeypatch.setattr(config, "ENV_FILES", ())
+
+
 @pytest.fixture
 def env_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[EnvFactory]:
     monkeypatch.setattr(config, "ENV_FILES", ())

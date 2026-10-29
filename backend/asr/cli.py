@@ -72,9 +72,16 @@ def parse_term(spec: str) -> Term:
         raise typer.BadParameter(f"{spec!r}: {msg}") from None
 
 
+# Run before every command. The server package registers its ``.env`` loader here, so this
+# module stays free of server imports (AGENTS rule 5).
+STARTUP_HOOKS: list[Callable[[], None]] = []
+
+
 @app.callback()
 def main() -> None:
     """Multi-speaker ASR command-line interface."""
+    for hook in STARTUP_HOOKS:
+        hook()
 
 
 @app.command()

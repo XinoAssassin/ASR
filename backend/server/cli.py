@@ -11,9 +11,22 @@ from typing import Annotated
 
 import typer
 
-from asr.cli import app, err
+from asr.cli import STARTUP_HOOKS, app, err
 
 __all__ = ["app"]
+
+
+def load_dotenv_files() -> None:
+    """Give every CLI command the same ``.env`` files as ``asr serve`` (repo root, then
+    ``backend/``; real environment variables win), so e.g. ``asr models download`` and the
+    server agree on ``ASR_MODEL_CACHE_DIR``. Values are never printed."""
+    from server.config import load_env_files_into_environ
+
+    load_env_files_into_environ()
+
+
+if load_dotenv_files not in STARTUP_HOOKS:
+    STARTUP_HOOKS.append(load_dotenv_files)
 
 
 def _is_loopback(host: str) -> bool:
