@@ -15,6 +15,7 @@ from __future__ import annotations
 import difflib
 import json
 from collections.abc import Callable, Sequence
+from typing import Any
 
 import httpx
 
@@ -111,6 +112,52 @@ def diff_corrections(segment_id: str, old: str, new: str) -> list[Correction]:
     ]
 
 
+def chat_url(api_key: str, endpoint: str) -> str:
+    """Validated chat-completions URL for ``endpoint`` (same allow-list as the cloud ASR)."""
+    if not api_key:
+        raise ProviderError("DashScope API key is not configured")
+    if not is_allowed_endpoint(endpoint):
+        raise ProviderError("DashScope endpoint is not in the allow-list")
+    return endpoint.rstrip("/") + "/compatible-mode/v1/chat/completions"
+
+
+def chat_json(
+    http: httpx.Client,
+    url: str,
+    api_key: str,
+    *,
+    model: str,
+    system: str,
+    user: str,
+    temperature: float = 0,
+) -> dict[str, Any]:
+    """One JSON-mode chat completion; errors are ``ProviderError`` without secrets."""
+    body = {
+        "model": model,
+        "temperature": temperature,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    }
+    try:
+        r = http.post(url, json=body, headers={"Authorization": f"Bearer {api_key}"})
+    except httpx.HTTPError as exc:
+        raise ProviderError(f"LLM request failed: {type(exc).__name__}") from None
+    if r.status_code in (401, 403):
+        raise ProviderError("DashScope rejected the API key for the LLM")
+    if r.status_code != 200:
+        raise ProviderError(f"LLM request failed (HTTP {r.status_code})")
+    try:
+        answer = json.loads(r.json()["choices"][0]["message"]["content"])
+    except (KeyError, IndexError, TypeError, ValueError):
+        raise ProviderError("LLM returned an unreadable answer") from None
+    if not isinstance(answer, dict):
+        raise ProviderError("LLM returned an unreadable answer")
+    return answer
+
+
 class LlmCorrector:
     def __init__(
         self,
@@ -120,12 +167,8 @@ class LlmCorrector:
         model: str = DEFAULT_LLM_MODEL,
         http: httpx.Client | None = None,
     ) -> None:
-        if not api_key:
-            raise ProviderError("DashScope API key is not configured")
-        if not is_allowed_endpoint(endpoint):
-            raise ProviderError("DashScope endpoint is not in the allow-list")
+        self.url = chat_url(api_key, endpoint)
         self._key = api_key
-        self.url = endpoint.rstrip("/") + "/compatible-mode/v1/chat/completions"
         self.model = model
         self._http = http or httpx.Client(timeout=120, follow_redirects=False)
 
@@ -138,30 +181,17 @@ class LlmCorrector:
         if context:
             user.append("背景：" + context)
         user.append("句子：\n" + json.dumps({"segments": payload}, ensure_ascii=False))
-        body = {
-            "model": self.model,
-            "temperature": 0,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": "\n\n".join(user)},
-            ],
-        }
-        try:
-            r = self._http.post(
-                self.url, json=body, headers={"Authorization": f"Bearer {self._key}"}
-            )
-        except httpx.HTTPError as exc:
-            raise ProviderError(f"LLM request failed: {type(exc).__name__}") from None
-        if r.status_code in (401, 403):
-            raise ProviderError("DashScope rejected the API key for the LLM")
-        if r.status_code != 200:
-            raise ProviderError(f"LLM request failed (HTTP {r.status_code})")
-        try:
-            content = r.json()["choices"][0]["message"]["content"]
-            items = json.loads(content).get("segments", [])
-        except (KeyError, IndexError, TypeError, ValueError):
-            raise ProviderError("LLM returned an unreadable answer") from None
+        answer = chat_json(
+            self._http,
+            self.url,
+            self._key,
+            model=self.model,
+            system=SYSTEM_PROMPT,
+            user="\n\n".join(user),
+        )
+        items = answer.get("segments", [])
+        if not isinstance(items, list):
+            raise ProviderError("LLM returned an unreadable answer")
         return {
             str(i["id"]): str(i["text"])
             for i in items

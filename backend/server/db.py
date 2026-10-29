@@ -23,11 +23,12 @@ from pydantic import TypeAdapter
 
 from asr.audio.types import ProbeInfo
 from asr.providers.base import Correction, JobOptions, Segment, Speaker, Term, Transcript
+from asr.summarize import TranscriptSummary
 from server.schemas import JobOut, JobStatus, TermSetOut, TranscriptOut, UploadOut
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SEGMENTS = TypeAdapter(list[Segment])
 _SPEAKERS = TypeAdapter(list[Speaker])
@@ -84,7 +85,8 @@ CREATE TABLE IF NOT EXISTS transcripts (
     warnings_json  TEXT NOT NULL DEFAULT '[]',
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL,
-    corrections_json TEXT NOT NULL DEFAULT '[]'
+    corrections_json TEXT NOT NULL DEFAULT '[]',
+    summary_json   TEXT
 );
 CREATE INDEX IF NOT EXISTS transcripts_job ON transcripts(job_id);
 
@@ -168,6 +170,11 @@ def _transcript_from_row(row: aiosqlite.Row) -> TranscriptOut:
         original=_SEGMENTS.validate_json(row["original_json"]),
         warnings=json.loads(row["warnings_json"]),
         corrections=_CORRECTIONS.validate_json(row["corrections_json"]),
+        summary=(
+            TranscriptSummary.model_validate_json(row["summary_json"])
+            if row["summary_json"]
+            else None
+        ),
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
     )
@@ -220,6 +227,9 @@ class Database:
             await conn.execute(
                 "ALTER TABLE transcripts ADD COLUMN corrections_json TEXT NOT NULL DEFAULT '[]'"
             )
+        if current is not None and current < 4:
+            # v4: transcripts.summary_json (M11 LLM summary, NULL until requested).
+            await conn.execute("ALTER TABLE transcripts ADD COLUMN summary_json TEXT")
         if current is None or current < SCHEMA_VERSION:
             await conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
@@ -469,6 +479,20 @@ class Database:
         cur = await self.conn.execute(
             f"UPDATE transcripts SET {', '.join(sets)} WHERE id = ?",  # noqa: S608
             (*params, transcript_id),
+        )
+        await self.conn.commit()
+        if cur.rowcount == 0:
+            return None
+        return await self.get_transcript(transcript_id)
+
+    async def set_summary(
+        self, transcript_id: str, summary: TranscriptSummary | None
+    ) -> TranscriptOut | None:
+        """Store (or clear) the LLM summary. ``updated_at`` is left alone, so a client can tell
+        that the text changed after ``summary.created_at``."""
+        cur = await self.conn.execute(
+            "UPDATE transcripts SET summary_json = ? WHERE id = ?",
+            (None if summary is None else summary.model_dump_json(), transcript_id),
         )
         await self.conn.commit()
         if cur.rowcount == 0:

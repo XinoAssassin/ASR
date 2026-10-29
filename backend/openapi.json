@@ -1,6 +1,43 @@
 {
   "components": {
     "schemas": {
+      "ActionItem": {
+        "properties": {
+          "due": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Deadline as said in the meeting.",
+            "title": "Due"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Speaker name or person named in the meeting, when stated.",
+            "title": "Owner"
+          },
+          "task": {
+            "title": "Task",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task"
+        ],
+        "title": "ActionItem",
+        "type": "object"
+      },
       "CloudOptions": {
         "properties": {
           "keep_dialect": {
@@ -1705,6 +1742,17 @@
             "title": "Speakers",
             "type": "array"
           },
+          "summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TranscriptSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "LLM summary (M11), null until requested. Stale when `updated_at` is later than `summary.created_at`."
+          },
           "updated_at": {
             "format": "date-time",
             "title": "Updated At",
@@ -1781,6 +1829,59 @@
           "ops"
         ],
         "title": "TranscriptPatch",
+        "type": "object"
+      },
+      "TranscriptSummary": {
+        "properties": {
+          "action_items": {
+            "items": {
+              "$ref": "#/components/schemas/ActionItem"
+            },
+            "title": "Action Items",
+            "type": "array"
+          },
+          "chunks": {
+            "default": 1,
+            "description": "Transcript chunks summarised (map step).",
+            "minimum": 1.0,
+            "title": "Chunks",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "decisions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Decisions",
+            "type": "array"
+          },
+          "key_points": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Key Points",
+            "type": "array"
+          },
+          "model": {
+            "description": "Chat model that wrote the summary.",
+            "title": "Model",
+            "type": "string"
+          },
+          "overview": {
+            "title": "Overview",
+            "type": "string"
+          }
+        },
+        "required": [
+          "overview",
+          "model",
+          "created_at"
+        ],
+        "title": "TranscriptSummary",
         "type": "object"
       },
       "UploadInitIn": {
@@ -3220,6 +3321,125 @@
           }
         },
         "summary": "Update Speakers",
+        "tags": [
+          "transcripts"
+        ]
+      }
+    },
+    "/api/transcripts/{transcript_id}/summary": {
+      "delete": {
+        "operationId": "delete_summary_api_transcripts__transcript_id__summary_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transcript_id",
+            "required": true,
+            "schema": {
+              "title": "Transcript Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Summary",
+        "tags": [
+          "transcripts"
+        ]
+      },
+      "get": {
+        "operationId": "get_summary_api_transcripts__transcript_id__summary_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transcript_id",
+            "required": true,
+            "schema": {
+              "title": "Transcript Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Transcript not found, or no summary yet."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Summary",
+        "tags": [
+          "transcripts"
+        ]
+      },
+      "post": {
+        "description": "M11: summarise the current segments with the DashScope LLM (overview, key points,\ndecisions, action items) and store the result, replacing an earlier one. Opt-in: it costs\nmoney and sends the transcript text and speaker names to the cloud.",
+        "operationId": "create_summary_api_transcripts__transcript_id__summary_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transcript_id",
+            "required": true,
+            "schema": {
+              "title": "Transcript Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Summary",
         "tags": [
           "transcripts"
         ]

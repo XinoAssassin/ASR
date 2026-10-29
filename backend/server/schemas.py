@@ -22,6 +22,7 @@ from asr.providers.base import (
     Speaker,
     Term,
 )
+from asr.summarize import TranscriptSummary
 from asr.writers import ExportFormat
 
 __all__ = [
@@ -233,6 +234,11 @@ class TranscriptOut(BaseModel):
     corrections: list[Correction] = Field(
         default_factory=list,
         description="[5b] automatic edits that turned ``original`` into ``segments``.",
+    )
+    summary: TranscriptSummary | None = Field(
+        default=None,
+        description="LLM summary (M11), null until requested. Stale when `updated_at` is later "
+        "than `summary.created_at`.",
     )
     created_at: datetime
     updated_at: datetime

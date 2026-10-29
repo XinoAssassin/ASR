@@ -16,6 +16,7 @@ from fastapi.concurrency import run_in_threadpool
 from asr.correct.llm import LlmCorrector
 from asr.editing import EditError, EditState, add_speakers
 from asr.providers.base import SPEAKER_COLORS, Correction, ProviderError, Speaker, Transcript
+from asr.summarize import Summarizer, TranscriptSummary
 from asr.writers import MEDIA_TYPES, write
 from server.config import load_effective_settings
 from server.db import Database
@@ -142,6 +143,63 @@ async def llm_suggestions(
     if updated is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "transcript not found")
     return LlmSuggestionsOut(transcript=updated, added=len(found), discarded=discarded)
+
+
+def _llm_error(exc: ProviderError) -> HTTPException:
+    """Missing key / unusable input -> 422; upstream failures -> 502."""
+    msg = str(exc)
+    client_side = ("not configured", "allow-list", "no text", "too long")
+    code = _422 if any(m in msg for m in client_side) else status.HTTP_502_BAD_GATEWAY
+    return HTTPException(code, msg)
+
+
+@router.get(
+    "/{transcript_id}/summary",
+    response_model=TranscriptSummary,
+    responses={404: {"description": "Transcript not found, or no summary yet."}},
+)
+async def get_summary(transcript_id: str, db: DbDep) -> TranscriptSummary:
+    current = await _get_or_404(db, transcript_id)
+    if current.summary is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no summary yet")
+    return current.summary
+
+
+@router.post("/{transcript_id}/summary", response_model=TranscriptSummary)
+async def create_summary(transcript_id: str, db: DbDep, env: EnvDep) -> TranscriptSummary:
+    """M11: summarise the current segments with the DashScope LLM (overview, key points,
+    decisions, action items) and store the result, replacing an earlier one. Opt-in: it costs
+    money and sends the transcript text and speaker names to the cloud."""
+    current = await _get_or_404(db, transcript_id)
+    settings = await load_effective_settings(env, db)
+    job = await db.get_job(current.job_id)
+    terms = job.options.terms if job else []
+    context = job.options.context if job else None
+
+    def run() -> TranscriptSummary:
+        with httpx.Client(timeout=180, follow_redirects=False) as http:
+            summarizer = Summarizer(
+                api_key=settings.cloud_api_key.get_secret_value(),
+                endpoint=settings.cloud_endpoint,
+                model=env.llm_model,
+                http=http,
+            )
+            return summarizer.summarize(current.segments, current.speakers, terms, context)
+
+    try:
+        summary = await run_in_threadpool(run)
+    except ProviderError as exc:
+        raise _llm_error(exc) from None
+    if await db.set_summary(transcript_id, summary) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "transcript not found")
+    return summary
+
+
+@router.delete("/{transcript_id}/summary", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_summary(transcript_id: str, db: DbDep) -> Response:
+    if await db.set_summary(transcript_id, None) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "transcript not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.put("/{transcript_id}/speakers", response_model=TranscriptOut)

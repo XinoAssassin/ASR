@@ -404,6 +404,67 @@ def _local_builder(
     return build
 
 
+class SummaryFormat(StrEnum):
+    md = "md"
+    json = "json"
+
+
+@app.command()
+def summarize(
+    transcript_file: Annotated[
+        Path, typer.Argument(help="Transcript JSON written by `asr transcribe -f json`.")
+    ],
+    output: Annotated[
+        Path | None, typer.Option("--output", "-o", help="Write here instead of stdout.")
+    ] = None,
+    fmt: Annotated[SummaryFormat, typer.Option("--format", "-f")] = SummaryFormat.md,
+    context: Annotated[str | None, typer.Option(help="Background for the model.")] = None,
+    term: Annotated[
+        list[str] | None, typer.Option("--term", "-t", help="Glossary term (repeatable).")
+    ] = None,
+    model: Annotated[
+        str | None, typer.Option(help="DashScope chat model (default ASR_LLM_MODEL or qwen-plus).")
+    ] = None,
+) -> None:
+    """Summarise a transcript with the DashScope LLM (costs money; sends the text to the cloud)."""
+    from asr.correct.llm import DEFAULT_LLM_MODEL
+    from asr.summarize import Summarizer, summary_markdown
+
+    try:
+        transcript = Transcript.model_validate_json(transcript_file.read_text(encoding="utf-8"))
+    except (OSError, ValidationError) as exc:
+        err.print(f"[red]error:[/red] cannot read {transcript_file}: {type(exc).__name__}")
+        raise typer.Exit(2) from None
+    api_key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
+    if not api_key:
+        err.print("[red]error:[/red] DASHSCOPE_API_KEY is not set")
+        raise typer.Exit(2)
+    endpoint = os.environ.get("DASHSCOPE_ENDPOINT", "").strip() or DEFAULT_ENDPOINT
+    model = model or os.environ.get("ASR_LLM_MODEL", "").strip() or DEFAULT_LLM_MODEL
+    try:
+        summarizer = Summarizer(api_key=api_key, endpoint=endpoint, model=model)
+        result = summarizer.summarize(
+            transcript.segments,
+            transcript.speakers,
+            [parse_term(t) for t in term or []],
+            context,
+            progress=lambda done, total: err.print(f"summary: {done}/{total}"),
+        )
+    except ProviderError as exc:
+        err.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(1) from None
+    text = (
+        result.model_dump_json(indent=2) + "\n"
+        if fmt is SummaryFormat.json
+        else summary_markdown(result)
+    )
+    if output is None:
+        sys.stdout.write(text)
+    else:
+        output.write_text(text, encoding="utf-8")
+        err.print(f"wrote {output}")
+
+
 # ------------------------------------------------------------------------------ local models
 models_app = typer.Typer(help="Local model cache (explicit downloads only).", no_args_is_help=True)
 app.add_typer(models_app, name="models")
