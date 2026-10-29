@@ -128,7 +128,9 @@ Default chain (always on):
 ```
 [0a] probe            duration, sample_rate, channels, codec (PyAV stream metadata)
 [0b] channel policy   1ch → as is; 2ch correlated → average; 2ch independent (telephony heuristic) → per-channel
-                      pipeline, skip diarization (cloud: channel_id=[0,1]); >2ch → average or user-picked index
+                      pipeline: channel 0 is diarized (remote side, may hold several people — desktop recorder
+                      §6.3), every other channel is one known speaker (local mic / the other phone party);
+                      cloud: channel_id=[0,1] without diarization; >2ch → average or user-picked index
 [0c] decode           → 16 kHz mono float32 in [-1, 1] (8 kHz sources upsampled in the same pass)
 [0d] peak-safety gain if peak < -20 dBFS, linear gain to -3 dBFS; no compression, no loudnorm
 [0e] clipping check   warning only, surfaced in the job UI

@@ -1340,7 +1340,7 @@
             "title": "Language"
           },
           "original": {
-            "description": "Immutable recognition result (rule 8).",
+            "description": "Immutable recognition result (rule 9).",
             "items": {
               "$ref": "#/components/schemas/Segment"
             },
@@ -2515,7 +2515,7 @@
         ]
       },
       "patch": {
-        "description": "Apply ops to ``segments`` only; ``original`` is immutable (rule 8).\n\nAll ops are validated before anything is written (all-or-nothing).",
+        "description": "Apply ops to ``segments`` only; ``original`` is immutable (rule 9).\n\nAll ops are validated before anything is written (all-or-nothing).",
         "operationId": "patch_transcript_api_transcripts__transcript_id__patch",
         "parameters": [
           {

@@ -304,7 +304,7 @@ export interface paths {
         head?: never;
         /**
          * Patch Transcript
-         * @description Apply ops to ``segments`` only; ``original`` is immutable (rule 8).
+         * @description Apply ops to ``segments`` only; ``original`` is immutable (rule 9).
          *
          *     All ops are validated before anything is written (all-or-nothing).
          */
@@ -1015,7 +1015,7 @@ export interface components {
             language?: string | null;
             /**
              * Original
-             * @description Immutable recognition result (rule 8).
+             * @description Immutable recognition result (rule 9).
              */
             original: components["schemas"]["Segment"][];
             /**

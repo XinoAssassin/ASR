@@ -1,6 +1,6 @@
 """Transcripts (PLAN §5.3). Owned by ``backend-jobs`` (M1).
 
-Edits only ever touch ``segments`` / ``speakers``; ``original`` is immutable (rule 8).
+Edits only ever touch ``segments`` / ``speakers``; ``original`` is immutable (rule 9).
 """
 
 import re
@@ -43,7 +43,7 @@ async def get_transcript(transcript_id: str, db: DbDep) -> TranscriptOut:
 
 @router.patch("/{transcript_id}", response_model=TranscriptOut)
 async def patch_transcript(transcript_id: str, body: TranscriptPatch, db: DbDep) -> TranscriptOut:
-    """Apply ops to ``segments`` only; ``original`` is immutable (rule 8).
+    """Apply ops to ``segments`` only; ``original`` is immutable (rule 9).
 
     All ops are validated before anything is written (all-or-nothing).
     """

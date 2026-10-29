@@ -432,7 +432,7 @@ class Database:
         segments: Sequence[Segment] | None = None,
         speakers: Sequence[Speaker] | None = None,
     ) -> TranscriptOut | None:
-        """Update the editable columns. ``original`` has no setter (rule 8)."""
+        """Update the editable columns. ``original`` has no setter (rule 9)."""
         sets = ["updated_at = ?"]
         params: list[Any] = [_ts(utcnow())]
         if segments is not None:

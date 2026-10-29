@@ -205,7 +205,7 @@ Errors: FastAPI default `{"detail": ...}`; 401 for missing/wrong `X-API-Key`, 40
 
 | # | Decision | Reason |
 |---|---|---|
-| D1 | Core `Transcript` has no `id`/`job_id`/`original`; the server wraps it as `TranscriptOut` | Providers return results before ids exist; `original` is a storage concern (rule 8) |
+| D1 | Core `Transcript` has no `id`/`job_id`/`original`; the server wraps it as `TranscriptOut` | Providers return results before ids exist; `original` is a storage concern (rule 9) |
 | D2 | Per-job `cloud.endpoint` override removed; endpoint comes from settings and must match `ALLOWED_ENDPOINTS` | A user-chosen endpoint would let any API caller send the DashScope key to an arbitrary host |
 | D3 | `file_url` jobs are cloud-only and the backend never fetches the URL (DashScope does); http(s) only | Removes SSRF on our side; local provider has no URL input until needed |
 | D4 | Provider `local` is rejected at job creation (422) until M5 | Out of scope; better than a job that always fails |

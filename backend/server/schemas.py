@@ -226,7 +226,7 @@ class TranscriptOut(BaseModel):
     language: str | None = None
     speakers: list[Speaker]
     segments: list[Segment] = Field(description="Current (possibly edited) segments.")
-    original: list[Segment] = Field(description="Immutable recognition result (rule 8).")
+    original: list[Segment] = Field(description="Immutable recognition result (rule 9).")
     warnings: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
