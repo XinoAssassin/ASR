@@ -238,6 +238,11 @@ Errors: FastAPI default `{"detail": ...}`; 401 for missing/wrong `X-API-Key`, 40
 | D31 | `resolve_dtype("auto")` picks bfloat16 on CUDA and on CPUs with native BF16 (oneDNN check), float32 otherwise; `ASR_LOCAL_DTYPE` overrides; SeACo-Paraformer is fp32-only (CIF predictor breaks in bf16) | Measured 3.3x speed-up for Qwen3-1.7B at +0.17 points CER |
 | D32 | Local ASR default: Qwen3-ASR-1.7B bf16 where bf16 is native, else 0.6B; Paraformer = fast draft mode; Fun-ASR-Nano optional | `docs/M4_BAKEOFF.md` |
 | D33 | Bake-off reference = video subtitles; primary metric = filler-lenient mixed error rate (CJK chars + Latin words) | Subtitles omit fillers that faithful models transcribe |
+| D34 | Local pipeline: one FSMN-VAD pass, chunks of <= 25 s, Qwen3 / Fun-ASR text aligned per chunk with Qwen3-ForcedAligner (Paraformer keeps its own timestamps), CAM++ windows of 1.5 s / 0.75 s clustered by funasr's ClusterBackend; clusters under 3 % of the windows are folded into the nearest one when the speaker count is auto | M5 |
+| D35 | Merge assigns each token the speaker with most overlap, smooths A-B-A flips, absorbs runs under 2 tokens / 0.4 s, snaps speaker changes to punctuation (else the longest pause) within 4 tokens, and splits segments at sentence ends, speaker changes and pauses >= 0.8 s | Turn boundaries from 0.75 s windows otherwise cut words in half |
+| D36 | `per_channel`: channel 0 is diarized, every other channel is one fixed speaker (desktop recorder: remote on ch 0, local mic on ch 1; phone calls: one party per channel) | PLAN §4.5 [0b], §6.3 |
+| D37 | Local jobs pin the resolved ASR model and device into `options.local` at creation and return 422 with the exact `asr models download ...` command when a model is missing; no DashScope key needed | Reproducible retries; AGENTS rule 6 |
+| D38 | Post-correction ([5b], docs/research/post-correction.md) runs in the job runner after any provider, not inside the local pipeline | Same treatment for local and cloud transcripts |
 
 ### Follow-ups (not in M0–M3 scope)
 - `JobOut.upload_name` / `JobOut.duration` to avoid one `GET /api/uploads/{id}` per row in the Jobs table.
@@ -285,3 +290,20 @@ client unchanged on regeneration.
 ## 7. M4 (2026-10-29)
 
 Local ASR bake-off done: `docs/M4_BAKEOFF.md` (8 local configurations, 5 DashScope HTTP models, same 12 VAD chunks). Default decided per D32.
+
+## 8. M5 (2026-10-29)
+
+Local provider implemented and wired into the job queue, CLI (`asr transcribe --provider local`), Settings
+(model status) and Docker (`--extra local`). Results on `ASR_4people-test.m4a` (31.5 min, 4 speakers, CPU, bf16):
+
+| Measure | Result |
+|---|---|
+| End-to-end time, full file (Qwen3-ASR-1.7B, no term list) | 21 min 23 s → RTF 0.68 incl. model load (ASR ~85 %, alignment ~8 %, CAM++ ~2 %) |
+| Output | 708 segments, 9 444 word timestamps, every segment has words |
+| Excerpt CER (14:30–18:25) from the full run | 12.5 % raw / 9.5 % lenient (no terms; M4 bake-off: 9.4 % without, 8.6 % with terms) |
+| Speakers found (auto) | 5: four real speakers plus a 17 s cluster of short interjections |
+| Speaker mis-assignment vs DashScope diarization (proxy) | 8.7 % over 1 524 s |
+| Speaker mis-assignment vs human labels, excerpt | **provisional 0.0–4.4 %**: local and cloud agree on 76 / 86 cues; the 10 disputed cues are 9.4 s of 213 s. Final number pending the hand-labelled sheet (`scripts/score_speaker_sheet.py`) |
+
+Known limitations: short interjections (对 / 是 / 什么意思) are the main diarization errors; a tiny extra cluster can
+survive folding after merge; two speakers introducing themselves inside one sentence are merged (cloud does the same).
