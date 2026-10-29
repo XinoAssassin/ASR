@@ -247,6 +247,9 @@ Errors: FastAPI default `{"detail": ...}`; 401 for missing/wrong `X-API-Key`, 40
 | D40 | [5b] L1 = asr-hotword `PhonemeCorrector` (MIT, base dependency since cloud jobs use it too), threshold 0.85; repetition filter collapses a 2–10 char unit repeated 5+ times and a char repeated 8+ times (to 3). Both on by default, per-job `options.correction` | docs/M6_TERM_CORRECTION.md: 0.80 over-corrects |
 | D41 | Transcripts store the raw provider output as the immutable `original`, the corrected text as `segments`, and every edit in `corrections` (schema v3); revert clears corrections | AGENTS rule 9; audit trail for the M7 review UI |
 | D42 | Settings downloads only registry models, one at a time in a background thread, optional ModelScope mirror; state is in memory | AGENTS rule 6 ("explicit settings endpoint") |
+| D43 | Transcript edits are `PATCH` ops (`edit_text`, `set_speaker`, `split`, `merge`, `replace`, `merge_speakers`, `review_correction`) applied by the Web-free `asr.editing.EditState`; correction offsets follow the edits, rejecting an applied correction restores `before`, accepting a suggestion applies `after` | One code path for UI, CLI and tests; AGENTS rule 9 |
+| D44 | [5b] L3 is a button, not a job option: `POST /api/transcripts/{id}/llm-suggestions` (qwen-plus, DashScope compatible-mode, same key / endpoint allow-list), behind a cost + privacy confirmation. Output is `suggested` corrections only; a segment changing > 15 % of its text (glossary-term edits exempt) is discarded; whitespace-only edits are dropped | Costs money and sends text to the cloud, so it must be explicit; never auto-applied |
+| D45 | The SPA autosaves: text edits are debounced (600 ms) and every mutation goes through one serial queue, so ops never race; the queue is flushed before export and on route leave, and a late response for another transcript is ignored | "Without leaving the page"; export must match the screen |
 
 ### Follow-ups (not in M0–M3 scope)
 - `JobOut.upload_name` / `JobOut.duration` to avoid one `GET /api/uploads/{id}` per row in the Jobs table.
@@ -322,3 +325,32 @@ survive folding after merge; two speakers introducing themselves inside one sent
 | Local model management in Settings | Done: status, download (mirror), ASR model and device selection |
 | Preprocessing toggles in UI | Partial: channel override (M3) and level boost. Denoise / dereverb / separation are not built: PLAN requires a benchmark against raw audio first and the research expects them to hurt |
 | CUDA verification (`device=cuda` on an NVIDIA host) | **Blocked**: no NVIDIA GPU here. Code paths exist (`resolve_dtype` picks bf16/fp16 on CUDA, `--device cuda`, settings), untested |
+
+## 10. M7 (2026-10-29)
+
+Acceptance run: a 10-min excerpt (870–1470 s) of the test clip, local job (Qwen3-ASR-1.7B bf16, 4
+speakers, 4people terms + aliases → 3 L1 corrections), 220 segments, proofread in Chromium via
+Playwright (Vite dev server + temporary backend). Every step is checked against `GET /api/transcripts/{id}`.
+
+| Step | Result |
+|---|---|
+| Rename speaker (applies to every segment and the legend) | PASS |
+| Reassign one segment's speaker | PASS |
+| Inline edit → "保存中…" → "已保存", stored | PASS |
+| Split at caret (Ctrl+Enter), merge with next | PASS (220 → 221 → 220) |
+| Ctrl+F search, match count, highlight; replace-all with confirmation | PASS |
+| Accept an applied correction; reject one (text goes back to the mis-hearing) | PASS |
+| "Add as alias" into a new term set | PASS (`Ryoma` ← `龙马`) |
+| ←/→ segment navigation | PASS |
+| LLM suggestions (1 live qwen-plus call, 220 segments) | PASS: 13 suggestions, 4 segments discarded by the guard; accepting one applies it |
+| Export TXT reflects rename + replace | PASS |
+| No page navigation during the session; 0 console errors | PASS |
+| Revert restores the original | PASS |
+
+Found and fixed during the run: the LLM likes to space out Latin words, which gave whitespace-only
+suggestions and padded replacements (`汤炮 →  Townfall `), now dropped / trimmed (d152040); bare
+insertions (`∅ → 危机`) could not be judged from the panel, so each correction now shows its
+surrounding text. LLM suggestion quality on this excerpt is mixed (term fixes such as `龙瓦 → Ryoma`,
+`金脸重这儿重置 → 寂静岭重制` are right; punctuation insertions are noise) — suggestions stay opt-in
+and unapplied, as planned.
+
