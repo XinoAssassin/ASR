@@ -14,6 +14,7 @@ Three deliverables sharing one core library:
 | Backend API | `backend/` | Python 3.12, FastAPI, SQLite, uv |
 | Frontend SPA | `frontend/` | Vue 3, Vite, TypeScript, Naive UI, wavesurfer.js, pnpm |
 | CLI | `backend/asr/cli.py` | typer |
+| Desktop app | `desktop/` | Tauri 2 (Rust) wrapping `frontend/`; records system audio + mic, uploads via the same API |
 
 Two transcription providers behind one `TranscriptionProvider` interface:
 - `local`: VAD → ASR (Qwen3-ASR default) → forced alignment → speaker diarization (CAM++) → merge
@@ -39,7 +40,8 @@ All documentation and code comments are written in **English**. User-facing UI s
 5. **Core library is Web-free.** `backend/asr/` must not import FastAPI or anything from `backend/server/`.
 6. **Models are local by default.** Model weights load from `ASR_MODEL_CACHE_DIR`; downloads happen only via the explicit settings endpoint or CLI command, never implicitly during a request.
 7. **Python 3.12, pinned via `.python-version` and `uv.lock`.** Do not bump without checking `qwen-asr`, `funasr`, `torch` compatibility.
-8. **Edit transcripts non-destructively.** User edits go to `segments`; `original` is immutable so `POST /api/transcripts/{id}/revert` always works.
+8. **Desktop recorder never loses audio.** The local recording file is written incrementally and kept until the backend job succeeds; upload failures go to a retry queue, never to deletion.
+9. **Edit transcripts non-destructively.** User edits go to `segments`; `original` is immutable so `POST /api/transcripts/{id}/revert` always works.
 
 ## Environment notes
 
@@ -64,12 +66,17 @@ pnpm build
 
 # docker
 docker compose up --build        # backend (CPU) + frontend (nginx)
+
+# desktop
+cd desktop && pnpm tauri dev     # dev shell around frontend/ with the native recorder
+pnpm tauri build                 # installer
 ```
 
 ## Conventions
 
 - Backend: ruff (format + lint), type hints everywhere, pydantic models for all API I/O, async endpoints, tests with pytest + httpx.
-- Frontend: `<script setup lang="ts">`, Pinia stores per domain, API calls only through the generated client in `src/api/`.
+- Frontend: `<script setup lang="ts">`, Pinia stores per domain, API calls only through the generated client in `src/api/`. Desktop-only features go behind `src/platform/` (`isDesktop()`); the web build must not import Tauri APIs.
+- Desktop (Rust): `cargo fmt` + `clippy -D warnings`; audio capture code lives in `desktop/src-tauri/src/recorder/` and exposes Tauri commands only (no HTTP of its own except upload via the backend API).
 - Commits: Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`). One logical change per commit.
 - Timestamps in the data model are seconds (float). Cloud provider converts from milliseconds at the boundary.
 - Speaker IDs are opaque strings (`SPEAKER_00`); display names live in `Transcript.speakers`.

@@ -13,6 +13,7 @@ Deliverables:
 - **Backend service** (Python / FastAPI): HTTP API; built-in local model pipeline, plus a proxy to a cloud model
 - **Frontend SPA** (Vue 3): deployed independently, talks to the backend over HTTP; upload, term hints, speaker labelling, export, settings
 - **CLI** (`asr transcribe meeting.wav`): same core library, for debugging and batch jobs
+- **Desktop app** (Tauri 2, wrapping the same Vue SPA): records system audio ("what you hear") and the microphone directly, then uploads to the backend; see §6.3
 - **Docker images** for backend (CPU and CUDA) and frontend
 
 ## 2. Reference projects
@@ -43,6 +44,8 @@ Deliverables:
 ```
 Browser ──HTTP(S)──▶ Frontend static site (nginx / any static host)
    │
+Desktop app (Tauri: same SPA + native recorder) ──┐
+   │                                               │
    └──HTTP API (JSON, multipart, SSE)──▶ Backend FastAPI (may live on another machine, e.g. a GPU server)
                                            ├─ Provider: local  → local model pipeline (§4.3)
                                            └─ Provider: cloud  → Alibaba DashScope filetrans (§4.4)
@@ -191,7 +194,9 @@ backend/
   tests/
 frontend/                 # Vue 3 + Vite + TS + Naive UI + wavesurfer.js
   src/api/                # generated from backend OpenAPI
-  src/views/              # Upload / Jobs / Transcript / TermSets / Settings
+  src/views/              # Upload / Jobs / Transcript / TermSets / Settings / Record (desktop only)
+  src/platform/           # `isDesktop()` + recorder bridge (Tauri invoke) with a no-op web stub
+desktop/                  # Tauri 2 shell around frontend/ (src-tauri/: Rust recorder, tray, auto-upload)
 deploy/                   # nginx.conf, frontend-entrypoint.sh
 docs/
   ASR_MODEL_COMPARISON.md
@@ -305,6 +310,26 @@ Timestamps are seconds (float) throughout; the cloud provider converts from mill
 - Cloud: endpoint, model name, DashScope key (masked), file transfer method (temp upload / OSS / public URL) and its credentials, "test connection"
 - Privacy notice for cloud mode
 
+### 6.3 Desktop app (system-audio recorder)
+
+Purpose: capture online meetings, calls and videos playing on the PC without OBS / Stereo Mix, and hand the file straight to the backend. Everything else (jobs, transcript, settings) is the same SPA.
+
+| Aspect | Choice | Rationale |
+|---|---|---|
+| Shell | Tauri 2 (Rust core, system WebView) | Reuses `frontend/` unchanged; ~10 MB installer vs 150 MB+ for Electron; Rust has first-class audio crates |
+| Windows capture | WASAPI loopback via `cpal` (render endpoint in loopback mode) or the `wasapi` crate; mic via `cpal` input stream | No driver, no "Stereo Mix" needed; works on any Windows 10/11 output device |
+| Per-process capture (optional) | `ActivateAudioInterfaceAsync` with `AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS` (Windows 10 2004+/11) | Record only Teams/Zoom/browser, exclude notification sounds; implemented after the device-wide path works |
+| macOS capture | ScreenCaptureKit audio (macOS 13+) via `cidre`/`objc2`; mic via `cpal` | No kernel extension (BlackHole) needed; requires Screen Recording permission |
+| Linux capture | PipeWire / PulseAudio monitor source via `cpal` | Best effort |
+| File format | 2-track recording: track 0 = system audio (downmixed to mono), track 1 = mic, 48 kHz → written as 16 kHz 2-channel FLAC | Matches the `per-channel` policy in §4.5: remote participants on ch 0 get diarization, local user on ch 1 is one known speaker; FLAC keeps a 2 h meeting well under the 1 GB cloud cap |
+| Drift handling | Both streams timestamped from one monotonic clock; resample the mic stream to the loopback clock; silence-fill gaps when the render device goes idle | WASAPI loopback stops delivering frames when nothing plays; without fill the channels desynchronise |
+| Upload | On stop: `POST /api/uploads` (chunked) to the configured backend with `target_dir` from settings, then auto-create a job with the user's default options; retry queue if offline | Same API as the browser; no new backend endpoints |
+| UX | Tray icon, global hotkey, level meters for both tracks, elapsed time, "mic on/off", "system audio on/off", device pickers, output folder; recording survives window close | Start/stop must be one click during a live meeting |
+| Local safety | Local copy kept in the output folder until the job succeeds; never auto-deleted | Meetings cannot be re-recorded |
+| Signing | Windows: unsigned at first (SmartScreen warning documented); macOS: ad-hoc or Developer ID later | Internal tool first |
+
+Same-machine convenience: the desktop app can optionally spawn the backend (`asr serve`) as a sidecar and point itself at `http://127.0.0.1:8000`, giving a single-install local setup; cloud provider still works from there.
+
 ## 7. Milestones
 
 | # | Scope | Acceptance |
@@ -318,7 +343,9 @@ Timestamps are seconds (float) throughout; the cloud provider converts from mill
 | M6 | Term sets both ways (local context/hotwords, cloud vocabulary); local model management in Settings; CUDA verification; preprocessing toggles in UI | Visible term-recall gain; `device=cuda` works on an NVIDIA host |
 | M7 | Frontend v2: speaker rename / merge / reassign / split, autosave + revert, term highlight + replace, search, shortcuts | Proofreading a 10-min recording without leaving the page |
 | M8 | Polish and deployment: production Docker images, `asr serve`, batch mode, logging, deployment guide | Backend and frontend run on two separate machines |
-| M9 (optional) | pyannote comparison, faster-whisper English-only backend, LLM correction and summary | — |
+| M9 | Desktop app v1 (Windows): Tauri shell around the SPA, WASAPI loopback + mic 2-track recording to 16 kHz FLAC with drift handling, tray / hotkey / level meters, auto-upload + auto-job, local copy retained | A 30-min Teams/Feishu call recorded end-to-end lands as a per-channel job; channels stay in sync (< 50 ms drift at the end) |
+| M10 | Desktop app v2: per-process loopback (Windows), macOS ScreenCaptureKit capture, optional backend sidecar, installers | Record only the meeting app while other sounds are excluded; macOS build records a FaceTime/Zoom call |
+| M11 (optional) | pyannote comparison, faster-whisper English-only backend, LLM correction and summary, Linux desktop capture | — |
 
 Order rationale: the cloud provider comes first (M2–M3) because it gives the fastest end-to-end path and fixes the Transcript contract; the local pipeline (M4–M6) is built against the same contract, so the frontend does not change.
 
@@ -340,6 +367,11 @@ faster-whisper, pyannote.audio>=3.1   # M9
 
 # frontend
 vue 3, vite, typescript, naive-ui, wavesurfer.js, pinia, vue-router, openapi-typescript
+
+# desktop (Rust, Tauri 2)
+tauri 2, tauri-plugin-global-shortcut, tauri-plugin-store, tauri-plugin-updater
+cpal (WASAPI loopback / input), wasapi (per-process loopback), rubato (resampling), flacenc or claxon-writer (FLAC),
+reqwest (chunked upload), cidre / objc2 + ScreenCaptureKit (macOS)
 ```
 
 Default local models (ModelScope, cached after first download):
@@ -368,6 +400,10 @@ Default local models (ModelScope, cached after first download):
 | Python 3.13 incompatibilities | uv pins 3.12 via `.python-version` |
 | Browser disconnects during long jobs | Server-side queue, state in SQLite, SSE reconnect |
 | Edits vs character timestamps | Text edits never recompute timestamps; splits use character timestamps; edited segments interpolate proportionally |
+| Loopback and mic streams drift or gap (desktop) | Single monotonic clock, mic resampled to loopback clock, silence fill when the render device idles; drift measured in the M9 acceptance test |
+| Desktop capture permissions / platform differences | Windows first (no permission prompts); macOS needs Screen Recording + Microphone permissions, documented in-app; Linux best effort |
+| Exclusive-mode apps or DRM audio produce silence in loopback | Detect prolonged silence while "playing" and warn; per-process capture in M10 as an alternative path |
+| Unsigned desktop binaries trigger SmartScreen / Gatekeeper | Document the override for internal use; code signing when the tool leaves the team |
 
 ## 10. Decisions taken
 
@@ -381,6 +417,7 @@ Default local models (ModelScope, cached after first download):
 - Preprocessing is decode-only by default; denoise / separation / loudness are opt-in toggles.
 - Cloud file transfer: DashScope temporary upload is sufficient (confirmed); Alibaba OSS kept as an optional fallback; R2 and tunnels not offered.
 - All documentation in English; UI strings Chinese-first with i18n.
+- Desktop app: Tauri 2 wrapping the same SPA; records system audio + mic as a 2-channel 16 kHz FLAC and uploads via the normal API; Windows first, macOS second.
 
 ## 11. Open questions
 
