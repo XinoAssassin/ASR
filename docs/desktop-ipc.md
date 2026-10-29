@@ -107,6 +107,7 @@ type BackendConfig = {
 | `recordings_list` | — | `Recording[]` | Newest first |
 | `recording_upload` | `{ id: string }` | `Recording` | Queue now (manual or retry) |
 | `recording_reveal` | `{ id: string }` | — | Open the folder in Explorer / Finder |
+| `recorder_set_options` | `{ options: StartOptions }` | — | M10: store the options the tray / Ctrl+Alt+R toggle replays, without starting (the SPA calls it, debounced, when options change) |
 | `recorder_processes` | — | `AudioProcess[]` | M10: processes with an active audio session, for `processId` |
 | `sidecar_get_config` | — | `SidecarConfig` | M10 |
 | `sidecar_set_config` | `{ config: SidecarConfig }` | `SidecarConfig` | M10; does not start / stop by itself |
@@ -135,6 +136,10 @@ Jobs for 2-channel recordings use `options.preprocess.channels = "per_channel"` 
 backend rejects `per_channel` on mono files). For a 2-channel recording a missing or `auto`
 channels option becomes `per_channel` (the backend's `auto` may downmix correlated stereo);
 explicit `downmix` / `left` / `right` are kept.
+
+Tray / hotkey toggle: replays the last stored `StartOptions` (`recorder_start` and
+`recorder_set_options` both store them). A stored `processId` whose process is gone falls back to
+the whole device with a warning.
 
 Upload state: a transient failure is `failed` with `nextRetryAt` set (it retries by itself); a
 permanent one (4xx other than 408 / 429) has `nextRetryAt: null` and waits for `recording_upload`
