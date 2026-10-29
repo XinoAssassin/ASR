@@ -1,6 +1,6 @@
 # M4 — Local ASR bake-off (with cloud baselines)
 
-Date: 2026-10-29. Decision at the end (§5). Raw outputs stay in the git-ignored `backend/data/bakeoff/`.
+Date: 2026-10-29. Decision at the end (§5). Scope: local models plus DashScope HTTP models (async filetrans and synchronous short-audio); realtime / WebSocket models are not supported by the project. Raw outputs stay in the git-ignored `backend/data/bakeoff/`.
 
 ## 1. Setup
 
@@ -25,7 +25,6 @@ ASR_MODEL_CACHE_DIR=$PWD/models uv run --no-sync python scripts/bakeoff.py \
     --audio ../ASR_4people-test.m4a --subs ../tests/fixtures/4people.ass \
     --start 870 --end 1110 --terms-file ../tests/fixtures/4people_terms.txt --out data/bakeoff/run
 uv run --no-sync python scripts/cloud_flash_eval.py --run data/bakeoff/run      # costs money
-uv run --no-sync python scripts/cloud_realtime_eval.py --run data/bakeoff/run   # costs money
 uv run --no-sync python scripts/bakeoff_table.py data/bakeoff/run
 ```
 
@@ -42,21 +41,18 @@ uv run --no-sync python scripts/bakeoff_table.py data/bakeoff/run
 | 7 | `fun-asr-flash-2026-06-15` | cloud | - | no | 12.06% | **9.25%** | 38 / 20 / 82 | 12/17 | 0.16 (wall) | - |
 | 8 | `qwen3-asr-1.7b` | local | float32 | no | 12.32% | **9.33%** | 37 / 17 / 89 | 10/17 | 1.411 | 12.0 GB |
 | 9 | `qwen3-asr-1.7b` | local | bfloat16 | no | 12.40% | **9.42%** | 36 / 17 / 91 | 10/17 | 0.437 | 4.7 GB |
-| 10 | `qwen-audio-3.1-asr-flash-message` | cloud | - | no | 11.63% | **9.59%** | 38 / 29 / 68 | 11/17 | 0.79 (wall) | - |
-| 11 | `qwen-audio-3.0-asr-flash` | cloud | - | no | 11.89% | **9.59%** | 41 / 19 / 78 | 11/17 | 0.53 (wall) | - |
-| 12 | `qwen-audio-3.1-realtime-plus` | cloud | - | no | 12.23% | **9.59%** | 40 / 19 / 83 | 11/17 | 0.83 (wall) | - |
-| 13 | `qwen3-asr-0.6b` | local | float32 | yes | 13.78% | **11.15%** | 47 / 22 / 91 | 14/17 | 0.594 | 4.9 GB |
-| 14 | `qwen3-asr-0.6b` | local | bfloat16 | yes | 13.78% | **11.15%** | 45 / 24 / 91 | 14/17 | 0.206 | 2.3 GB |
-| 15 | `qwen3-asr-0.6b` | local | bfloat16 | no | 13.95% | **11.15%** | 57 / 22 / 83 | 9/17 | 0.198 | 2.3 GB |
-| 16 | `qwen3-asr-0.6b` | local | float32 | no | 14.13% | **11.32%** | 58 / 23 / 83 | 8/17 | 0.598 | 4.9 GB |
-| 17 | `fun-asr-nano` | local | float32 | no | 14.56% | **11.50%** | 54 / 19 / 96 | 11/17 | 0.589 | 5.4 GB |
-| 18 | `qwen-audio-3.1-asr-flash-filetrans` | cloud | - | no | 13.44% | **11.58%** | 38 / 47 / 71 | 10/17 | - | - |
-| 19 | `fun-asr-nano` | local | bfloat16 | yes | 14.13% | **12.10%** | 58 / 29 / 77 | 12/17 | 0.201 | 2.6 GB |
-| 20 | `fun-asr-nano` | local | float32 | yes | 14.38% | **12.10%** | 58 / 29 / 80 | 12/17 | 0.580 | 5.4 GB |
-| 21 | `fun-asr-nano` | local | bfloat16 | no | 14.99% | **12.27%** | 61 / 25 / 88 | 8/17 | 0.204 | 2.6 GB |
-| 22 | `seaco-paraformer` | local | float32 | no | 16.11% | **12.62%** | 78 / 11 / 98 | 7/17 | 0.033 | 2.6 GB |
-| 23 | `seaco-paraformer` | local | float32 | yes | 16.19% | **12.71%** | 79 / 11 / 98 | 8/17 | 0.034 | 2.6 GB |
-| 24 | `fun-asr-flash-8k-realtime` | cloud | - | no | 17.40% | **14.69%** | 74 / 31 / 97 | 8/17 | 0.76 (wall) | - |
+| 10 | `qwen-audio-3.0-asr-flash` | cloud | - | no | 11.89% | **9.59%** | 41 / 19 / 78 | 11/17 | 0.53 (wall) | - |
+| 11 | `qwen3-asr-0.6b` | local | float32 | yes | 13.78% | **11.15%** | 47 / 22 / 91 | 14/17 | 0.594 | 4.9 GB |
+| 12 | `qwen3-asr-0.6b` | local | bfloat16 | yes | 13.78% | **11.15%** | 45 / 24 / 91 | 14/17 | 0.206 | 2.3 GB |
+| 13 | `qwen3-asr-0.6b` | local | bfloat16 | no | 13.95% | **11.15%** | 57 / 22 / 83 | 9/17 | 0.198 | 2.3 GB |
+| 14 | `qwen3-asr-0.6b` | local | float32 | no | 14.13% | **11.32%** | 58 / 23 / 83 | 8/17 | 0.598 | 4.9 GB |
+| 15 | `fun-asr-nano` | local | float32 | no | 14.56% | **11.50%** | 54 / 19 / 96 | 11/17 | 0.589 | 5.4 GB |
+| 16 | `qwen-audio-3.1-asr-flash-filetrans` | cloud | - | no | 13.44% | **11.58%** | 38 / 47 / 71 | 10/17 | - | - |
+| 17 | `fun-asr-nano` | local | bfloat16 | yes | 14.13% | **12.10%** | 58 / 29 / 77 | 12/17 | 0.201 | 2.6 GB |
+| 18 | `fun-asr-nano` | local | float32 | yes | 14.38% | **12.10%** | 58 / 29 / 80 | 12/17 | 0.580 | 5.4 GB |
+| 19 | `fun-asr-nano` | local | bfloat16 | no | 14.99% | **12.27%** | 61 / 25 / 88 | 8/17 | 0.204 | 2.6 GB |
+| 20 | `seaco-paraformer` | local | float32 | no | 16.11% | **12.62%** | 78 / 11 / 98 | 7/17 | 0.033 | 2.6 GB |
+| 21 | `seaco-paraformer` | local | float32 | yes | 16.19% | **12.71%** | 79 / 11 / 98 | 8/17 | 0.034 | 2.6 GB |
 
 "Terms in" = term list given to the model (Qwen3: system prompt; Fun-ASR-Nano: `keywords`; Paraformer: `hotword`; cloud: see §4).
 
@@ -78,12 +74,12 @@ Every model hears "Ryoma" as 龙马; Paraformer writes 寂静岭 as 基金岭 / 
 
 ## 3. Findings
 
-1. **Qwen3-ASR-1.7B is the most accurate local model** and matches the best cloud model (8.47–8.64 % vs 8.21 %) with the **best term recall of all 24 runs (15/17)**.
+1. **Qwen3-ASR-1.7B is the most accurate local model** and matches the best cloud model (8.47–8.64 % vs 8.21 %) with the **best term recall of all runs (15/17)**.
 2. **bf16 makes 1.7B practical on CPU.** On AVX512_BF16 hardware it is 3.3× faster than fp32 (RTF 1.45 → 0.43) at 40 % of the memory (12.0 → 4.7 GB) for +0.17 points CER. Qwen3-0.6B shows no accuracy loss in bf16 at all. Without native BF16, 1.7B is slower than real time.
 3. **The term list matters for the Qwen3 family**: 1.7B 10 → 15 hits and −0.8 to −0.9 points CER; 0.6B 8–9 → 14 hits. Paraformer hotwords (7 → 8) and Fun-ASR-Nano keywords (8–11 → 12) help much less.
 4. **Fun-ASR-Nano is dominated by Qwen3-0.6B** (same speed and memory in bf16, ~1 point worse, fewer terms) and is no longer the planned fallback.
 5. **SeACo-Paraformer is 6× faster than anything else** (RTF 0.033, ~30× real time) at +1.5 points CER vs 0.6B and poor English-term handling; useful only as a "fast draft" mode. It must stay fp32: bf16 breaks its CIF timestamp predictor.
-6. **Cloud.** The short-audio HTTP models (`qwen-audio-3.1-asr-flash`, `qwen3-asr-flash`, `fun-asr-flash`) beat the async filetrans model we use today (8.2–9.3 % vs 11.6 %). Only `qwen3-asr-flash` honours an inline term list (11 → 14 hits); the qwen-audio-3.x / fun-asr-flash models accept `vocabulary` / context fields but ignore them (they need a pre-registered `vocabulary_id`). `-message` and `realtime-plus` are WebSocket models with similar accuracy (9.6 %); the 8 kHz telephony model is clearly worse on wide-band audio (14.7 %).
+6. **Cloud.** The short-audio HTTP models (`qwen-audio-3.1-asr-flash`, `qwen3-asr-flash`, `fun-asr-flash`) beat the async filetrans model we use today (8.2–9.3 % vs 11.6 %). Only `qwen3-asr-flash` honours an inline term list (11 → 14 hits); the qwen-audio-3.x / fun-asr-flash models accept `vocabulary` / context fields but ignore them (they need a pre-registered `vocabulary_id`). Realtime WebSocket models (`qwen-audio-3.1-asr-flash-message`, `qwen-audio-3.1-realtime-plus`, `fun-asr-flash-8k-realtime`) were probed once (9.6–14.7 %) but are out of scope for the project, so they are not in the table.
 
 ## 4. Caveats
 

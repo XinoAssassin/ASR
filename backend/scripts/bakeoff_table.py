@@ -2,8 +2,8 @@
 
     uv run --no-sync python scripts/bakeoff_table.py data/bakeoff/part1 data/bakeoff/part2 ...
 
-Reads report.json (local, scripts/bakeoff.py) and cloud_*_report.json (cloud_flash_eval.py,
-cloud_realtime_eval.py, the filetrans baseline) from each directory. All directories must come
+Reads report.json (local, scripts/bakeoff.py) and cloud_*_report.json (cloud_flash_eval.py, the
+filetrans baseline) from each directory. All directories must come
 from the same excerpt (identical chunks.npz), which is checked.
 """
 

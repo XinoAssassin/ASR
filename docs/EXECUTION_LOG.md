@@ -284,4 +284,4 @@ client unchanged on regeneration.
 
 ## 7. M4 (2026-10-29)
 
-Local ASR bake-off done: `docs/M4_BAKEOFF.md` (8 local configurations, 9 cloud models, same 12 VAD chunks). Default decided per D32.
+Local ASR bake-off done: `docs/M4_BAKEOFF.md` (8 local configurations, 5 DashScope HTTP models, same 12 VAD chunks). Default decided per D32.
