@@ -236,9 +236,9 @@ async def test_term_expansion_and_dedupe(client: httpx.AsyncClient, provider: Fa
     assert resp.status_code == 201, resp.text
     terms = resp.json()["options"]["terms"]
     assert terms == [
-        {"term": "FPGA", "weight": 4, "note": "n"},
-        {"term": "SoC", "weight": 3, "note": None},
-        {"term": "Kubernetes", "weight": 50, "note": None},
+        {"term": "FPGA", "weight": 4, "note": "n", "aliases": [], "blacklist": []},
+        {"term": "SoC", "weight": 3, "note": None, "aliases": [], "blacklist": []},
+        {"term": "Kubernetes", "weight": 50, "note": None, "aliases": [], "blacklist": []},
     ]
     stored = (await client.get(f"/api/jobs/{resp.json()['id']}")).json()
     assert stored["options"]["terms"] == terms
