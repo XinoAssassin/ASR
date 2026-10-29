@@ -57,13 +57,18 @@ class ParaformerAsr:
         return texts
 
     def transcribe_timed(
-        self, chunks: Sequence[np.ndarray], *, terms: Sequence[str] = ()
+        self,
+        chunks: Sequence[np.ndarray],
+        *,
+        terms: Sequence[str] = (),
+        language: str | None = "zh",
     ) -> list[tuple[str, list[tuple[str, float, float]]]]:
         """Text plus per-token ``(token, start, end)`` in seconds relative to each chunk.
 
         Paraformer emits one timestamp per space-separated token (CJK character or Latin word),
         so no forced alignment is needed.
         """
+        del language  # Chinese-only model
         hotword = " ".join(t.replace(" ", "") for t in terms) or None
         out: list[tuple[str, list[tuple[str, float, float]]]] = []
         for audio in chunks:

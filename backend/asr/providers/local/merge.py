@@ -169,6 +169,15 @@ def _trailing_end(text: str, end: int) -> int:
     return end
 
 
+def _sentence_end(text: str, start: int, end: int) -> bool:
+    """CJK / ``!?;`` sentence ends anywhere; a Latin full stop only before a space or the end
+    of the text, so ``3.5`` and ``v1.2`` do not split (English output, M11 Whisper route)."""
+    trail = text[start:end]
+    if any(c in SENTENCE_END for c in trail):
+        return True
+    return "." in trail and (end == len(text) or text[end].isspace())
+
+
 def build_segments(
     chunks: Sequence[ChunkResult], turns: Sequence[SpeakerTurn], *, default_speaker: str
 ) -> list[Segment]:
@@ -212,7 +221,7 @@ def build_segments(
                 group = []
             group.append(i)
             end_char = _trailing_end(chunk.text, spans[i][1])
-            if any(c in SENTENCE_END for c in chunk.text[spans[i][1] : end_char]):
+            if _sentence_end(chunk.text, spans[i][1], end_char):
                 _emit_group(chunk, spans, labels, group, emit)
                 group = []
         if group:

@@ -22,7 +22,7 @@ class ModelSpec:
     hub: Hub
     repo_id: str
     kind: Kind
-    engine: Literal["qwen3_asr", "fun_asr_nano", "funasr"]
+    engine: Literal["qwen3_asr", "fun_asr_nano", "funasr", "faster_whisper"]
     marker: str  # weights file; its presence (and no partial files) means the download completed
     note: str = ""
     mirror: str | None = None  # same files on ModelScope (faster from mainland China)
@@ -67,6 +67,26 @@ MODELS: dict[str, ModelSpec] = {
             "funasr",
             "model.pt",
             "SeACo-Paraformer large (fast draft mode, fp32 only)",
+        ),
+        ModelSpec(
+            "faster-whisper-small",
+            "hf",
+            "Systran/faster-whisper-small",
+            "asr",
+            "faster_whisper",
+            "model.bin",
+            "Whisper small, CTranslate2 (English-only route; needs the `whisper` extra)",
+            mirror="Systran/faster-whisper-small",
+        ),
+        ModelSpec(
+            "faster-whisper-large-v3-turbo",
+            "hf",
+            "dropbox-dash/faster-whisper-large-v3-turbo",
+            "asr",
+            "faster_whisper",
+            "model.bin",
+            "Whisper large-v3-turbo, CTranslate2 (English-only route; needs the `whisper` extra)",
+            mirror="pengzhendong/faster-whisper-large-v3-turbo",
         ),
         ModelSpec(
             "qwen3-forced-aligner",
@@ -172,9 +192,28 @@ def required_models(asr_model: str) -> list[str]:
     if s.kind != "asr":
         raise KeyError(f"{asr_model!r} is not an ASR model")
     needed = ["fsmn-vad", asr_model, "campplus"]
-    if s.engine != "funasr":  # Paraformer emits its own timestamps
+    if not emits_timestamps(asr_model):
         needed.insert(2, "qwen3-forced-aligner")
     return needed
+
+
+def emits_timestamps(asr_model: str) -> bool:
+    """Paraformer and Whisper give token / word times themselves (no forced aligner)."""
+    return spec(asr_model).engine in ("funasr", "faster_whisper")
+
+
+ENGINE_PACKAGES: dict[str, tuple[str, str]] = {
+    # engine -> (import name, extra that installs it); engines not listed need only `local`.
+    "faster_whisper": ("faster_whisper", "whisper"),
+}
+
+
+def engine_installed(asr_model: str) -> bool:
+    """True when the Python package of the model's engine is importable."""
+    import importlib.util
+
+    package = ENGINE_PACKAGES.get(spec(asr_model).engine)
+    return package is None or importlib.util.find_spec(package[0]) is not None
 
 
 def missing_models(cache_dir: Path, asr_model: str) -> list[str]:

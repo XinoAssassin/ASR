@@ -253,7 +253,7 @@ def test_single_speaker_skips_diarization(tmp_path: Path) -> None:
 
 def test_paraformer_style_engine_skips_aligner(tmp_path: Path) -> None:
     class TimedAsr(FakeAsr):
-        def transcribe_timed(self, chunks, *, terms=()):
+        def transcribe_timed(self, chunks, *, terms=(), language=None):
             return [
                 (
                     "你好世界",

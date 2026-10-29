@@ -61,6 +61,11 @@ def _resolve_local(body: JobCreate, settings: EffectiveSettings) -> LocalOptions
         missing = local_models.missing_models(settings.model_cache_dir, asr_model)
     except KeyError:
         raise HTTPException(_422, f"unknown local ASR model {asr_model!r}") from None
+    if not local_models.engine_installed(asr_model):
+        extra = local_models.ENGINE_PACKAGES[local_models.spec(asr_model).engine][1]
+        raise HTTPException(
+            _422, f"{asr_model} needs the `{extra}` extra (uv sync ... --extra {extra})"
+        )
     if missing:
         raise HTTPException(
             _422,

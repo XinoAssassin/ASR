@@ -32,7 +32,7 @@ from asr.providers.base import (
 )
 from asr.providers.local.device import resolve_dtype
 from asr.providers.local.merge import ChunkResult, SpeakerTurn, Token, build_segments
-from asr.providers.local.models import ModelNotDownloaded, spec
+from asr.providers.local.models import ModelNotDownloaded, engine_installed, spec
 from asr.providers.local.vad import SAMPLE_RATE, cut, merge_segments
 
 MAX_CHUNK_S = 25.0
@@ -117,6 +117,16 @@ def load_engines(cache_dir: Path, asr_model: str, *, device: str, dtype: str) ->
 
                 asr: Any = ParaformerAsr(cache_dir, device=device)
                 aligner: Aligner | None = None
+            elif s.engine == "faster_whisper":
+                if not engine_installed(asr_model):
+                    raise ProviderError(
+                        f"{asr_model} needs the faster-whisper package "
+                        "(install the backend with the `whisper` extra)"
+                    )
+                from asr.providers.local.asr_whisper import WhisperAsr
+
+                asr = WhisperAsr(cache_dir, asr_model, device=device, dtype=dtype)
+                aligner = None
             else:
                 from asr.providers.local.align import ForcedAligner
                 from asr.providers.local.asr_transformers import TransformersAsr
@@ -183,6 +193,11 @@ class LocalPipelineProvider:
         )
         terms = [t.term for t in options.terms]
         language = _language(options.language_hints)
+        if _is_whisper(self.asr_model) and language != "en":
+            warnings.append(
+                f"{self.asr_model} is the English-only route; set language_hints to ['en'] "
+                "or use a Qwen3-ASR model for Chinese audio"
+            )
         single_speaker = options.num_speakers == 1
 
         all_segments = []
@@ -285,7 +300,7 @@ class LocalPipelineProvider:
         for i, (piece, (start, end)) in enumerate(zip(pieces, spans, strict=True)):
             report("asr", at(0.05 + 0.6 * i / n), f"Recognising speech ({i + 1}/{n})")
             if timed is not None:
-                text, raw = timed([piece], terms=terms)[0]
+                text, raw = timed([piece], terms=terms, language=language)[0]
                 tokens = [Token(t, start + a, start + b) for t, a, b in raw]
             else:
                 text = engines.asr.transcribe(
@@ -303,6 +318,13 @@ class LocalPipelineProvider:
                     tokens = [Token(t.text, start + t.start, start + t.end) for t in aligned]
             chunks.append(ChunkResult(start=start, end=end, text=text, tokens=tokens))
         return chunks
+
+
+def _is_whisper(asr_model: str) -> bool:
+    try:
+        return spec(asr_model).engine == "faster_whisper"
+    except KeyError:
+        return False
 
 
 def _language(hints: Sequence[str]) -> str | None:
