@@ -116,8 +116,7 @@ const canStart = computed(
     uploads.ready.length > 0 &&
     !submitting.value &&
     !uploads.uploading &&
-    termsParsed.value.errors.length === 0 &&
-    uploads.jobForm.provider === 'cloud',
+    termsParsed.value.errors.length === 0,
 )
 
 async function startJobs(): Promise<void> {

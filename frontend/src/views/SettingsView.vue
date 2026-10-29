@@ -97,6 +97,7 @@ function saveApiKey(): void {
   message.success(t('settings.saved'))
   void health.check()
   void settings.load()
+  void loadLocalModels() // the list was empty (401) before the key was set
   void pushToDesktop()
 }
 
