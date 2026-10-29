@@ -157,8 +157,9 @@ class JobCreate(BaseModel):
     """Exactly one of ``upload_id`` / ``file_url``.
 
     Effective provider: ``provider`` if given, else ``options.provider`` if the client set it,
-    else the settings default; the server stores it in ``options.provider``. ``local`` is rejected
-    (422) until M5 (D4), and ``file_url`` jobs are cloud-only (D3). ``options.terms`` is rebuilt
+    else the settings default; the server stores it in ``options.provider``. ``local`` jobs need an
+    upload and downloaded models (422 otherwise); the resolved ASR model and device are pinned in
+    ``options.local``. ``file_url`` jobs are cloud-only (D3). ``options.terms`` is rebuilt
     server-side from ``term_set_ids`` + ``extra_terms``.
     """
 
@@ -335,8 +336,8 @@ class SettingsUpdate(BaseModel):
 
 
 class LocalModelOut(BaseModel):
-    id: str = Field(description="ModelScope model id.")
-    name: str
+    id: str = Field(description="Registry key, as used by `asr models download <id>`.")
+    name: str = Field(description="Hub repository id.")
     kind: Literal["asr", "aligner", "vad", "diarization"]
     size_mb: int | None = None
     downloaded: bool

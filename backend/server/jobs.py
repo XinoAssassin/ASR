@@ -3,7 +3,7 @@
 Design:
 
 - Two asyncio queues of job ids: ``cloud`` (``cloud_concurrency`` workers, default 3) and
-  ``local`` (one worker; nothing runnable until M5, D4).
+  ``local`` (one worker: local models are CPU / GPU bound and loaded once per process).
 - A worker claims a job with an atomic ``queued -> running`` transition, then runs the synchronous
   provider in a thread (``asyncio.to_thread``).
 - The provider's progress callback runs in that thread. It checks the job's cancel flag (raising
@@ -61,6 +61,13 @@ ProviderFactory = Callable[[JobOut, EffectiveSettings, Path], TranscriptionProvi
 def default_provider_factory(
     job: JobOut, settings: EffectiveSettings, work_dir: Path
 ) -> TranscriptionProvider:
+    if job.provider == "local":
+        return asr.providers.get_provider(
+            "local",
+            cache_dir=settings.model_cache_dir,
+            asr_model=job.options.local.asr_model,
+            device=job.options.local.device or settings.local_device,
+        )
     if job.provider != "cloud":
         return asr.providers.get_provider(job.provider)
     return asr.providers.get_provider(

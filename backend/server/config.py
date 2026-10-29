@@ -228,6 +228,7 @@ class EffectiveSettings(BaseModel):
     local_asr_model: str | None
     local_diarize_model: str | None
     local_device: Literal["cpu", "cuda"]
+    model_cache_dir: Path
 
     @property
     def cloud_api_key_set(self) -> bool:
@@ -249,6 +250,7 @@ def effective_settings(env: EnvSettings, overrides: Mapping[str, str]) -> Effect
         "local_asr_model": None,
         "local_diarize_model": None,
         "local_device": env.device,
+        "model_cache_dir": env.model_cache_dir,
     }
     mapping = {
         SETTING_PROVIDER_DEFAULT: "provider_default",

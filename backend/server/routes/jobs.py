@@ -12,8 +12,10 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from sse_starlette import EventSourceResponse
 
-from asr.providers.base import JobOptions, ProviderName, Term
-from server.config import EnvSettings, load_effective_settings
+from asr.providers.base import JobOptions, LocalOptions, ProviderName, Term
+from asr.providers.local import models as local_models
+from asr.providers.local.pipeline import default_asr_model
+from server.config import EffectiveSettings, EnvSettings, load_effective_settings
 from server.db import Database, utcnow
 from server.deps import DbDep, EnvDep, JobManagerDep
 from server.jobs import MISSING_KEY, TERMINAL_STATUSES
@@ -41,6 +43,31 @@ def _check_file_url(url: str) -> None:
         raise HTTPException(_422, "file_url must not contain credentials")
     if any(c.isspace() for c in url):
         raise HTTPException(_422, "file_url must not contain whitespace")
+
+
+def _resolve_local(body: JobCreate, settings: EffectiveSettings) -> LocalOptions:
+    """Validate a local job and pin its ASR model / device into the stored options."""
+    if body.file_url is not None:
+        raise HTTPException(_422, "the local provider needs an uploaded file, not file_url (D3)")
+    if not local_models.local_stack_installed():
+        raise HTTPException(
+            _422, "the local model stack is not installed (uv sync --extra cpu --extra local)"
+        )
+    device = body.options.local.device or settings.local_device
+    asr_model = (
+        body.options.local.asr_model or settings.local_asr_model or default_asr_model(device)
+    )
+    try:
+        missing = local_models.missing_models(settings.model_cache_dir, asr_model)
+    except KeyError:
+        raise HTTPException(_422, f"unknown local ASR model {asr_model!r}") from None
+    if missing:
+        raise HTTPException(
+            _422,
+            f"local models not downloaded: {', '.join(missing)} "
+            f"(run `asr models download {' '.join(missing)}`)",
+        )
+    return body.options.local.model_copy(update={"asr_model": asr_model, "device": device})
 
 
 def _effective_provider(body: JobCreate, default: ProviderName) -> ProviderName:
@@ -79,17 +106,21 @@ async def _get_or_404(db: Database, job_id: str) -> JobOut:
 async def create_job(body: JobCreate, db: DbDep, env: EnvDep, manager: JobManagerDep) -> JobOut:
     settings = await load_effective_settings(env, db)
     provider = _effective_provider(body, settings.provider_default)
+    options_update: dict[str, Any] = {}
     if provider == "local":
-        raise HTTPException(_422, "the local provider is not available until M5")
-    if body.file_url is not None:
-        _check_file_url(body.file_url)
-    if not settings.cloud_api_key_set:
-        raise HTTPException(_422, MISSING_KEY)
+        options_update["local"] = _resolve_local(body, settings)
+    else:
+        if body.file_url is not None:
+            _check_file_url(body.file_url)
+        if not settings.cloud_api_key_set:
+            raise HTTPException(_422, MISSING_KEY)
     if body.upload_id is not None and await db.get_upload(body.upload_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "upload not found")
 
     terms = await _expand_terms(db, body)
-    options: JobOptions = body.options.model_copy(update={"provider": provider, "terms": terms})
+    options: JobOptions = body.options.model_copy(
+        update={"provider": provider, "terms": terms, **options_update}
+    )
     # Re-validate the merged model so the stored options are exactly what the schema allows.
     options = JobOptions.model_validate(options.model_dump())
 

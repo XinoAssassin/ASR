@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, status
 from fastapi.concurrency import run_in_threadpool
 
 from asr.providers import cloud as cloud_provider
+from asr.providers.local import models as local_models
 from server import config
 from server.config import EffectiveSettings, EnvSettings, load_effective_settings, mask_secret
 from server.deps import DbDep, EnvDep
@@ -27,42 +28,7 @@ log = logging.getLogger(__name__)
 
 _422 = status.HTTP_422_UNPROCESSABLE_CONTENT
 
-LOCAL_MODELS: tuple[LocalModelOut, ...] = (
-    LocalModelOut(
-        id="Qwen/Qwen3-ASR-1.7B", name="Qwen3-ASR 1.7B", kind="asr", size_mb=None, downloaded=False
-    ),
-    LocalModelOut(
-        id="Qwen/Qwen3-ASR-0.6B", name="Qwen3-ASR 0.6B", kind="asr", size_mb=None, downloaded=False
-    ),
-    LocalModelOut(
-        id="FunAudioLLM/Fun-ASR-Nano-2512",
-        name="Fun-ASR-Nano 2512",
-        kind="asr",
-        size_mb=None,
-        downloaded=False,
-    ),
-    LocalModelOut(
-        id="Qwen/Qwen3-ForcedAligner-0.6B",
-        name="Qwen3 Forced Aligner 0.6B",
-        kind="aligner",
-        size_mb=None,
-        downloaded=False,
-    ),
-    LocalModelOut(
-        id="iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-        name="FSMN-VAD",
-        kind="vad",
-        size_mb=None,
-        downloaded=False,
-    ),
-    LocalModelOut(
-        id="iic/speech_campplus_sv_zh-cn_16k-common",
-        name="CAM++",
-        kind="diarization",
-        size_mb=None,
-        downloaded=False,
-    ),
-)
+_KIND = {"asr": "asr", "align": "aligner", "vad": "vad", "diarize": "diarization"}
 
 
 def _settings_out(env: EnvSettings, eff: EffectiveSettings) -> SettingsOut:
@@ -101,7 +67,12 @@ async def update_settings(body: SettingsUpdate, db: DbDep, env: EnvDep) -> Setti
         writes[config.SETTING_PROVIDER_DEFAULT] = body.provider_default
     if body.local is not None:
         if body.local.asr_model is not None:
-            writes[config.SETTING_LOCAL_ASR_MODEL] = body.local.asr_model.strip()
+            asr_model = body.local.asr_model.strip()
+            if asr_model and (
+                asr_model not in local_models.MODELS or local_models.MODELS[asr_model].kind != "asr"
+            ):
+                raise HTTPException(_422, f"unknown local ASR model {asr_model!r}")
+            writes[config.SETTING_LOCAL_ASR_MODEL] = asr_model
         if body.local.diarize_model is not None:
             writes[config.SETTING_LOCAL_DIARIZE_MODEL] = body.local.diarize_model.strip()
         if body.local.device is not None:
@@ -163,6 +134,22 @@ async def test_cloud(db: DbDep, env: EnvDep) -> ConnectionTestResult:
 
 
 @router.get("/local-models", response_model=list[LocalModelOut])
-async def list_local_models() -> list[LocalModelOut]:
-    """Static list; every entry ``downloaded=false`` until M6."""
-    return list(LOCAL_MODELS)
+async def list_local_models(env: EnvDep) -> list[LocalModelOut]:
+    """Registry models and whether they are in ``ASR_MODEL_CACHE_DIR`` (`asr models download`)."""
+
+    def scan() -> list[LocalModelOut]:
+        cache = env.model_cache_dir
+        return [
+            LocalModelOut(
+                id=key,
+                name=spec.repo_id,
+                kind=_KIND.get(spec.kind, "asr"),  # type: ignore[arg-type]
+                size_mb=local_models.disk_size_mb(cache, key)
+                if local_models.is_downloaded(cache, key)
+                else None,
+                downloaded=local_models.is_downloaded(cache, key),
+            )
+            for key, spec in local_models.MODELS.items()
+        ]
+
+    return await run_in_threadpool(scan)

@@ -108,12 +108,62 @@ async def test_file_url_job_runs_without_fetching(
         {"file_url": "https://example.com/a.mp3", "options": {"provider": "local"}},
     ],
 )
-async def test_local_provider_rejected(
+async def test_local_provider_rejects_file_url(
     client: httpx.AsyncClient, provider: FakeProvider, body: dict[str, Any]
 ) -> None:
     resp = await client.post("/api/jobs", json=body)
     assert resp.status_code == 422
-    assert "local" in resp.json()["detail"]
+    assert "file_url" in resp.json()["detail"]
+
+
+def _fake_models(env: EnvSettings, keys: list[str]) -> None:
+    from asr.providers.local import models
+
+    for key in keys:
+        path = models.model_path(env.model_cache_dir, key)
+        path.mkdir(parents=True, exist_ok=True)
+        (path / models.spec(key).marker).write_bytes(b"x")
+
+
+async def test_local_job_needs_downloaded_models(
+    app: FastAPI, client: httpx.AsyncClient, env: EnvSettings, provider: FakeProvider
+) -> None:
+    upload = await add_upload(app, env)
+    body = {
+        "upload_id": upload.id,
+        "provider": "local",
+        "options": {"local": {"asr_model": "qwen3-asr-0.6b"}},
+    }
+    resp = await client.post("/api/jobs", json=body)
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "asr models download" in detail and "qwen3-asr-0.6b" in detail
+    bad = {**body, "options": {"local": {"asr_model": "whisper"}}}
+    assert (await client.post("/api/jobs", json=bad)).status_code == 422
+
+
+async def test_local_job_pins_model_and_needs_no_cloud_key(
+    env_factory: EnvFactory, make_client: ClientFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = env_factory()  # no DashScope key at all
+    _fake_models(env, ["fsmn-vad", "qwen3-asr-0.6b", "qwen3-forced-aligner", "campplus"])
+    from server.routes import jobs as jobs_routes
+
+    monkeypatch.setattr(jobs_routes, "default_asr_model", lambda device="cpu": "qwen3-asr-0.6b")
+    async with make_client(env) as c:
+        app = c._transport.app  # type: ignore[attr-defined]
+        install(app, FakeProvider())
+        upload = await add_upload(app, env)
+        resp = await c.post("/api/jobs", json={"upload_id": upload.id, "provider": "local"})
+        assert resp.status_code == 201, resp.text
+        job = resp.json()
+        assert job["options"]["local"] == {
+            "asr_model": "qwen3-asr-0.6b",
+            "diarize_model": None,
+            "device": "cpu",
+        }
+        done = await wait_status(c, job["id"], {"succeeded", "failed"})
+        assert done["status"] == "succeeded", done
 
 
 async def test_provider_precedence(client: httpx.AsyncClient, provider: FakeProvider) -> None:

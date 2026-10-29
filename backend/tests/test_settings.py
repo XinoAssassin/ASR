@@ -124,7 +124,7 @@ async def test_partial_update(client: httpx.AsyncClient) -> None:
         "/api/settings",
         json={
             "provider_default": "local",
-            "local": {"asr_model": "Qwen/Qwen3-ASR-0.6B", "device": "cuda"},
+            "local": {"asr_model": "qwen3-asr-0.6b", "device": "cuda"},
             "cloud": {
                 "endpoint": "https://cn-beijing.maas.qianwenaiapi.com/",
                 "file_transfer": "public_url",
@@ -134,7 +134,7 @@ async def test_partial_update(client: httpx.AsyncClient) -> None:
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["provider_default"] == "local"
-    assert body["local"]["asr_model"] == "Qwen/Qwen3-ASR-0.6B"
+    assert body["local"]["asr_model"] == "qwen3-asr-0.6b"
     assert body["local"]["device"] == "cuda"
     assert body["local"]["diarize_model"] is None
     assert body["cloud"]["endpoint"] == "https://cn-beijing.maas.qianwenaiapi.com"
@@ -208,3 +208,31 @@ async def test_local_models(client: httpx.AsyncClient) -> None:
     models = (await client.get("/api/settings/local-models")).json()
     assert models and all(m["downloaded"] is False for m in models)
     assert {m["kind"] for m in models} == {"asr", "aligner", "vad", "diarization"}
+
+
+async def test_unknown_local_asr_model_rejected(client: httpx.AsyncClient) -> None:
+    for bad in ("Qwen/Qwen3-ASR-0.6B", "campplus", "whisper"):
+        resp = await client.put("/api/settings", json={"local": {"asr_model": bad}})
+        assert resp.status_code == 422, bad
+    resp = await client.put("/api/settings", json={"local": {"asr_model": ""}})
+    assert resp.status_code == 200  # empty clears the override (M4 default applies)
+
+
+async def test_local_models_report_download_state(
+    client: httpx.AsyncClient, env: EnvSettings
+) -> None:
+    from asr.providers.local import models
+
+    path = models.model_path(env.model_cache_dir, "fsmn-vad")
+    path.mkdir(parents=True)
+    (path / "model.pt").write_bytes(b"x" * 2048)
+    resp = await client.get("/api/settings/local-models")
+    assert resp.status_code == 200
+    rows = {r["id"]: r for r in resp.json()}
+    assert set(rows) == set(models.MODELS)
+    assert rows["fsmn-vad"]["downloaded"] is True and rows["fsmn-vad"]["kind"] == "vad"
+    assert (
+        rows["qwen3-asr-1.7b"]["downloaded"] is False and rows["qwen3-asr-1.7b"]["size_mb"] is None
+    )
+    assert rows["qwen3-forced-aligner"]["kind"] == "aligner"
+    assert rows["campplus"]["kind"] == "diarization"

@@ -164,3 +164,32 @@ def download(cache_dir: Path, key: str, *, mirror: bool = False) -> Path:
     for partial in [p for p in target.rglob("*") if p.name.endswith(_PARTIAL_SUFFIXES)]:
         partial.unlink(missing_ok=True)
     return target
+
+
+def required_models(asr_model: str) -> list[str]:
+    """Every model a local job with ``asr_model`` loads (VAD, ASR, aligner if needed, CAM++)."""
+    s = spec(asr_model)
+    if s.kind != "asr":
+        raise KeyError(f"{asr_model!r} is not an ASR model")
+    needed = ["fsmn-vad", asr_model, "campplus"]
+    if s.engine != "funasr":  # Paraformer emits its own timestamps
+        needed.insert(2, "qwen3-forced-aligner")
+    return needed
+
+
+def missing_models(cache_dir: Path, asr_model: str) -> list[str]:
+    return [key for key in required_models(asr_model) if not is_downloaded(cache_dir, key)]
+
+
+def local_stack_installed() -> bool:
+    """True when the ``local`` extra (torch, transformers, funasr) is importable."""
+    import importlib.util
+
+    return all(importlib.util.find_spec(m) is not None for m in ("torch", "transformers", "funasr"))
+
+
+def disk_size_mb(cache_dir: Path, key: str) -> int | None:
+    path = model_path(cache_dir, key)
+    if not path.is_dir():
+        return None
+    return round(sum(p.stat().st_size for p in path.rglob("*") if p.is_file()) / 1024**2)

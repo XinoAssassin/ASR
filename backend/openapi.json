@@ -320,7 +320,7 @@
         "type": "object"
       },
       "JobCreate": {
-        "description": "Exactly one of ``upload_id`` / ``file_url``.\n\nEffective provider: ``provider`` if given, else ``options.provider`` if the client set it,\nelse the settings default; the server stores it in ``options.provider``. ``local`` is rejected\n(422) until M5 (D4), and ``file_url`` jobs are cloud-only (D3). ``options.terms`` is rebuilt\nserver-side from ``term_set_ids`` + ``extra_terms``.",
+        "description": "Exactly one of ``upload_id`` / ``file_url``.\n\nEffective provider: ``provider`` if given, else ``options.provider`` if the client set it,\nelse the settings default; the server stores it in ``options.provider``. ``local`` jobs need an\nupload and downloaded models (422 otherwise); the resolved ASR model and device are pinned in\n``options.local``. ``file_url`` jobs are cloud-only (D3). ``options.terms`` is rebuilt\nserver-side from ``term_set_ids`` + ``extra_terms``.",
         "properties": {
           "extra_terms": {
             "items": {
@@ -647,7 +647,7 @@
             "type": "boolean"
           },
           "id": {
-            "description": "ModelScope model id.",
+            "description": "Registry key, as used by `asr models download <id>`.",
             "title": "Id",
             "type": "string"
           },
@@ -662,6 +662,7 @@
             "type": "string"
           },
           "name": {
+            "description": "Hub repository id.",
             "title": "Name",
             "type": "string"
           },
@@ -2196,7 +2197,7 @@
     },
     "/api/settings/local-models": {
       "get": {
-        "description": "Static list; every entry ``downloaded=false`` until M6.",
+        "description": "Registry models and whether they are in ``ASR_MODEL_CACHE_DIR`` (`asr models download`).",
         "operationId": "list_local_models_api_settings_local_models_get",
         "responses": {
           "200": {

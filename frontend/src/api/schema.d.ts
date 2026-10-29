@@ -200,7 +200,7 @@ export interface paths {
         };
         /**
          * List Local Models
-         * @description Static list; every entry ``downloaded=false`` until M6.
+         * @description Registry models and whether they are in ``ASR_MODEL_CACHE_DIR`` (`asr models download`).
          */
         get: operations["list_local_models_api_settings_local_models_get"];
         put?: never;
@@ -627,8 +627,9 @@ export interface components {
          * @description Exactly one of ``upload_id`` / ``file_url``.
          *
          *     Effective provider: ``provider`` if given, else ``options.provider`` if the client set it,
-         *     else the settings default; the server stores it in ``options.provider``. ``local`` is rejected
-         *     (422) until M5 (D4), and ``file_url`` jobs are cloud-only (D3). ``options.terms`` is rebuilt
+         *     else the settings default; the server stores it in ``options.provider``. ``local`` jobs need an
+         *     upload and downloaded models (422 otherwise); the resolved ASR model and device are pinned in
+         *     ``options.local``. ``file_url`` jobs are cloud-only (D3). ``options.terms`` is rebuilt
          *     server-side from ``term_set_ids`` + ``extra_terms``.
          */
         JobCreate: {
@@ -736,7 +737,7 @@ export interface components {
             downloaded: boolean;
             /**
              * Id
-             * @description ModelScope model id.
+             * @description Registry key, as used by `asr models download <id>`.
              */
             id: string;
             /**
@@ -744,7 +745,10 @@ export interface components {
              * @enum {string}
              */
             kind: "asr" | "aligner" | "vad" | "diarization";
-            /** Name */
+            /**
+             * Name
+             * @description Hub repository id.
+             */
             name: string;
             /** Size Mb */
             size_mb?: number | null;
