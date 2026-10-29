@@ -29,6 +29,10 @@ export interface RecorderStatus {
   /** Measured mic-vs-loopback drift, after resampling. */
   driftMs: number | null
   warnings: string[]
+  /** What is actually captured (a missing mic falls back to system-only with a warning). */
+  sources: { system: boolean; mic: boolean }
+  /** Process tree being captured; null = whole device. */
+  processId: number | null
 }
 
 export interface StartOptions {
@@ -39,6 +43,38 @@ export interface StartOptions {
   inputDevice: string | null
   /** null = <Documents>/ASR Recordings. */
   outDir: string | null
+  /** Capture only this process tree (Windows 10 2004+); null / absent = the whole render device. */
+  processId?: number | null
+}
+
+/** A process with an active audio session (`recorder_processes`). */
+export interface AudioProcess {
+  pid: number
+  name: string
+  title: string | null
+}
+
+/** Optional local backend started by the app. */
+export interface SidecarConfig {
+  /** Start with the app, stop on quit. */
+  enabled: boolean
+  /** e.g. D:\ASR\backend\.venv\Scripts\asr.exe */
+  command: string
+  /** Default ["serve", "--port", "8000"]. */
+  args: string[]
+  cwd: string | null
+  /** Health checked at http://127.0.0.1:{port}/api/health. */
+  port: number
+}
+
+export type SidecarState = 'stopped' | 'starting' | 'running' | 'failed'
+
+export interface SidecarStatus {
+  state: SidecarState
+  pid: number | null
+  /** http://127.0.0.1:{port} while running. */
+  url: string | null
+  error: string | null
 }
 
 export type UploadState = 'pending' | 'uploading' | 'uploaded' | 'transcribing' | 'done' | 'failed'
@@ -93,6 +129,16 @@ export interface DesktopPlatform {
     start(options: StartOptions): Promise<RecorderStatus>
     stop(): Promise<Recording>
     status(): Promise<RecorderStatus>
+    processes(): Promise<AudioProcess[]>
+  }
+  sidecar: {
+    getConfig(): Promise<SidecarConfig>
+    /** Does not start / stop by itself. */
+    setConfig(config: SidecarConfig): Promise<SidecarConfig>
+    status(): Promise<SidecarStatus>
+    /** Resolves once healthy or failed (timeout 120 s). */
+    start(): Promise<SidecarStatus>
+    stop(): Promise<SidecarStatus>
   }
   backendConfig: {
     get(): Promise<BackendConfig>
@@ -108,5 +154,7 @@ export interface DesktopPlatform {
     onRecorderStatus(handler: (status: RecorderStatus) => void): Promise<Unlisten>
     /** `recordings://changed` */
     onRecordingChanged(handler: (recording: Recording) => void): Promise<Unlisten>
+    /** `sidecar://status` */
+    onSidecarStatus(handler: (status: SidecarStatus) => void): Promise<Unlisten>
   }
 }

@@ -1,13 +1,17 @@
 /**
  * In-memory `DesktopPlatform` for unit tests (no Tauri). Records every call and lets the test
- * emit `recorder://status` / `recordings://changed` events.
+ * emit `recorder://status` / `recordings://changed` / `sidecar://status` events.
+ * `state.missing` simulates an older core without some commands.
  */
 import type {
+  AudioProcess,
   BackendConfig,
   DesktopPlatform,
   DeviceList,
   Recording,
   RecorderStatus,
+  SidecarConfig,
+  SidecarStatus,
   StartOptions,
 } from './types'
 
@@ -15,6 +19,7 @@ export interface FakeDesktop extends DesktopPlatform {
   calls: Array<[string, unknown]>
   emitStatus(status: RecorderStatus): void
   emitRecording(recording: Recording): void
+  emitSidecar(status: SidecarStatus): void
   listenerCount(): number
   state: {
     devices: DeviceList
@@ -23,6 +28,13 @@ export interface FakeDesktop extends DesktopPlatform {
     config: BackendConfig
     storedKey: string | null
     failNext: string | null
+    processes: AudioProcess[]
+    /** Pretend the mic cannot be opened: start falls back to system-only (M10). */
+    noMic: boolean
+    sidecarConfig: SidecarConfig
+    sidecar: SidecarStatus
+    /** Commands that reject like an older core would. */
+    missing: Set<string>
   }
 }
 
@@ -50,6 +62,7 @@ export function makeRecording(id: string, patch: Partial<Recording['upload']> = 
 export function createFakeDesktop(): FakeDesktop {
   const statusHandlers = new Set<(s: RecorderStatus) => void>()
   const recordingHandlers = new Set<(r: Recording) => void>()
+  const sidecarHandlers = new Set<(s: SidecarStatus) => void>()
   const calls: Array<[string, unknown]> = []
   const state: FakeDesktop['state'] = {
     devices: {
@@ -66,6 +79,8 @@ export function createFakeDesktop(): FakeDesktop {
       file: null,
       driftMs: null,
       warnings: [],
+      sources: { system: false, mic: false },
+      processId: null,
     },
     recordings: [makeRecording('2026-10-28_09-00-00', { state: 'done', jobId: 'job-1' })],
     config: {
@@ -80,12 +95,27 @@ export function createFakeDesktop(): FakeDesktop {
     },
     storedKey: null,
     failNext: null,
+    processes: [
+      { pid: 4242, name: 'Teams.exe', title: 'Weekly sync | Microsoft Teams' },
+      { pid: 5150, name: 'chrome.exe', title: null },
+    ],
+    noMic: false,
+    sidecarConfig: {
+      enabled: false,
+      command: '',
+      args: ['serve', '--port', '8000'],
+      cwd: null,
+      port: 8000,
+    },
+    sidecar: { state: 'stopped', pid: null, url: null, error: null },
+    missing: new Set(),
   }
 
   const masked = (): BackendConfig => ({ ...state.config, apiKey: state.storedKey ? '***' : null })
 
   async function call<T>(name: string, args: unknown, run: () => T): Promise<T> {
     calls.push([name, args])
+    if (state.missing.has(name)) throw `Command ${name} not found`
     if (state.failNext) {
       const msg = state.failNext
       state.failNext = null
@@ -102,17 +132,58 @@ export function createFakeDesktop(): FakeDesktop {
       start: (options: StartOptions) =>
         call('recorder_start', { options }, () => {
           if (state.status.state !== 'idle') throw 'already recording'
-          state.status = { ...state.status, state: 'recording', file: 'x.partial.wav' }
-          return { ...state.status }
+          const mic = options.mic && !state.noMic
+          state.status = {
+            ...state.status,
+            state: 'recording',
+            file: 'x.partial.wav',
+            sources: { system: options.system, mic },
+            processId: options.processId ?? null,
+            warnings: options.mic && !mic ? ['microphone unavailable, recording system audio only'] : [],
+          }
+          return structuredClone(state.status)
         }),
       stop: () =>
         call('recorder_stop', undefined, () => {
           const rec = makeRecording('2026-10-29_10-00-00')
           state.recordings.unshift(rec)
-          state.status = { ...state.status, state: 'idle', elapsed: 0 }
+          state.status = {
+            ...state.status,
+            state: 'idle',
+            elapsed: 0,
+            sources: { system: false, mic: false },
+            processId: null,
+          }
           return rec
         }),
-      status: () => call('recorder_status', undefined, () => ({ ...state.status })),
+      status: () => call('recorder_status', undefined, () => structuredClone(state.status)),
+      processes: () => call('recorder_processes', undefined, () => structuredClone(state.processes)),
+    },
+    sidecar: {
+      getConfig: () => call('sidecar_get_config', undefined, () => structuredClone(state.sidecarConfig)),
+      setConfig: (config: SidecarConfig) =>
+        call('sidecar_set_config', { config }, () => {
+          state.sidecarConfig = structuredClone(config)
+          return structuredClone(config)
+        }),
+      status: () => call('sidecar_status', undefined, () => ({ ...state.sidecar })),
+      start: () =>
+        call('sidecar_start', undefined, () => {
+          if (!state.sidecarConfig.command) {
+            state.sidecar = { state: 'failed', pid: null, url: null, error: 'command is empty' }
+          } else {
+            const port = state.sidecarConfig.port
+            state.sidecar = { state: 'running', pid: 777, url: `http://127.0.0.1:${port}`, error: null }
+          }
+          sidecarHandlers.forEach((h) => h({ ...state.sidecar }))
+          return { ...state.sidecar }
+        }),
+      stop: () =>
+        call('sidecar_stop', undefined, () => {
+          state.sidecar = { state: 'stopped', pid: null, url: null, error: null }
+          sidecarHandlers.forEach((h) => h({ ...state.sidecar }))
+          return { ...state.sidecar }
+        }),
     },
     backendConfig: {
       get: () => call('backend_get_config', undefined, masked),
@@ -143,10 +214,15 @@ export function createFakeDesktop(): FakeDesktop {
         recordingHandlers.add(handler)
         return () => recordingHandlers.delete(handler)
       },
+      onSidecarStatus: async (handler) => {
+        sidecarHandlers.add(handler)
+        return () => sidecarHandlers.delete(handler)
+      },
     },
     emitStatus: (s) => statusHandlers.forEach((h) => h(s)),
     emitRecording: (r) => recordingHandlers.forEach((h) => h(r)),
-    listenerCount: () => statusHandlers.size + recordingHandlers.size,
+    emitSidecar: (s) => sidecarHandlers.forEach((h) => h(s)),
+    listenerCount: () => statusHandlers.size + recordingHandlers.size + sidecarHandlers.size,
   }
   return fake
 }

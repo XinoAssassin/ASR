@@ -34,6 +34,7 @@ import {
   type SettingsUpdate,
 } from '@/api'
 import DesktopSettingsCard from '@/components/recorder/DesktopSettingsCard.vue'
+import SidecarCard from '@/components/recorder/SidecarCard.vue'
 import { useApiErrors } from '@/composables/useApiErrors'
 import { isDesktop } from '@/platform'
 import { useHealthStore } from '@/stores/health'
@@ -61,6 +62,11 @@ async function pushToDesktop(): Promise<void> {
 // --- browser-local connection settings --------------------------------------------------------
 
 const urlInput = ref(settings.backendUrl)
+// Desktop "use this backend" (local sidecar) changes the override from outside this form.
+watch(
+  () => settings.backendUrl,
+  (url) => (urlInput.value = url),
+)
 const keyInput = ref(settings.apiKey)
 const probing = ref(false)
 const probeResult = ref<{ ok: true; info: HealthOut } | { ok: false; text: string } | null>(null)
@@ -391,6 +397,7 @@ onMounted(() => {
 
     <!-- Desktop app only: what the Rust core uses for background uploads -->
     <DesktopSettingsCard v-if="desktop" />
+    <SidecarCard v-if="desktop" />
 
     <!-- Server-side settings -->
     <NCard :title="t('settings.server.title')">

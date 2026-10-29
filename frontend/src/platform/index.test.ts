@@ -73,6 +73,13 @@ describe('tauri facade (docs/desktop-ipc.md)', () => {
     await p.recordings.list()
     await p.recordings.upload('r1')
     await p.recordings.reveal('r1')
+    await p.recorder.processes()
+    const sidecar = { enabled: true, command: 'asr.exe', args: ['serve'], cwd: null, port: 8000 }
+    await p.sidecar.getConfig()
+    await p.sidecar.setConfig(sidecar)
+    await p.sidecar.status()
+    await p.sidecar.start()
+    await p.sidecar.stop()
     const sent = fake.invoke.mock.calls.map(([cmd, args]) => [cmd, args])
     expect(sent).toEqual([
       ['recorder_devices', {}],
@@ -84,6 +91,12 @@ describe('tauri facade (docs/desktop-ipc.md)', () => {
       ['recordings_list', {}],
       ['recording_upload', { id: 'r1' }],
       ['recording_reveal', { id: 'r1' }],
+      ['recorder_processes', {}],
+      ['sidecar_get_config', {}],
+      ['sidecar_set_config', { config: sidecar }],
+      ['sidecar_status', {}],
+      ['sidecar_start', {}],
+      ['sidecar_stop', {}],
     ])
   })
 
@@ -105,6 +118,8 @@ describe('tauri facade (docs/desktop-ipc.md)', () => {
 
     await p.events.onRecordingChanged(() => {})
     expect(fake.invoke.mock.calls.at(-1)![1]).toMatchObject({ event: 'recordings://changed' })
+    await p.events.onSidecarStatus(() => {})
+    expect(fake.invoke.mock.calls.at(-1)![1]).toMatchObject({ event: 'sidecar://status' })
 
     off()
     await vi.waitFor(() =>

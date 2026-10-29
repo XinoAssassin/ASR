@@ -15,6 +15,7 @@ import {
   getDesktop,
   ipcErrorMessage,
   isDesktop,
+  type AudioProcess,
   type BackendConfig,
   type DeviceList,
   type Recording,
@@ -24,6 +25,16 @@ import {
 } from '@/platform'
 
 const OPTIONS_KEY = 'asr.recorder.startOptions'
+const SOURCE_KEY = 'asr.recorder.systemSource'
+
+/** System track: the whole render device, or one application's process tree (M10). */
+export type SystemSourceMode = 'device' | 'process'
+
+interface StoredSystemSource {
+  mode: SystemSourceMode
+  /** Name of the chosen app; pids do not survive restarts, so it is re-matched by name. */
+  processName: string | null
+}
 
 export { DESKTOP_DEFAULT_BACKEND }
 
@@ -34,6 +45,30 @@ export const IDLE_STATUS: RecorderStatus = {
   file: null,
   driftMs: null,
   warnings: [],
+  sources: { system: false, mic: false },
+  processId: null,
+}
+
+/** Fill fields an older (M9) core does not send yet. */
+export function normalizeStatus(s: RecorderStatus, requested?: StartOptions): RecorderStatus {
+  const sources =
+    s.sources ??
+    (s.state === 'idle'
+      ? { system: false, mic: false }
+      : { system: requested?.system ?? true, mic: requested?.mic ?? true })
+  return { ...s, warnings: s.warnings ?? [], sources, processId: s.processId ?? null }
+}
+
+function readSystemSource(): StoredSystemSource {
+  try {
+    const raw = JSON.parse(readStorage(SOURCE_KEY) ?? 'null') as Partial<StoredSystemSource> | null
+    return {
+      mode: raw?.mode === 'process' ? 'process' : 'device',
+      processName: typeof raw?.processName === 'string' && raw.processName ? raw.processName : null,
+    }
+  } catch {
+    return { mode: 'device', processName: null }
+  }
 }
 
 export function defaultStartOptions(): StartOptions {
@@ -77,6 +112,15 @@ export const useRecorderStore = defineStore('recorder', () => {
   const recordings = ref<Recording[]>([])
   const config = ref<BackendConfig | null>(null)
   const options = ref<StartOptions>(readStartOptions())
+  const storedSource = readSystemSource()
+  const sourceMode = ref<SystemSourceMode>(storedSource.mode)
+  /** Chosen application (in-memory: a pid is only valid for this run of the app). */
+  const processId = ref<number | null>(null)
+  const processName = ref<string | null>(storedSource.processName)
+  const processes = ref<AudioProcess[]>([])
+  const loadingProcesses = ref(false)
+  /** e.g. an older core without `recorder_processes`, or Windows before 10 2004. */
+  const processesError = ref<string | null>(null)
   /** jobId → transcriptId, filled on demand for finished jobs. */
   const transcriptIds = ref<Record<string, string>>({})
 
@@ -93,12 +137,64 @@ export const useRecorderStore = defineStore('recorder', () => {
 
   const recording = computed(() => status.value.state === 'recording')
   const active = computed(() => status.value.state !== 'idle')
-  const canStart = computed(
-    () => available && !busy.value && !active.value && (options.value.system || options.value.mic),
+  /** The options `start()` sends (the core keeps them as the tray / hotkey defaults). */
+  const startOptions = computed<StartOptions>(() => ({
+    ...options.value,
+    processId: options.value.system && sourceMode.value === 'process' ? processId.value : null,
+  }))
+  const needsProcess = computed(
+    () => options.value.system && sourceMode.value === 'process' && processId.value == null,
   )
+  const canStart = computed(
+    () =>
+      available &&
+      !busy.value &&
+      !active.value &&
+      (options.value.system || options.value.mic) &&
+      !needsProcess.value,
+  )
+  /** The captured application while recording (from `status.processId`). */
+  const capturedProcess = computed(() => {
+    const pid = status.value.processId
+    if (pid == null) return null
+    return processes.value.find((p) => p.pid === pid) ?? { pid, name: `PID ${pid}`, title: null }
+  })
   const keySet = computed(() => !!config.value?.apiKey)
 
   watch(options, (o) => writeStorage(OPTIONS_KEY, JSON.stringify(o)), { deep: true })
+  watch([sourceMode, processName], ([mode, name]) =>
+    writeStorage(SOURCE_KEY, JSON.stringify({ mode, processName: name })),
+  )
+
+  function selectProcess(pid: number | null): void {
+    processId.value = pid
+    const proc = pid == null ? undefined : processes.value.find((p) => p.pid === pid)
+    processName.value = proc?.name ?? null
+  }
+
+  async function refreshProcesses(): Promise<void> {
+    loadingProcesses.value = true
+    try {
+      processes.value = await (await getDesktop()).recorder.processes()
+      processesError.value = null
+      // Keep the choice if the process is still there, else re-match the app by name.
+      if (!processes.value.some((p) => p.pid === processId.value)) {
+        const byName = processName.value
+          ? processes.value.find((p) => p.name === processName.value)
+          : undefined
+        processId.value = byName?.pid ?? null
+      }
+    } catch (e) {
+      processes.value = []
+      processesError.value = ipcErrorMessage(e)
+    } finally {
+      loadingProcesses.value = false
+    }
+  }
+
+  function setStatus(s: RecorderStatus): void {
+    status.value = normalizeStatus(s, startOptions.value)
+  }
 
   function upsertRecording(rec: Recording): void {
     const rest = recordings.value.filter((r) => r.id !== rec.id)
@@ -132,7 +228,7 @@ export const useRecorderStore = defineStore('recorder', () => {
   }
 
   async function refreshStatus(): Promise<void> {
-    status.value = await (await getDesktop()).recorder.status()
+    setStatus(await (await getDesktop()).recorder.status())
   }
 
   async function loadConfig(): Promise<BackendConfig> {
@@ -151,7 +247,7 @@ export const useRecorderStore = defineStore('recorder', () => {
     initPromise ??= (async () => {
       const platform = await getDesktop()
       unlisteners = await Promise.all([
-        platform.events.onRecorderStatus((s) => (status.value = s)),
+        platform.events.onRecorderStatus(setStatus),
         platform.events.onRecordingChanged(upsertRecording),
       ])
       const results = await Promise.allSettled([
@@ -159,6 +255,8 @@ export const useRecorderStore = defineStore('recorder', () => {
         refreshDevices(),
         refreshRecordings(),
         loadConfig(),
+        // Also resolves the pid of a remembered app (and of one being captured right now).
+        refreshProcesses(),
       ])
       const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
       error.value = failed ? ipcErrorMessage(failed.reason) : null
@@ -189,7 +287,7 @@ export const useRecorderStore = defineStore('recorder', () => {
     if (!canStart.value) return
     busy.value = true
     try {
-      status.value = await (await getDesktop()).recorder.start({ ...options.value })
+      setStatus(await (await getDesktop()).recorder.start({ ...startOptions.value }))
       error.value = null
     } catch (e) {
       error.value = ipcErrorMessage(e)
@@ -207,7 +305,7 @@ export const useRecorderStore = defineStore('recorder', () => {
       upsertRecording(rec)
       error.value = null
       // The status event normally arrives first; read it in case it did not.
-      if (status.value.state === 'recording') status.value = await platform.recorder.status()
+      if (status.value.state === 'recording') setStatus(await platform.recorder.status())
       return rec
     } catch (e) {
       error.value = ipcErrorMessage(e)
@@ -300,6 +398,15 @@ export const useRecorderStore = defineStore('recorder', () => {
     recordings,
     config,
     options,
+    sourceMode,
+    processId,
+    processName,
+    processes,
+    loadingProcesses,
+    processesError,
+    startOptions,
+    needsProcess,
+    capturedProcess,
     transcriptIds,
     initialized,
     busy,
@@ -315,6 +422,8 @@ export const useRecorderStore = defineStore('recorder', () => {
     dispose,
     refreshDevices,
     refreshRecordings,
+    refreshProcesses,
+    selectProcess,
     start,
     stop,
     toggle,

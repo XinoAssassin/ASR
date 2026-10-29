@@ -11,13 +11,17 @@ import type {
   DesktopPlatform,
   DeviceList,
   Recording,
+  AudioProcess,
   RecorderStatus,
+  SidecarConfig,
+  SidecarStatus,
   StartOptions,
 } from './types'
 
 export const EVENTS = {
   recorderStatus: 'recorder://status',
   recordingsChanged: 'recordings://changed',
+  sidecarStatus: 'sidecar://status',
 } as const
 
 export function createTauriPlatform(): DesktopPlatform {
@@ -27,6 +31,14 @@ export function createTauriPlatform(): DesktopPlatform {
       start: (options: StartOptions) => invoke<RecorderStatus>('recorder_start', { options }),
       stop: () => invoke<Recording>('recorder_stop'),
       status: () => invoke<RecorderStatus>('recorder_status'),
+      processes: () => invoke<AudioProcess[]>('recorder_processes'),
+    },
+    sidecar: {
+      getConfig: () => invoke<SidecarConfig>('sidecar_get_config'),
+      setConfig: (config: SidecarConfig) => invoke<SidecarConfig>('sidecar_set_config', { config }),
+      status: () => invoke<SidecarStatus>('sidecar_status'),
+      start: () => invoke<SidecarStatus>('sidecar_start'),
+      stop: () => invoke<SidecarStatus>('sidecar_stop'),
     },
     backendConfig: {
       get: () => invoke<BackendConfig>('backend_get_config'),
@@ -42,6 +54,8 @@ export function createTauriPlatform(): DesktopPlatform {
         listen<RecorderStatus>(EVENTS.recorderStatus, (e) => handler(e.payload)),
       onRecordingChanged: (handler) =>
         listen<Recording>(EVENTS.recordingsChanged, (e) => handler(e.payload)),
+      onSidecarStatus: (handler) =>
+        listen<SidecarStatus>(EVENTS.sidecarStatus, (e) => handler(e.payload)),
     },
   }
 }

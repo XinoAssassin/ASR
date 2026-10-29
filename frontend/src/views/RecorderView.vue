@@ -10,6 +10,8 @@ import {
   NButton,
   NCard,
   NInput,
+  NRadioButton,
+  NRadioGroup,
   NResult,
   NSelect,
   NSpace,
@@ -59,6 +61,32 @@ const inputDevice = computed({
 const outDir = computed({
   get: () => recorder.options.outDir ?? '',
   set: (v: string) => (recorder.options.outDir = v.trim() ? v : null),
+})
+
+const processOptions = computed(() =>
+  recorder.processes.map((p) => ({
+    label: p.title ? `${p.name} — ${p.title}` : p.name,
+    value: p.pid,
+  })),
+)
+const processValue = computed({
+  get: () => recorder.processId,
+  set: (pid: number | null) => recorder.selectProcess(pid),
+})
+
+function onSourceMode(mode: 'device' | 'process'): void {
+  recorder.sourceMode = mode
+  if (mode === 'process' && !recorder.processes.length) void recorder.refreshProcesses()
+}
+
+/** While recording: what the core really captures (it may drop a missing mic). */
+const captured = computed(() => (recorder.active ? status.value.sources : null))
+const systemOff = computed(() => !!captured.value && !captured.value.system)
+const micOff = computed(() => !!captured.value && !captured.value.mic)
+const capturingLabel = computed(() => {
+  if (!recorder.active || !status.value.sources.system) return null
+  const proc = recorder.capturedProcess
+  return proc ? t('recorder.capturing', { name: proc.name }) : t('recorder.capturingDevice')
 })
 
 const noSource = computed(() => !recorder.options.system && !recorder.options.mic)
@@ -139,15 +167,33 @@ onMounted(() => void recorder.init())
         </div>
 
         <div class="sources">
-          <div class="source" data-testid="source-system">
+          <div class="source" :class="{ dropped: systemOff }" data-testid="source-system">
             <div class="source-head">
               <NSwitch v-model:value="recorder.options.system" :disabled="locked" data-testid="toggle-system" />
               <div>
-                <div class="source-title">{{ t('recorder.system') }}</div>
+                <div class="source-title">
+                  {{ t('recorder.system') }}
+                  <NTag v-if="systemOff" size="tiny" type="warning">{{ t('recorder.sourceOff') }}</NTag>
+                </div>
                 <NText depth="3" class="hint">{{ t('recorder.systemHint') }}</NText>
               </div>
             </div>
+            <NRadioGroup
+              :value="recorder.sourceMode"
+              size="small"
+              :disabled="locked || !recorder.options.system"
+              data-testid="source-mode"
+              @update:value="onSourceMode"
+            >
+              <NRadioButton value="device" data-testid="source-mode-device">
+                {{ t('recorder.sourceDevice') }}
+              </NRadioButton>
+              <NRadioButton value="process" data-testid="source-mode-process">
+                {{ t('recorder.sourceProcess') }}
+              </NRadioButton>
+            </NRadioGroup>
             <NSelect
+              v-if="recorder.sourceMode === 'device'"
               v-model:value="outputDevice"
               :options="outputOptions"
               :disabled="locked || !recorder.options.system"
@@ -155,17 +201,60 @@ onMounted(() => void recorder.init())
               size="small"
               data-testid="device-output"
             />
+            <template v-else>
+              <NSpace :wrap="false" size="small" align="center">
+                <NSelect
+                  v-model:value="processValue"
+                  :options="processOptions"
+                  :disabled="locked || !recorder.options.system"
+                  :loading="recorder.loadingProcesses"
+                  :placeholder="t('recorder.processPlaceholder')"
+                  size="small"
+                  filterable
+                  style="min-width: 0; flex: 1"
+                  data-testid="process-select"
+                />
+                <NButton
+                  size="small"
+                  :disabled="locked"
+                  :loading="recorder.loadingProcesses"
+                  data-testid="process-refresh"
+                  @click="recorder.refreshProcesses()"
+                >
+                  {{ t('recorder.refreshProcesses') }}
+                </NButton>
+              </NSpace>
+              <NText v-if="recorder.processesError" type="error" class="hint" data-testid="process-error">
+                {{ t('recorder.processUnavailable', { error: recorder.processesError }) }}
+              </NText>
+              <NText
+                v-else-if="!recorder.loadingProcesses && !recorder.processes.length"
+                depth="3"
+                class="hint"
+              >
+                {{ t('recorder.processEmpty') }}
+              </NText>
+              <NText v-else depth="3" class="hint">{{ t('recorder.sourceProcessHint') }}</NText>
+            </template>
+            <NText v-if="capturingLabel" type="info" class="hint" data-testid="recorder-capturing">
+              {{ capturingLabel }}
+            </NText>
             <LevelMeter
               :level="status.levels.system"
-              :active="recording && recorder.options.system"
+              :active="recording && status.sources.system"
               testid="meter-system"
             />
           </div>
-          <div class="source" data-testid="source-mic">
+          <div class="source" :class="{ dropped: micOff }" data-testid="source-mic">
             <div class="source-head">
               <NSwitch v-model:value="recorder.options.mic" :disabled="locked" data-testid="toggle-mic" />
               <div>
-                <div class="source-title">{{ t('recorder.mic') }}</div>
+                <div class="source-title">
+                  {{ t('recorder.mic') }}
+                  <NTag v-if="micOff" size="tiny" type="warning" data-testid="mic-dropped">
+                    {{ t('recorder.sourceOff') }}
+                  </NTag>
+                </div>
                 <NText depth="3" class="hint">{{ t('recorder.micHint') }}</NText>
               </div>
             </div>
@@ -179,7 +268,7 @@ onMounted(() => void recorder.init())
             />
             <LevelMeter
               :level="status.levels.mic"
-              :active="recording && recorder.options.mic"
+              :active="recording && status.sources.mic"
               testid="meter-mic"
             />
           </div>
@@ -190,6 +279,9 @@ onMounted(() => void recorder.init())
           </NButton>
           <NText v-if="noSource" type="warning" data-testid="recorder-no-source">
             {{ t('recorder.needSource') }}
+          </NText>
+          <NText v-else-if="!recorder.active && recorder.needsProcess" type="warning" data-testid="recorder-need-process">
+            {{ t('recorder.needProcess') }}
           </NText>
         </NSpace>
 
@@ -373,6 +465,14 @@ onMounted(() => void recorder.init())
 
 .source-title {
   font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The core dropped this source (e.g. no microphone): grey it out next to the warning. */
+.source.dropped {
+  opacity: 0.55;
 }
 
 .row-gap {
