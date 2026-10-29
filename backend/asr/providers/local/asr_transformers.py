@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -15,6 +16,37 @@ from asr.providers.local.device import resolve_dtype
 from asr.providers.local.models import model_dir, spec
 
 SAMPLE_RATE = 16_000
+
+
+def fun_asr_nano_processor(path: str) -> Any:
+    """Processor for Fun-ASR-Nano without torchaudio.
+
+    transformers' FunAsrNanoFeatureExtractor uses torchaudio only for
+    ``torchaudio.compliance.kaldi.fbank``; torchaudio has no build for torch 2.14 (it stops at
+    2.11), and without it transformers hands out a placeholder class. funasr ships a
+    signature-compatible kaldi-native-fbank implementation of that function, so the real
+    extractor module is pointed at it and the processor is assembled by hand.
+    """
+    import importlib
+    from types import SimpleNamespace
+
+    from transformers import AutoProcessor, AutoTokenizer
+    from transformers.utils import is_torchaudio_available
+
+    if is_torchaudio_available():
+        return AutoProcessor.from_pretrained(path, local_files_only=True)
+    from funasr.utils import fbank
+
+    base = "transformers.models.fun_asr_nano."
+    fe_mod = importlib.import_module(base + "feature_extraction_fun_asr_nano")
+    pr_mod = importlib.import_module(base + "processing_fun_asr_nano")
+    fe_mod.torchaudio = SimpleNamespace(compliance=SimpleNamespace(kaldi=fbank))
+    extractor = fe_mod.FunAsrNanoFeatureExtractor.from_pretrained(path, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True)
+    template = (Path(path) / "chat_template.jinja").read_text(encoding="utf-8")
+    return pr_mod.FunAsrNanoProcessor(
+        feature_extractor=extractor, tokenizer=tokenizer, chat_template=template
+    )
 
 
 def qwen3_prompt(terms: Sequence[str], context: str | None) -> str | None:
@@ -41,7 +73,11 @@ class TransformersAsr:
         self._torch = torch
         self.dtype = resolve_dtype(dtype, device=device)
         self._dtype = getattr(torch, self.dtype)
-        self.processor = AutoProcessor.from_pretrained(path, local_files_only=True)
+        self.processor = (
+            AutoProcessor.from_pretrained(path, local_files_only=True)
+            if self.engine == "qwen3_asr"
+            else fun_asr_nano_processor(path)
+        )
         auto = AutoModelForMultimodalLM if self.engine == "qwen3_asr" else AutoModelForSpeechSeq2Seq
         self.model = (
             auto.from_pretrained(path, local_files_only=True, dtype=self._dtype).to(device).eval()
