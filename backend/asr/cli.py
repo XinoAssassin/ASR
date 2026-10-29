@@ -195,5 +195,53 @@ def transcribe(
         )
 
 
+# ------------------------------------------------------------------------------ local models
+models_app = typer.Typer(help="Local model cache (explicit downloads only).", no_args_is_help=True)
+app.add_typer(models_app, name="models")
+
+
+def _model_cache_dir() -> Path:
+    return Path(os.environ.get("ASR_MODEL_CACHE_DIR", "").strip() or "./models").resolve()
+
+
+@models_app.command("list")
+def models_list() -> None:
+    """Show known models and whether they are in ASR_MODEL_CACHE_DIR."""
+    from asr.providers.local import models
+
+    cache = _model_cache_dir()
+    for key, spec in models.MODELS.items():
+        state = "downloaded" if models.is_downloaded(cache, key) else "-"
+        typer.echo(f"{key:18} {spec.kind:6} {state:10} {spec.hub}:{spec.repo_id}")
+    err.print(f"cache: {cache}")
+
+
+@models_app.command("download")
+def models_download(
+    keys: Annotated[list[str], typer.Argument(help="Model keys from `asr models list`.")],
+    mirror: Annotated[
+        bool,
+        typer.Option("--mirror", help="Fetch Hugging Face models from their ModelScope mirror."),
+    ] = False,
+) -> None:
+    """Download models into ASR_MODEL_CACHE_DIR (the only way models are fetched)."""
+    from asr.providers.local import models
+
+    cache = _model_cache_dir()
+    for key in keys:
+        try:
+            models.spec(key)
+        except KeyError as exc:
+            err.print(f"[red]error:[/red] {exc.args[0]}")
+            raise typer.Exit(2) from None
+    for key in keys:
+        if models.is_downloaded(cache, key):
+            err.print(f"{key}: already downloaded")
+            continue
+        err.print(f"{key}: downloading {models.spec(key).repo_id} ...")
+        path = models.download(cache, key, mirror=mirror and models.spec(key).mirror is not None)
+        err.print(f"{key}: {path}")
+
+
 if __name__ == "__main__":
     app()

@@ -22,9 +22,19 @@ dependencies = [
 
 [project.optional-dependencies]
 # Torch flavours (EXECUTION_LOG D9). Exactly one may be selected; tests never import torch.
-# qwen-asr / funasr / modelscope join these extras in M5.
 cpu = ["torch==2.14.1"]
 cuda = ["torch==2.14.1"]
+# Local model stack (M4+), combined with cpu or cuda: Qwen3-ASR and Fun-ASR-Nano run on native
+# transformers; SeACo-Paraformer, FSMN-VAD and CAM++ come from funasr (EXECUTION_LOG D29).
+# No torchaudio: it stops at 2.11, and funasr's inference path falls back to kaldi-native-fbank.
+local = [
+  "transformers>=5.21",
+  "accelerate>=1.12",
+  "huggingface-hub>=1.31",
+  "funasr>=1.4.17",
+  "kaldi-native-fbank>=1.20",
+  "modelscope>=1.40",
+]
 
 [project.scripts]
 asr = "asr.cli:app"
