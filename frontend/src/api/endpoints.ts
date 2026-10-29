@@ -116,3 +116,10 @@ export const testCloud = (): Promise<ConnectionTestResult> =>
 
 export const listLocalModels = (): Promise<LocalModelOut[]> =>
   unwrap(api.GET('/api/settings/local-models'))
+
+export const downloadLocalModel = (key: string, mirror: boolean): Promise<LocalModelOut> =>
+  unwrap(
+    api.POST('/api/settings/local-models/{key}/download', {
+      params: { path: { key }, query: { mirror } },
+    }),
+  )

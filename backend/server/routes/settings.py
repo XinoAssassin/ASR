@@ -4,16 +4,19 @@ Secrets are returned masked only (rule 3); env-only values are not updatable (D7
 """
 
 import logging
+from pathlib import Path
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.concurrency import run_in_threadpool
 
 from asr.providers import cloud as cloud_provider
 from asr.providers.local import models as local_models
 from server import config
 from server.config import EffectiveSettings, EnvSettings, load_effective_settings, mask_secret
-from server.deps import DbDep, EnvDep
+from server.deps import DbDep, EnvDep, ModelDownloadsDep
 from server.jobs import MISSING_KEY
+from server.model_downloads import DownloadBusy, ModelDownloads
 from server.schemas import (
     CloudSettingsOut,
     ConnectionTestResult,
@@ -133,23 +136,49 @@ async def test_cloud(db: DbDep, env: EnvDep) -> ConnectionTestResult:
         return ConnectionTestResult(ok=False, message="Connection test failed unexpectedly")
 
 
+def _model_row(cache: Path, downloads: ModelDownloads, key: str) -> LocalModelOut:
+    spec = local_models.MODELS[key]
+    status_, error = downloads.status(key)
+    downloaded = status_ == "downloaded"
+    return LocalModelOut(
+        id=key,
+        name=spec.repo_id,
+        kind=_KIND.get(spec.kind, "asr"),  # type: ignore[arg-type]
+        size_mb=local_models.disk_size_mb(cache, key) if downloaded else None,
+        downloaded=downloaded,
+        status=status_,
+        error=error,
+        has_mirror=spec.mirror is not None,
+    )
+
+
 @router.get("/local-models", response_model=list[LocalModelOut])
-async def list_local_models(env: EnvDep) -> list[LocalModelOut]:
-    """Registry models and whether they are in ``ASR_MODEL_CACHE_DIR`` (`asr models download`)."""
+async def list_local_models(env: EnvDep, downloads: ModelDownloadsDep) -> list[LocalModelOut]:
+    """Registry models and whether they are in ``ASR_MODEL_CACHE_DIR``."""
 
     def scan() -> list[LocalModelOut]:
-        cache = env.model_cache_dir
-        return [
-            LocalModelOut(
-                id=key,
-                name=spec.repo_id,
-                kind=_KIND.get(spec.kind, "asr"),  # type: ignore[arg-type]
-                size_mb=local_models.disk_size_mb(cache, key)
-                if local_models.is_downloaded(cache, key)
-                else None,
-                downloaded=local_models.is_downloaded(cache, key),
-            )
-            for key, spec in local_models.MODELS.items()
-        ]
+        return [_model_row(env.model_cache_dir, downloads, key) for key in local_models.MODELS]
 
     return await run_in_threadpool(scan)
+
+
+@router.post(
+    "/local-models/{key}/download",
+    response_model=LocalModelOut,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={404: {"description": "Unknown model"}, 409: {"description": "Download running"}},
+)
+async def download_local_model(
+    key: str,
+    env: EnvDep,
+    downloads: ModelDownloadsDep,
+    mirror: Annotated[bool, Query(description="Fetch from the ModelScope mirror if any.")] = False,
+) -> LocalModelOut:
+    """Start an explicit background download of a registry model (AGENTS rule 6)."""
+    if key not in local_models.MODELS:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"unknown model {key!r}")
+    try:
+        downloads.start(key, mirror=mirror)
+    except DownloadBusy as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    return await run_in_threadpool(_model_row, env.model_cache_dir, downloads, key)

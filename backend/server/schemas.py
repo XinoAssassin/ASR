@@ -346,3 +346,6 @@ class LocalModelOut(BaseModel):
     kind: Literal["asr", "aligner", "vad", "diarization"]
     size_mb: int | None = None
     downloaded: bool
+    status: Literal["missing", "downloading", "downloaded", "failed"] = "missing"
+    error: str | None = None
+    has_mirror: bool = Field(default=False, description="Also available on ModelScope.")

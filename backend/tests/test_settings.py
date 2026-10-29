@@ -1,5 +1,6 @@
 """Settings overlay, masking, endpoint allow-list, api_key write-only semantics, test-cloud."""
 
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -236,3 +237,60 @@ async def test_local_models_report_download_state(
     )
     assert rows["qwen3-forced-aligner"]["kind"] == "aligner"
     assert rows["campplus"]["kind"] == "diarization"
+
+
+async def test_download_local_model(
+    client: httpx.AsyncClient, env: EnvSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+    import threading
+
+    from asr.providers.local import models
+
+    release = threading.Event()
+    calls: list[tuple[str, bool]] = []
+
+    def fake_download(cache: Path, key: str, *, mirror: bool = False) -> Path:
+        calls.append((key, mirror))
+        release.wait(5)
+        path = models.model_path(cache, key)
+        path.mkdir(parents=True, exist_ok=True)
+        (path / models.spec(key).marker).write_bytes(b"x")
+        return path
+
+    monkeypatch.setattr(models, "download", fake_download)
+    assert (await client.post("/api/settings/local-models/whisper/download")).status_code == 404
+    resp = await client.post("/api/settings/local-models/qwen3-asr-1.7b/download?mirror=true")
+    assert resp.status_code == 202 and resp.json()["status"] == "downloading"
+    busy = await client.post("/api/settings/local-models/campplus/download")
+    assert busy.status_code == 409
+    release.set()
+    for _ in range(100):
+        rows = {r["id"]: r for r in (await client.get("/api/settings/local-models")).json()}
+        if rows["qwen3-asr-1.7b"]["status"] == "downloaded":
+            break
+        await asyncio.sleep(0.02)
+    assert rows["qwen3-asr-1.7b"]["status"] == "downloaded" and rows["qwen3-asr-1.7b"]["downloaded"]
+    assert rows["qwen3-asr-1.7b"]["has_mirror"] is True
+    assert calls == [("qwen3-asr-1.7b", True)]
+
+
+async def test_failed_download_reports_error(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from asr.providers.local import models
+
+    def broken(cache: Path, key: str, *, mirror: bool = False) -> Path:
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(models, "download", broken)
+    assert (await client.post("/api/settings/local-models/campplus/download")).status_code == 202
+    for _ in range(100):
+        rows = {r["id"]: r for r in (await client.get("/api/settings/local-models")).json()}
+        if rows["campplus"]["status"] == "failed":
+            break
+        await asyncio.sleep(0.02)
+    assert rows["campplus"]["status"] == "failed"
+    assert "network down" in rows["campplus"]["error"]

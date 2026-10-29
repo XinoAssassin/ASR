@@ -200,11 +200,31 @@ export interface paths {
         };
         /**
          * List Local Models
-         * @description Registry models and whether they are in ``ASR_MODEL_CACHE_DIR`` (`asr models download`).
+         * @description Registry models and whether they are in ``ASR_MODEL_CACHE_DIR``.
          */
         get: operations["list_local_models_api_settings_local_models_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/local-models/{key}/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Download Local Model
+         * @description Start an explicit background download of a registry model (AGENTS rule 6).
+         */
+        post: operations["download_local_model_api_settings_local_models__key__download_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -779,6 +799,14 @@ export interface components {
         LocalModelOut: {
             /** Downloaded */
             downloaded: boolean;
+            /** Error */
+            error?: string | null;
+            /**
+             * Has Mirror
+             * @description Also available on ModelScope.
+             * @default false
+             */
+            has_mirror: boolean;
             /**
              * Id
              * @description Registry key, as used by `asr models download <id>`.
@@ -796,6 +824,12 @@ export interface components {
             name: string;
             /** Size Mb */
             size_mb?: number | null;
+            /**
+             * Status
+             * @default missing
+             * @enum {string}
+             */
+            status: "missing" | "downloading" | "downloaded" | "failed";
         };
         /** LocalOptions */
         LocalOptions: {
@@ -1620,6 +1654,54 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LocalModelOut"][];
+                };
+            };
+        };
+    };
+    download_local_model_api_settings_local_models__key__download_post: {
+        parameters: {
+            query?: {
+                /** @description Fetch from the ModelScope mirror if any. */
+                mirror?: boolean;
+            };
+            header?: never;
+            path: {
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LocalModelOut"];
+                };
+            };
+            /** @description Unknown model */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Download running */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

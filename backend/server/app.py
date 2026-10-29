@@ -22,6 +22,7 @@ from server.auth import API_KEY_HEADER, EXEMPT_PATHS, ApiKeyMiddleware
 from server.config import EnvSettings, ensure_dirs, get_env
 from server.db import Database
 from server.jobs import JobManager
+from server.model_downloads import ModelDownloads
 from server.routes import ROUTERS
 
 log = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ def create_app(env: EnvSettings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.env = env
+    app.state.model_downloads = ModelDownloads(env.model_cache_dir)
 
     for router in ROUTERS:
         app.include_router(router)

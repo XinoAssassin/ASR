@@ -720,6 +720,23 @@
             "title": "Downloaded",
             "type": "boolean"
           },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "has_mirror": {
+            "default": false,
+            "description": "Also available on ModelScope.",
+            "title": "Has Mirror",
+            "type": "boolean"
+          },
           "id": {
             "description": "Registry key, as used by `asr models download <id>`.",
             "title": "Id",
@@ -750,6 +767,17 @@
               }
             ],
             "title": "Size Mb"
+          },
+          "status": {
+            "default": "missing",
+            "enum": [
+              "missing",
+              "downloading",
+              "downloaded",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
           }
         },
         "required": [
@@ -2297,7 +2325,7 @@
     },
     "/api/settings/local-models": {
       "get": {
-        "description": "Registry models and whether they are in ``ASR_MODEL_CACHE_DIR`` (`asr models download`).",
+        "description": "Registry models and whether they are in ``ASR_MODEL_CACHE_DIR``.",
         "operationId": "list_local_models_api_settings_local_models_get",
         "responses": {
           "200": {
@@ -2316,6 +2344,67 @@
           }
         },
         "summary": "List Local Models",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/settings/local-models/{key}/download": {
+      "post": {
+        "description": "Start an explicit background download of a registry model (AGENTS rule 6).",
+        "operationId": "download_local_model_api_settings_local_models__key__download_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Fetch from the ModelScope mirror if any.",
+            "in": "query",
+            "name": "mirror",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Fetch from the ModelScope mirror if any.",
+              "title": "Mirror",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalModelOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Unknown model"
+          },
+          "409": {
+            "description": "Download running"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Local Model",
         "tags": [
           "settings"
         ]
