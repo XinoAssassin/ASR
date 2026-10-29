@@ -1,0 +1,65 @@
+"""``asr`` console script: the core CLI (``asr.cli``) plus ``asr serve``.
+
+``serve`` lives here, not in ``asr.cli``, because the core library stays Web-free (AGENTS.md
+rule 5); this module extends the core Typer app instead.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+from typing import Annotated
+
+import typer
+
+from asr.cli import app, err
+
+__all__ = ["app"]
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+@app.command()
+def serve(
+    host: Annotated[str, typer.Option(help="Bind address; 0.0.0.0 for LAN access.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(min=1, max=65535)] = 8000,
+    forwarded_allow_ips: Annotated[
+        str | None,
+        typer.Option(help="Reverse-proxy addresses trusted for X-Forwarded-* (comma-separated)."),
+    ] = None,
+    reload: Annotated[bool, typer.Option(help="Reload on code changes (development).")] = False,
+) -> None:
+    """Run the HTTP API (one process: the job queue lives in it)."""
+    import uvicorn
+
+    from server.config import ConfigError, get_env
+    from server.logging_setup import configure_logging
+
+    try:
+        env = get_env()
+    except ConfigError as exc:
+        err.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(2) from None
+    configure_logging(env.log_level, env.log_format, env.log_file)
+    if not _is_loopback(host) and not env.api_key_required:
+        err.print(
+            "[yellow]warning:[/yellow] ASR_API_KEY is empty, so only loopback Host names "
+            "(plus ASR_ALLOWED_HOSTS) are accepted; set ASR_API_KEY for network clients."
+        )
+    uvicorn.run(
+        "server.app:app",
+        host=host,
+        port=port,
+        reload=reload,
+        workers=1,
+        log_config=None,  # propagate uvicorn's loggers to configure_logging's handlers
+        proxy_headers=forwarded_allow_ips is not None,
+        forwarded_allow_ips=forwarded_allow_ips,
+        timeout_graceful_shutdown=30,
+    )

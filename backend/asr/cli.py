@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
@@ -29,6 +30,7 @@ from asr.providers.base import (
     ProgressEvent,
     ProviderError,
     Term,
+    Transcript,
     TranscriptionProvider,
 )
 
@@ -178,6 +180,7 @@ def transcribe(
 
     for warning in transcript.warnings:
         err.print(f"[yellow]warning:[/yellow] {warning}")
+    transcript = _post_correct(transcript, options)
     rendered = writers.write(transcript, fmt.value)
     if output is None:
         sys.stdout.write(rendered)
@@ -187,6 +190,150 @@ def transcribe(
             f"Wrote {output} ({len(transcript.segments)} segments, "
             f"{len(transcript.speakers)} speakers)"
         )
+
+
+def _post_correct(transcript: Transcript, options: JobOptions) -> Transcript:
+    """[5b] L1 term correction + repetition filter, as the server applies after every job."""
+    from asr.correct import correct_segments
+
+    segments, _ = correct_segments(transcript.segments, options.terms, options.correction)
+    return transcript.model_copy(update={"segments": segments})
+
+
+AUDIO_SUFFIXES = frozenset(
+    {
+        *(".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".wma", ".amr"),
+        *(".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi"),
+    }
+)
+
+
+def collect_inputs(paths: list[Path], recursive: bool) -> list[Path]:
+    """Files as given, plus audio/video files (by suffix) inside directories; sorted, deduped."""
+    found: dict[Path, None] = {}
+    for path in paths:
+        if path.is_dir():
+            pattern = "**/*" if recursive else "*"
+            for child in sorted(path.glob(pattern)):
+                if child.is_file() and child.suffix.lower() in AUDIO_SUFFIXES:
+                    found[child.resolve()] = None
+        elif path.is_file():
+            found[path.resolve()] = None
+        else:
+            err.print(f"[yellow]warning:[/yellow] skipped, not found: {path}")
+    return list(found)
+
+
+@app.command()
+def batch(
+    inputs: Annotated[
+        list[Path], typer.Argument(help="Audio files and/or directories of audio files.")
+    ],
+    out_dir: Annotated[
+        Path | None,
+        typer.Option(file_okay=False, help="Output directory (default: next to each input)."),
+    ] = None,
+    formats: Annotated[
+        list[OutputFormat] | None,
+        typer.Option("--format", "-f", help="Output format; repeatable (default: txt, json)."),
+    ] = None,
+    provider: Annotated[Provider, typer.Option(help="Transcription provider.")] = Provider.local,
+    recursive: Annotated[bool, typer.Option("--recursive", "-r")] = False,
+    overwrite: Annotated[
+        bool, typer.Option(help="Re-transcribe files whose outputs already exist.")
+    ] = False,
+    num_speakers: Annotated[int | None, typer.Option(min=1, max=20)] = None,
+    terms: Annotated[
+        list[str] | None,
+        typer.Option("--terms", "--term", help="Hotword as term[:weight]; repeatable."),
+    ] = None,
+    terms_file: Annotated[
+        Path | None,
+        typer.Option(
+            dir_okay=False, exists=True, help="Term list (one per line, term-set syntax)."
+        ),
+    ] = None,
+    language: Annotated[list[str] | None, typer.Option(help="Language hint; repeatable.")] = None,
+    context: Annotated[str | None, typer.Option(help="Background text (≤ 2000 chars).")] = None,
+    channels: Annotated[Channels, typer.Option(help="Channel handling.")] = Channels.auto,
+    asr_model: Annotated[str | None, typer.Option(help="Local ASR model key.")] = None,
+    device: Annotated[str, typer.Option(help="Local inference device: cpu or cuda.")] = "cpu",
+) -> None:
+    """Transcribe many files with one loaded model; failures are reported, not fatal."""
+    from asr import writers
+    from asr.terms import merge_terms, parse_terms
+
+    files = collect_inputs(inputs, recursive)
+    if not files:
+        err.print("[red]error:[/red] no audio files found")
+        raise typer.Exit(2)
+    fmts = [f.value for f in formats] if formats else ["txt", "json"]
+
+    term_list = [parse_term(t) for t in terms or []]
+    if terms_file is not None:
+        parsed, errors = parse_terms(terms_file.read_text(encoding="utf-8"))
+        if errors:
+            err.print(f"[red]error:[/red] {terms_file}: {errors[0]['msg']}")
+            raise typer.Exit(2)
+        term_list += parsed
+    try:
+        options = JobOptions(
+            provider=provider.value,
+            num_speakers=num_speakers,
+            terms=merge_terms(term_list),
+            language_hints=language if language else ["zh", "en"],
+            context=context,
+            preprocess=PreprocessOptions(channels=channels.value),
+        )
+    except ValidationError as exc:
+        err.print(f"[red]error:[/red] invalid options: {exc.errors()[0].get('msg')}")
+        raise typer.Exit(2) from None
+
+    build = (
+        _local_builder(False, asr_model, device) if provider is Provider.local else _cloud_builder()
+    )
+
+    def targets(src: Path) -> list[Path]:
+        base = (out_dir or src.parent) / src.stem
+        return [base.with_name(f"{base.name}.{fmt}") for fmt in fmts]
+
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    done = skipped = 0
+    failed: list[tuple[Path, str]] = []
+    with tempfile.TemporaryDirectory(prefix="asr-batch-") as work_root:
+        chosen = build(Path(work_root))
+        for index, src in enumerate(files, start=1):
+            outs = targets(src)
+            if not overwrite and all(o.exists() for o in outs):
+                skipped += 1
+                err.print(f"[{index}/{len(files)}] skip (outputs exist): {src.name}")
+                continue
+            err.print(f"[{index}/{len(files)}] {src}", soft_wrap=True)
+            started = time.monotonic()
+            try:
+                transcript = chosen.transcribe(AudioSource(path=src), options, lambda _e: None)
+                transcript = _post_correct(transcript, options)
+            except ProviderError as exc:
+                failed.append((src, str(exc)))
+                err.print(f"  [red]failed:[/red] {exc}")
+                continue
+            except (JobCancelled, KeyboardInterrupt):
+                err.print("[yellow]cancelled[/yellow]")
+                raise typer.Exit(130) from None
+            for out, fmt in zip(outs, fmts, strict=True):
+                out.write_text(writers.write(transcript, fmt), encoding="utf-8")
+            done += 1
+            elapsed = time.monotonic() - started
+            err.print(
+                f"  {len(transcript.segments)} segments, {len(transcript.speakers)} speakers, "
+                f"{transcript.duration:.0f} s audio in {elapsed:.0f} s → {outs[0].parent}"
+            )
+    err.print(f"done: {done} transcribed, {skipped} skipped, {len(failed)} failed")
+    for src, message in failed:
+        err.print(f"  failed: {src}: {message}", soft_wrap=True)
+    if failed:
+        raise typer.Exit(1)
 
 
 def _cloud_builder() -> Callable[[Path], TranscriptionProvider]:

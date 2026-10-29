@@ -80,8 +80,13 @@ def is_aliyun_https_url(url: str) -> bool:
     return host.endswith(_ALIYUN_SUFFIX) and len(host) > len(_ALIYUN_SUFFIX)
 
 
-def redact(text: str, secrets: tuple[str, ...] = ()) -> str:
-    """Strip query strings from URLs, bearer tokens, ``sk-`` keys and the given secrets."""
+def redact(
+    text: str, secrets: tuple[str, ...] = (), *, max_chars: int | None = MAX_MESSAGE_CHARS
+) -> str:
+    """Strip query strings from URLs, bearer tokens, ``sk-`` keys and the given secrets.
+
+    The result is cut to ``max_chars`` (user-facing messages); ``None`` keeps it whole (logs).
+    """
     out = str(text)
     for secret in secrets:
         if secret:
@@ -89,8 +94,8 @@ def redact(text: str, secrets: tuple[str, ...] = ()) -> str:
     out = _URL_QUERY.sub(r"\1?<redacted>", out)
     out = _BEARER.sub(r"\1***", out)
     out = _SK.sub("sk-***", out)
-    if len(out) > MAX_MESSAGE_CHARS:
-        out = out[: MAX_MESSAGE_CHARS - 1] + "…"
+    if max_chars is not None and len(out) > max_chars:
+        out = out[: max_chars - 1] + "…"
     return out
 
 

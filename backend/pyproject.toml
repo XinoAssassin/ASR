@@ -38,7 +38,7 @@ local = [
 ]
 
 [project.scripts]
-asr = "asr.cli:app"
+asr = "server.cli:app"
 
 [dependency-groups]
 dev = [

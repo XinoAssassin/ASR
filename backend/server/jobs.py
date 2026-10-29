@@ -83,6 +83,13 @@ def default_provider_factory(
     )
 
 
+def _elapsed(job: JobOut) -> float | None:
+    """Wall-clock run time of a finished job, for logs."""
+    if job.started_at is None or job.finished_at is None:
+        return None
+    return round((job.finished_at - job.started_at).total_seconds(), 1)
+
+
 def _redact(text: str, secrets: list[str]) -> str:
     for secret in secrets:
         if secret:
@@ -326,6 +333,12 @@ class JobManager:
                 return
             state.job = job
             self._publish(job)
+            log.info(
+                "job %s started (provider=%s)",
+                job_id,
+                job.provider,
+                extra={"job_id": job_id, "provider": job.provider},
+            )
 
             settings = await load_effective_settings(self.env, self.db)
             secrets.append(settings.cloud_api_key.get_secret_value())
@@ -500,6 +513,12 @@ class JobManager:
         )
         if job is not None:
             self._publish(job)
+            log.info(
+                "job %s %s",
+                job.id,
+                status,
+                extra={"job_id": job.id, "status": status, "elapsed_s": _elapsed(job)},
+            )
 
     async def _post_correct(
         self, job: JobOut, transcript: Transcript
@@ -547,3 +566,18 @@ class JobManager:
         )
         if job is not None:
             self._publish(job)
+            elapsed = _elapsed(job)
+            log.info(
+                "job %s succeeded: %d segments, %d speakers, %.1f s audio in %s s",
+                job_id,
+                len(segments),
+                len(transcript.speakers),
+                transcript.duration,
+                elapsed,
+                extra={
+                    "job_id": job_id,
+                    "status": "succeeded",
+                    "elapsed_s": elapsed,
+                    "audio_s": round(transcript.duration, 1),
+                },
+            )

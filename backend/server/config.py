@@ -97,6 +97,26 @@ class EnvSettings(BaseSettings):
         description="DashScope chat model for [5b] L3 correction suggestions.",
     )
 
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
+        default="INFO", validation_alias="ASR_LOG_LEVEL"
+    )
+    log_format: Literal["text", "json"] = Field(default="text", validation_alias="ASR_LOG_FORMAT")
+    log_file: Path | None = Field(
+        default=None,
+        validation_alias="ASR_LOG_FILE",
+        description="Optional log file, rotated at 10 MB (5 backups).",
+    )
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _upper_level(cls, v: Any) -> Any:
+        return v.strip().upper() if isinstance(v, str) else v
+
+    @field_validator("log_file", mode="before")
+    @classmethod
+    def _empty_log_file(cls, v: Any) -> Any:
+        return None if isinstance(v, str) and not v.strip() else v
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_origins(cls, v: Any) -> Any:
