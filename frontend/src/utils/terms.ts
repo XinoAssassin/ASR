@@ -1,5 +1,7 @@
 /**
  * Ad-hoc term list parsing for the job form: one term per line, optionally `term,weight`.
+ * The term part may use the asr-hotword syntax `Target | alias | alias ~~~ black | black`
+ * (aliases = known mis-hearings fixed by post-correction; blacklist = neighbours that block it).
  * Weight is 1..5 or 50 (boosted), default 3 (asr.providers.base.Term). Full-width commas work too.
  */
 import type { Term } from '@/api/endpoints'
@@ -45,14 +47,23 @@ export function parseTerms(text: string): TermParseResult {
         weight = parsed
       }
     }
+    const [names = '', black = ''] = term.split('~~~')
+    const [target = '', ...aliases] = names.split('|').map((s) => s.trim())
+    const blacklist = black ? black.split('|').map((s) => s.trim()) : []
+    term = target
     if (!term) return
-    if (term.length > MAX_TERM_LENGTH) {
+    if ([term, ...aliases, ...blacklist].some((w) => w.length > MAX_TERM_LENGTH)) {
       errors.push({ line: index + 1, text: raw, reason: 'length' })
       return
     }
     if (seen.has(term)) return
     seen.add(term)
-    terms.push({ term, weight })
+    terms.push({
+      term,
+      weight,
+      aliases: aliases.filter(Boolean),
+      blacklist: blacklist.filter(Boolean),
+    })
   })
   return { terms, errors }
 }

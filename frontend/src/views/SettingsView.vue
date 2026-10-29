@@ -3,6 +3,7 @@ import {
   NAlert,
   NButton,
   NCard,
+  NCheckbox,
   NDataTable,
   NDescriptions,
   NDescriptionsItem,
@@ -18,10 +19,11 @@ import {
   type DataTableColumns,
   useMessage,
 } from 'naive-ui'
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import {
+  downloadLocalModel,
   getDefaultBackendUrl,
   listLocalModels,
   probeHealth,
@@ -170,6 +172,37 @@ async function runCloudTest(): Promise<void> {
 
 const localModels = ref<LocalModelOut[]>([])
 const localModelsError = ref<string | null>(null)
+const useMirror = ref(true)
+const localForm = reactive({ asrModel: '', device: 'cpu' as 'cpu' | 'cuda' })
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
+const anyDownloading = computed(() => localModels.value.some((m) => m.status === 'downloading'))
+const asrModelOptions = computed(() => [
+  { label: t('settings.local.auto'), value: '' },
+  ...localModels.value
+    .filter((m) => m.kind === 'asr')
+    .map((m) => ({
+      label: m.downloaded ? m.id : `${m.id}（${t('settings.local.notDownloaded')}）`,
+      value: m.id,
+    })),
+])
+
+watch(
+  () => settings.server,
+  (s) => {
+    if (!s) return
+    localForm.asrModel = s.local.asr_model ?? ''
+    localForm.device = s.local.device
+  },
+  { immediate: true },
+)
+
+const STATUS_TYPE = {
+  missing: 'default',
+  downloading: 'info',
+  downloaded: 'success',
+  failed: 'error',
+} as const
 
 const modelColumns = computed<DataTableColumns<LocalModelOut>>(() => [
   { title: t('settings.local.modelKey'), key: 'id' },
@@ -181,16 +214,69 @@ const modelColumns = computed<DataTableColumns<LocalModelOut>>(() => [
     render: (row) => (row.size_mb != null ? `${row.size_mb} MB` : '—'),
   },
   {
-    title: t('settings.local.downloaded'),
-    key: 'downloaded',
-    render: (row) => (row.downloaded ? t('common.yes') : t('common.no')),
+    title: t('settings.local.status'),
+    key: 'status',
+    render: (row) =>
+      h(
+        NTag,
+        { type: STATUS_TYPE[row.status ?? 'missing'], size: 'small', title: row.error ?? '' },
+        () => t(`settings.local.statuses.${row.status ?? 'missing'}`),
+      ),
+  },
+  {
+    title: '',
+    key: 'actions',
+    render: (row) =>
+      h(
+        NButton,
+        {
+          size: 'small',
+          disabled: row.downloaded || anyDownloading.value,
+          loading: row.status === 'downloading',
+          onClick: () => void startDownload(row.id),
+          'data-testid': `download-${row.id}`,
+        },
+        () => t('settings.local.download'),
+      ),
   },
 ])
+
+function schedulePoll(): void {
+  if (anyDownloading.value && pollTimer === null) {
+    pollTimer = setInterval(() => void loadLocalModels(), 3000)
+  } else if (!anyDownloading.value && pollTimer !== null) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+async function startDownload(key: string): Promise<void> {
+  try {
+    await downloadLocalModel(key, useMirror.value)
+    await loadLocalModels()
+  } catch (e) {
+    notify(e, t('settings.local.downloadFailed'))
+  }
+}
+
+async function saveLocal(): Promise<void> {
+  try {
+    await settings.save({ local: { asr_model: localForm.asrModel, device: localForm.device } })
+    message.success(t('settings.saved'))
+  } catch (e) {
+    notify(e, t('settings.saveFailed'))
+  }
+}
+
+onBeforeUnmount(() => {
+  if (pollTimer !== null) clearInterval(pollTimer)
+})
 
 async function loadLocalModels(): Promise<void> {
   try {
     localModels.value = await listLocalModels()
     localModelsError.value = null
+    schedulePoll()
   } catch (e) {
     localModelsError.value = describe(e)
   }
@@ -420,6 +506,31 @@ onMounted(() => {
           {{ settings.server.local.model_cache_dir }}
         </NDescriptionsItem>
       </NDescriptions>
+      <NForm label-placement="left" label-width="140" :disabled="!settings.server">
+        <NFormItem :label="t('settings.local.asrModel')">
+          <NSelect
+            v-model:value="localForm.asrModel"
+            :options="asrModelOptions"
+            data-testid="local-asr-model"
+          />
+        </NFormItem>
+        <NFormItem :label="t('settings.local.device')">
+          <NRadioGroup v-model:value="localForm.device" data-testid="local-device">
+            <NRadio value="cpu">CPU</NRadio>
+            <NRadio value="cuda">CUDA</NRadio>
+          </NRadioGroup>
+        </NFormItem>
+        <NFormItem>
+          <NSpace>
+            <NButton type="primary" data-testid="local-save" @click="saveLocal">
+              {{ t('settings.local.save') }}
+            </NButton>
+            <NCheckbox v-model:checked="useMirror" data-testid="download-mirror">
+              {{ t('settings.local.useMirror') }}
+            </NCheckbox>
+          </NSpace>
+        </NFormItem>
+      </NForm>
       <NText v-if="localModelsError" depth="3">{{ localModelsError }}</NText>
       <NDataTable
         v-else

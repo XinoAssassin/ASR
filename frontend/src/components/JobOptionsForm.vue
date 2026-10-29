@@ -115,5 +115,23 @@ const parsed = computed(() => parseTerms(form.value.extraTerms))
         <NText depth="3">{{ t('jobOptions.keepDialectHint') }}</NText>
       </NSpace>
     </NFormItem>
+    <NFormItem :label="t('jobOptions.termCorrection')">
+      <NSpace align="center">
+        <NSwitch v-model:value="form.termCorrection" data-testid="job-term-correction" />
+        <NText depth="3">{{ t('jobOptions.termCorrectionHint') }}</NText>
+      </NSpace>
+    </NFormItem>
+    <NFormItem :label="t('jobOptions.repetitionFilter')">
+      <NSpace align="center">
+        <NSwitch v-model:value="form.repetitionFilter" data-testid="job-repetition-filter" />
+        <NText depth="3">{{ t('jobOptions.repetitionFilterHint') }}</NText>
+      </NSpace>
+    </NFormItem>
+    <NFormItem v-if="form.provider === 'local'" :label="t('jobOptions.peakGain')">
+      <NSpace align="center">
+        <NSwitch v-model:value="form.peakGain" data-testid="job-peak-gain" />
+        <NText depth="3">{{ t('jobOptions.peakGainHint') }}</NText>
+      </NSpace>
+    </NFormItem>
   </NForm>
 </template>

@@ -29,8 +29,19 @@ describe('buildJobCreate', () => {
         context: '产品评审会',
         preprocess: { channels: 'per_channel', stream_index: 1, peak_gain: true },
         cloud: { keep_dialect: true },
+        correction: { terms: true, repetition: true, threshold: 0.85 },
       },
     })
+  })
+
+  it('passes the preprocessing and correction switches', () => {
+    const body = buildJobCreate(
+      { ...defaultJobForm(), peakGain: false, termCorrection: false, repetitionFilter: true },
+      { uploadId: 'u', channels: 'auto', streamIndex: 0 },
+      [],
+    )
+    expect(body.options?.preprocess?.peak_gain).toBe(false)
+    expect(body.options?.correction).toEqual({ terms: false, repetition: true, threshold: 0.85 })
   })
 
   it('uses null for auto speakers and empty context, clamps the count', () => {

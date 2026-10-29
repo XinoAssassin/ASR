@@ -4,6 +4,8 @@ import type { ChannelsOption, JobCreate, ProviderName, Term } from '@/api/endpoi
 export const LANGUAGE_OPTIONS = ['zh', 'en'] as const
 export const MAX_SPEAKERS = 20
 export const MAX_CONTEXT_LENGTH = 2000
+/** [5b] phoneme-similarity threshold (docs/M6_TERM_CORRECTION.md: 0.80 over-corrects). */
+export const CORRECTION_THRESHOLD = 0.85
 
 export interface JobFormState {
   provider: ProviderName
@@ -14,6 +16,12 @@ export interface JobFormState {
   extraTerms: string
   context: string
   keepDialect: boolean
+  /** [0d] peak-safety gain (local pipeline). */
+  peakGain: boolean
+  /** [5b] L1 term correction. */
+  termCorrection: boolean
+  /** [5b] runaway-repetition filter. */
+  repetitionFilter: boolean
 }
 
 export function defaultJobForm(provider: ProviderName = 'cloud'): JobFormState {
@@ -26,6 +34,9 @@ export function defaultJobForm(provider: ProviderName = 'cloud'): JobFormState {
     extraTerms: '',
     context: '',
     keepDialect: false,
+    peakGain: true,
+    termCorrection: true,
+    repetitionFilter: true,
   }
 }
 
@@ -51,8 +62,17 @@ export function buildJobCreate(form: JobFormState, target: JobTarget, extraTerms
       language_hints: [...form.languageHints],
       num_speakers: numSpeakers,
       context: context || null,
-      preprocess: { channels: target.channels, stream_index: target.streamIndex, peak_gain: true },
+      preprocess: {
+        channels: target.channels,
+        stream_index: target.streamIndex,
+        peak_gain: form.peakGain,
+      },
       cloud: { keep_dialect: form.keepDialect },
+      correction: {
+        terms: form.termCorrection,
+        repetition: form.repetitionFilter,
+        threshold: CORRECTION_THRESHOLD,
+      },
     },
   }
 }
