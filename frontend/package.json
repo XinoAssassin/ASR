@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@microsoft/fetch-event-source": "^2.0.1",
+    "@tauri-apps/api": "^2.12.4",
     "naive-ui": "^2.45.3",
     "openapi-fetch": "^0.17.0",
     "pinia": "^4.1.0",

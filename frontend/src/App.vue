@@ -26,12 +26,16 @@ import { RouterLink, RouterView, useRoute } from 'vue-router'
 
 import { getBackendUrl } from '@/api'
 import { LOCALE_STORAGE_KEY, type AppLocale } from '@/locales'
+import { isDesktop } from '@/platform'
 import { useHealthStore } from '@/stores/health'
+import { useRecorderStore } from '@/stores/recorder'
 
 const { t, locale } = useI18n()
 const route = useRoute()
 const health = useHealthStore()
 const osTheme = useOsTheme()
+const desktop = isDesktop()
+const recorder = useRecorderStore()
 
 const theme = computed(() => (osTheme.value === 'dark' ? darkTheme : null))
 const naiveLocale = computed(() => (locale.value === 'en' ? enUS : zhCN))
@@ -39,6 +43,8 @@ const naiveDateLocale = computed(() => (locale.value === 'en' ? dateEnUS : dateZ
 
 const navItems = [
   { key: 'upload', to: '/upload', label: 'nav.upload' },
+  // Desktop only (the web build has no recorder).
+  ...(desktop ? [{ key: 'recorder', to: '/recorder', label: 'nav.recorder' }] : []),
   { key: 'jobs', to: '/jobs', label: 'nav.jobs' },
   { key: 'settings', to: '/settings', label: 'nav.settings' },
 ] as const
@@ -47,7 +53,13 @@ const menuOptions = computed<MenuOption[]>(() =>
   navItems.map((item) => ({
     key: item.key,
     label: () =>
-      h(RouterLink, { to: item.to, 'data-testid': `nav-${item.key}` }, { default: () => t(item.label) }),
+      h(RouterLink, { to: item.to, 'data-testid': `nav-${item.key}` }, () => [
+        t(item.label),
+        // Recording continues on other pages (and via the Ctrl+Alt+R hotkey): show it in the nav.
+        item.key === 'recorder' && recorder.recording
+          ? h('span', { class: 'nav-rec-dot', 'data-testid': 'nav-recording' })
+          : null,
+      ]),
   })),
 )
 
@@ -89,6 +101,7 @@ function toggleLocale(): void {
 onMounted(() => {
   document.documentElement.lang = locale.value
   health.startPolling()
+  if (desktop) void recorder.init()
 })
 onBeforeUnmount(() => health.stopPolling())
 </script>
@@ -180,6 +193,16 @@ body,
 
 .app-content {
   padding: 24px;
+}
+
+.nav-rec-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: #d03050;
+  vertical-align: middle;
 }
 
 .auth-banner {

@@ -33,8 +33,11 @@ import {
   type ProviderName,
   type SettingsUpdate,
 } from '@/api'
+import DesktopSettingsCard from '@/components/recorder/DesktopSettingsCard.vue'
 import { useApiErrors } from '@/composables/useApiErrors'
+import { isDesktop } from '@/platform'
 import { useHealthStore } from '@/stores/health'
+import { useRecorderStore } from '@/stores/recorder'
 import { useSettingsStore } from '@/stores/settings'
 
 const { t } = useI18n()
@@ -42,6 +45,18 @@ const message = useMessage()
 const { describe, notify } = useApiErrors()
 const health = useHealthStore()
 const settings = useSettingsStore()
+const desktop = isDesktop()
+const recorder = useRecorderStore()
+
+/** Desktop: the browser connection settings are the source of truth; hand them to Rust too. */
+async function pushToDesktop(): Promise<void> {
+  if (!desktop) return
+  try {
+    await recorder.syncBackend()
+  } catch (e) {
+    message.error(`${t('recorder.settings.syncFailed')}：${(e as Error).message}`)
+  }
+}
 
 // --- browser-local connection settings --------------------------------------------------------
 
@@ -69,6 +84,7 @@ function saveBackendUrl(): void {
   urlInput.value = settings.backendUrl
   message.success(t('settings.saved'))
   void settings.load()
+  void pushToDesktop()
 }
 
 function resetBackendUrl(): void {
@@ -81,6 +97,7 @@ function saveApiKey(): void {
   message.success(t('settings.saved'))
   void health.check()
   void settings.load()
+  void pushToDesktop()
 }
 
 // --- server-side settings ---------------------------------------------------------------------
@@ -357,6 +374,9 @@ onMounted(() => {
         {{ t('health.error') }} — {{ health.error }}
       </NAlert>
     </NCard>
+
+    <!-- Desktop app only: what the Rust core uses for background uploads -->
+    <DesktopSettingsCard v-if="desktop" />
 
     <!-- Server-side settings -->
     <NCard :title="t('settings.server.title')">

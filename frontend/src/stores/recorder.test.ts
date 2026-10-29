@@ -1,0 +1,194 @@
+import { createPinia, setActivePinia } from 'pinia'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { nextTick } from 'vue'
+
+import { setDesktopPlatformForTests } from '@/platform'
+import { createFakeDesktop, makeRecording, type FakeDesktop } from '@/platform/testing'
+
+const browser = vi.hoisted(() => ({
+  storage: new Map<string, string>(),
+  backendUrl: '',
+  apiKey: null as string | null,
+}))
+
+vi.mock('@/api', () => ({
+  readStorage: (k: string) => browser.storage.get(k) ?? null,
+  writeStorage: (k: string, v: string | null) =>
+    v ? browser.storage.set(k, v) : browser.storage.delete(k),
+  getBackendUrl: () => browser.backendUrl,
+  getApiKey: () => browser.apiKey,
+  getJob: vi.fn(async (id: string) => ({ id, transcript_id: `tr-${id}` })),
+}))
+
+const { DESKTOP_DEFAULT_BACKEND, useRecorderStore } = await import('./recorder')
+
+let fake: FakeDesktop
+
+beforeEach(() => {
+  browser.storage.clear()
+  browser.backendUrl = ''
+  browser.apiKey = null
+  vi.stubGlobal('window', { __TAURI_INTERNALS__: {} })
+  fake = createFakeDesktop()
+  setDesktopPlatformForTests(fake)
+  setActivePinia(createPinia())
+})
+
+afterEach(() => {
+  setDesktopPlatformForTests(null)
+  vi.unstubAllGlobals()
+})
+
+const names = () => fake.calls.map(([name]) => name)
+
+describe('recorder store', () => {
+  it('is inert in the web build', async () => {
+    vi.stubGlobal('window', {})
+    const store = useRecorderStore()
+    expect(store.available).toBe(false)
+    await store.init()
+    expect(fake.calls).toEqual([])
+    expect(store.canStart).toBe(false)
+  })
+
+  it('loads everything on init and hands Rust the browser connection', async () => {
+    browser.backendUrl = 'http://gpu:8000'
+    browser.apiKey = 'secret'
+    const store = useRecorderStore()
+    await store.init()
+    await store.init() // idempotent
+    expect(store.initialized).toBe(true)
+    expect(store.devices.outputs).toHaveLength(2)
+    expect(store.recordings.map((r) => r.id)).toEqual(['2026-10-28_09-00-00'])
+    expect(fake.listenerCount()).toBe(2)
+    expect(names().filter((n) => n === 'recordings_list')).toHaveLength(1)
+    // Rust had no URL/key: the browser settings were pushed, the key comes back masked.
+    expect(fake.state.config.baseUrl).toBe('http://gpu:8000')
+    expect(fake.state.storedKey).toBe('secret')
+    expect(store.config?.apiKey).toBe('***')
+    expect(store.keySet).toBe(true)
+  })
+
+  it('does not push again when Rust is in sync', async () => {
+    fake.state.config.baseUrl = DESKTOP_DEFAULT_BACKEND
+    const store = useRecorderStore()
+    await store.init()
+    expect(names()).not.toContain('backend_set_config')
+  })
+
+  it('starts with the chosen options and follows status events', async () => {
+    const store = useRecorderStore()
+    await store.init()
+    store.options.mic = false
+    store.options.outputDevice = 'out-2'
+    await store.start()
+    expect(fake.calls.find(([n]) => n === 'recorder_start')![1]).toEqual({
+      options: { system: true, mic: false, outputDevice: 'out-2', inputDevice: null, outDir: null },
+    })
+    expect(store.recording).toBe(true)
+    fake.emitStatus({
+      state: 'recording',
+      elapsed: 3.2,
+      levels: { system: 0.4, mic: 0 },
+      file: 'x.partial.wav',
+      driftMs: 1.5,
+      warnings: ['system audio silent for 60 s'],
+    })
+    expect(store.status.elapsed).toBe(3.2)
+    expect(store.status.levels.system).toBe(0.4)
+    expect(store.status.warnings).toHaveLength(1)
+  })
+
+  it('persists start options and drops devices that disappeared', async () => {
+    browser.storage.set(
+      'asr.recorder.startOptions',
+      JSON.stringify({ system: false, mic: true, outputDevice: 'gone', inputDevice: 'in-1', outDir: 'D:\\rec' }),
+    )
+    const store = useRecorderStore()
+    await store.init()
+    expect(store.options).toEqual({
+      system: false,
+      mic: true,
+      outputDevice: null,
+      inputDevice: 'in-1',
+      outDir: 'D:\\rec',
+    })
+    store.options.system = true
+    await nextTick()
+    expect(JSON.parse(browser.storage.get('asr.recorder.startOptions')!).system).toBe(true)
+  })
+
+  it('cannot start with both sources off', async () => {
+    const store = useRecorderStore()
+    await store.init()
+    store.options.system = false
+    store.options.mic = false
+    expect(store.canStart).toBe(false)
+    await store.start()
+    expect(names()).not.toContain('recorder_start')
+  })
+
+  it('stop adds the new recording first; change events update it in place', async () => {
+    const store = useRecorderStore()
+    await store.init()
+    await store.start()
+    const rec = await store.stop()
+    expect(rec?.id).toBe('2026-10-29_10-00-00')
+    expect(store.recordings.map((r) => r.id)).toEqual(['2026-10-29_10-00-00', '2026-10-28_09-00-00'])
+    expect(store.recording).toBe(false)
+
+    fake.emitRecording(makeRecording('2026-10-29_10-00-00', { state: 'uploading', attempts: 1 }))
+    expect(store.recordings).toHaveLength(2)
+    expect(store.recordings[0]!.upload.state).toBe('uploading')
+  })
+
+  it('surfaces IPC errors (Rust strings)', async () => {
+    const store = useRecorderStore()
+    await store.init()
+    fake.state.failNext = 'no loopback device'
+    await store.start()
+    expect(store.error).toBe('no loopback device')
+    expect(store.recording).toBe(false)
+
+    fake.state.failNext = 'offline'
+    await expect(store.upload('2026-10-28_09-00-00')).rejects.toThrow('offline')
+  })
+
+  it('saveConfig keeps the connection from the browser and merges the rest', async () => {
+    browser.apiKey = 'k1'
+    const store = useRecorderStore()
+    await store.init()
+    const jobOptions = { provider: 'local' as const }
+    await store.saveConfig({ targetDir: '/data/rec', jobOptions, provider: 'local' })
+    expect(fake.state.config).toEqual({
+      baseUrl: DESKTOP_DEFAULT_BACKEND,
+      apiKey: 'k1',
+      targetDir: '/data/rec',
+      autoUpload: true,
+      jobOptions,
+      provider: 'local',
+      termSetIds: [],
+      extraTerms: [],
+    })
+    await store.saveConfig({ termSetIds: ['ts1'], extraTerms: [{ term: 'PyTorch', weight: 3 }] })
+    expect(fake.state.config).toMatchObject({ targetDir: '/data/rec', termSetIds: ['ts1'] })
+    // Key cleared in the browser → cleared in Rust on the next sync.
+    browser.apiKey = null
+    await store.syncBackend()
+    expect(fake.state.storedKey).toBeNull()
+    expect(fake.state.config.targetDir).toBe('/data/rec')
+  })
+
+  it('resolves transcript links for finished jobs', async () => {
+    const store = useRecorderStore()
+    expect(await store.lookupTranscript('job-1')).toBe('tr-job-1')
+    expect(store.transcriptIds).toEqual({ 'job-1': 'tr-job-1' })
+  })
+
+  it('dispose unsubscribes', async () => {
+    const store = useRecorderStore()
+    await store.init()
+    store.dispose()
+    expect(fake.listenerCount()).toBe(0)
+  })
+})

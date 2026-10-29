@@ -4,10 +4,13 @@
  * @microsoft/fetch-event-source, audio blobs), through `apiUrl()` + `authHeaders()`.
  *
  * Backend URL precedence: localStorage override (Settings page) → window.__ASR_CONFIG__.backendUrl
- * (config.js) → "" (same origin; the Vite dev proxy forwards /api to :8000).
+ * (config.js) → "" (same origin; the Vite dev proxy forwards /api to :8000). In the desktop app
+ * the last step is http://127.0.0.1:8000 instead: the WebView origin (tauri.localhost) has no API.
  * The X-API-Key header is added from localStorage on every request; never put it in a URL (D6).
  */
 import createClient, { type Client, type Middleware } from 'openapi-fetch'
+
+import { DESKTOP_DEFAULT_BACKEND, isDesktop } from '@/platform'
 
 import type { components, paths } from './schema'
 
@@ -44,16 +47,21 @@ function normalizeBaseUrl(url: string | null | undefined): string {
 export function getBackendUrl(): string {
   const override = normalizeBaseUrl(readStorage(STORAGE_KEYS.backendUrl))
   if (override) return override
-  return normalizeBaseUrl(window.__ASR_CONFIG__?.backendUrl)
+  return getDefaultBackendUrl()
 }
 
 export function getApiKey(): string | null {
   return readStorage(STORAGE_KEYS.apiKey)?.trim() || null
 }
 
-/** The backend URL from config.js alone (what applies when the Settings override is cleared). */
+/**
+ * The backend URL without the Settings override (what applies when it is cleared): config.js, else
+ * same origin on the web, else the local backend in the desktop app.
+ */
 export function getDefaultBackendUrl(): string {
-  return normalizeBaseUrl(window.__ASR_CONFIG__?.backendUrl)
+  const configured = normalizeBaseUrl(window.__ASR_CONFIG__?.backendUrl)
+  if (configured) return configured
+  return isDesktop() ? DESKTOP_DEFAULT_BACKEND : ''
 }
 
 /** Absolute (or same-origin relative) URL for a backend path such as `/api/jobs/1/events`. */
