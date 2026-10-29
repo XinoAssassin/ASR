@@ -17,6 +17,11 @@ export type JobList = Schemas['JobList']
 export type JobOptions = Schemas['JobOptions']
 export type JobStatus = JobOut['status']
 export type TranscriptOut = Schemas['TranscriptOut']
+export type TranscriptOp = Schemas['TranscriptPatch']['ops'][number]
+export type Correction = Schemas['Correction']
+export type SpeakerUpdate = Schemas['SpeakerUpdate']
+export type LlmSuggestionsOut = Schemas['LlmSuggestionsOut']
+export type TermSetIn = Schemas['TermSetIn']
 export type Segment = Schemas['Segment']
 export type Speaker = Schemas['Speaker']
 export type Term = Schemas['Term']
@@ -100,9 +105,57 @@ export const getTranscript = (transcriptId: string): Promise<TranscriptOut> =>
     }),
   )
 
+
+export const patchTranscript = (transcriptId: string, ops: TranscriptOp[]): Promise<TranscriptOut> =>
+  unwrap(
+    api.PATCH('/api/transcripts/{transcript_id}', {
+      params: { path: { transcript_id: transcriptId } },
+      body: { ops },
+    }),
+  )
+
+export const updateSpeakers = (
+  transcriptId: string,
+  speakers: SpeakerUpdate[],
+): Promise<TranscriptOut> =>
+  unwrap(
+    api.PUT('/api/transcripts/{transcript_id}/speakers', {
+      params: { path: { transcript_id: transcriptId } },
+      body: { speakers },
+    }),
+  )
+
+export const revertTranscript = (transcriptId: string): Promise<TranscriptOut> =>
+  unwrap(
+    api.POST('/api/transcripts/{transcript_id}/revert', {
+      params: { path: { transcript_id: transcriptId } },
+    }),
+  )
+
+export const requestLlmSuggestions = (
+  transcriptId: string,
+  segmentIds: string[] | null,
+): Promise<LlmSuggestionsOut> =>
+  unwrap(
+    api.POST('/api/transcripts/{transcript_id}/llm-suggestions', {
+      params: { path: { transcript_id: transcriptId } },
+      body: { segment_ids: segmentIds },
+    }),
+  )
 // term sets --------------------------------------------------------------------------------------
 
 export const listTermSets = (): Promise<TermSetOut[]> => unwrap(api.GET('/api/term-sets'))
+
+export const updateTermSet = (termSetId: string, body: TermSetIn): Promise<TermSetOut> =>
+  unwrap(
+    api.PUT('/api/term-sets/{term_set_id}', {
+      params: { path: { term_set_id: termSetId } },
+      body,
+    }),
+  )
+
+export const createTermSet = (body: TermSetIn): Promise<TermSetOut> =>
+  unwrap(api.POST('/api/term-sets', { body }))
 
 // settings ---------------------------------------------------------------------------------------
 
