@@ -1,0 +1,23 @@
+# NVIDIA override for the backend. Needs the NVIDIA driver and the NVIDIA Container Toolkit on the
+# host (`docker run --rm --gpus all nvidia/cuda:12.6.3-base-ubuntu22.04 nvidia-smi` must work).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.cuda.yml up -d --build backend
+#   docker compose -f docker-compose.yml -f docker-compose.cuda.yml run --rm backend \
+#     asr models download fsmn-vad campplus qwen3-forced-aligner qwen3-asr-1.7b --mirror
+#
+# The image uses the cu126 torch wheels (pyproject extra "cuda"). On CUDA the local pipeline runs
+# in bfloat16 and defaults to Qwen3-ASR-1.7B (EXECUTION_LOG D31/D32).
+services:
+  backend:
+    image: asr-backend:cuda
+    build:
+      target: backend-cuda
+    environment:
+      ASR_DEVICE: cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all # or `device_ids: ["0"]` to pin one GPU
+              capabilities: [gpu]

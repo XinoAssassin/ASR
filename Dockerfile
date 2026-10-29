@@ -9,6 +9,11 @@
 # dependency: PyAV (`av`) wheels bundle FFmpeg shared libraries, imageio-ffmpeg
 # bundles a static CLI as fallback (see docs/research/bundled-ffmpeg.md). The
 # image therefore contains exactly the ffmpeg build the application was tested with.
+#
+# Model weights are not baked in: they live in the /models volume and are fetched explicitly with
+# `docker compose run --rm backend asr models download ...` (AGENTS.md rule 6). MODELSCOPE_CACHE /
+# HF_HOME only hold the hub libraries' own metadata, kept apart from the <hub>/<repo> model tree.
+# Deployment guide: docs/DEPLOYMENT.md.
 
 # ---------------------------------------------------------------- backend base
 FROM python:3.12-slim-bookworm AS backend-base
@@ -26,7 +31,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends libgomp1 ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/astral-sh/uv:0.13 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /uvx /bin/
 
 WORKDIR /app/backend
 
@@ -48,8 +53,8 @@ ENV ASR_DATA_DIR=/data \
     ASR_UPLOAD_ROOTS=/data/uploads \
     ASR_MODEL_CACHE_DIR=/models \
     ASR_DEVICE=cpu \
-    MODELSCOPE_CACHE=/models/modelscope \
-    HF_HOME=/models/huggingface
+    MODELSCOPE_CACHE=/models/.cache/modelscope \
+    HF_HOME=/models/.cache/huggingface
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s \
@@ -57,7 +62,9 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s \
 
 # -------------------------------------------------------------- backend (CPU)
 FROM backend-base AS backend-cpu
-CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8000"]
+# `asr serve`: one uvicorn worker (the job queue is in-process), ASR_LOG_* honoured. Behind a
+# reverse proxy add `--forwarded-allow-ips <proxy address>` (docs/DEPLOYMENT.md).
+CMD ["asr", "serve", "--host", "0.0.0.0", "--port", "8000"]
 
 # ------------------------------------------------------------- backend (CUDA)
 # Same application, CUDA-enabled torch wheels (pyproject extra "cuda").
@@ -75,7 +82,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends libgomp1 ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/astral-sh/uv:0.13 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /uvx /bin/
 WORKDIR /app/backend
 COPY backend/pyproject.toml backend/uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -93,12 +100,12 @@ ENV ASR_DATA_DIR=/data \
     ASR_UPLOAD_ROOTS=/data/uploads \
     ASR_MODEL_CACHE_DIR=/models \
     ASR_DEVICE=cuda \
-    MODELSCOPE_CACHE=/models/modelscope \
-    HF_HOME=/models/huggingface
+    MODELSCOPE_CACHE=/models/.cache/modelscope \
+    HF_HOME=/models/.cache/huggingface
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s \
   CMD curl -fsS http://127.0.0.1:8000/api/health || exit 1
-CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["asr", "serve", "--host", "0.0.0.0", "--port", "8000"]
 
 # ------------------------------------------------------------- frontend build
 FROM node:26-alpine AS frontend-build
@@ -112,7 +119,8 @@ COPY frontend/ ./
 RUN pnpm build
 
 # ------------------------------------------------------------------ frontend
-FROM nginx:1.27-alpine AS frontend
+# nginx stable branch (even minor).
+FROM nginx:1.30-alpine AS frontend
 COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=frontend-build /app/frontend/dist /usr/share/nginx/html
 # Runtime-configurable backend URL: entrypoint renders /config.js from env.

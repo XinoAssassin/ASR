@@ -1,0 +1,71 @@
+# systemd unit for the backend: /etc/systemd/system/asr.service
+#
+#   sudo useradd --system --create-home --home-dir /var/lib/asr asr
+#   sudo -u asr git clone <repo> /opt/asr     # or copy a release; /opt/asr/backend holds pyproject.toml
+#   cd /opt/asr/backend && sudo -u asr uv sync --frozen --no-dev --extra cpu --extra local
+#                                             # NVIDIA: --extra cuda instead of --extra cpu
+#   sudo install -d -m 750 -o root -g asr /etc/asr
+#   sudo install -m 640 -o root -g asr /dev/null /etc/asr/asr.env && sudoedit /etc/asr/asr.env
+#       ASR_API_KEY=<long random value>
+#       ASR_CORS_ORIGINS=https://asr-ui.example.com,http://tauri.localhost
+#       ASR_PROVIDER_DEFAULT=local
+#       (plus DASHSCOPE_API_KEY=... for the cloud provider; any other variable from .env.example)
+#   sudo systemctl daemon-reload && sudo systemctl enable --now asr
+#   journalctl -u asr -f
+#
+# Models are fetched once, explicitly, as the service user with the same cache dir:
+#   sudo -u asr env ASR_MODEL_CACHE_DIR=/var/lib/asr/models /opt/asr/backend/.venv/bin/asr models download \
+#     fsmn-vad campplus qwen3-forced-aligner qwen3-asr-0.6b --mirror
+#
+# Guide: docs/DEPLOYMENT.md.
+
+[Unit]
+Description=Multi-speaker ASR backend (asr serve)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=asr
+Group=asr
+WorkingDirectory=/opt/asr/backend
+
+# Paths. Do not repeat them in /etc/asr/asr.env: EnvironmentFile= values win over Environment=.
+Environment=ASR_DATA_DIR=/var/lib/asr/data
+Environment=ASR_UPLOAD_ROOTS=/var/lib/asr/uploads
+Environment=ASR_MODEL_CACHE_DIR=/var/lib/asr/models
+Environment=MODELSCOPE_CACHE=/var/lib/asr/.cache/modelscope
+Environment=HF_HOME=/var/lib/asr/.cache/huggingface
+# journald already timestamps lines; use ASR_LOG_FORMAT=json for log shippers.
+Environment=ASR_LOG_FORMAT=text
+# Environment=ASR_TORCH_THREADS=16
+
+# KEY=value lines, no inline comments (systemd keeps everything after '=' as the value).
+# Must contain at least ASR_API_KEY and ASR_CORS_ORIGINS for a networked backend.
+EnvironmentFile=/etc/asr/asr.env
+
+# Behind nginx on this host (deploy/nginx-backend-https.conf):
+ExecStart=/opt/asr/backend/.venv/bin/asr serve --host 127.0.0.1 --port 8000 --forwarded-allow-ips 127.0.0.1
+# Direct LAN access instead (requires ASR_API_KEY):
+# ExecStart=/opt/asr/backend/.venv/bin/asr serve --host 0.0.0.0 --port 8000
+
+# asr serve drains for up to 30 s; a job still running is marked interrupted on the next start.
+TimeoutStopSec=45
+Restart=on-failure
+RestartSec=5
+
+# Hardening: the service writes only its state directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/asr
+# Add every extra upload root (e.g. a NAS mount listed in ASR_UPLOAD_ROOTS) here as well:
+# ReadWritePaths=/mnt/nas/asr
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# GPU hosts: /dev/nvidia* must stay reachable, so do not add PrivateDevices=true.
+
+[Install]
+WantedBy=multi-user.target
