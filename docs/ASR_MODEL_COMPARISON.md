@@ -46,6 +46,10 @@ Key individual sets (CER %, lower is better):
 
 ## 3. Recommendation
 
+> **Superseded by measurement (2026-10-29):** the M4 bake-off (`docs/M4_BAKEOFF.md`) confirmed
+> Qwen3-ASR as the default, made 1.7B the CPU default too where the CPU has native BF16, and
+> replaced Fun-ASR-Nano as fallback with Qwen3-ASR-0.6B. The text below is the pre-M4 reasoning.
+
 **Primary backend: Qwen3-ASR** (1.7B on CUDA, 0.6B on the CPU dev machine)
 - Rationale: satisfies accuracy, hotword/context, timestamps, streaming, license and maintenance activity; it is the only candidate that ships both context injection and an official aligner, which map exactly onto this project's two core needs (English terms + speaker merge).
 

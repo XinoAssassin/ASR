@@ -77,9 +77,10 @@ Both providers emit the same `Transcript` (§5.4); the frontend never branches o
 ```
 [0] Preprocess   decode → 16 kHz mono PCM (+ optional steps, §4.5)
 [1] VAD          FSMN-VAD (FunASR) speech segments
-[2] ASR          Qwen3-ASR 1.7B (CUDA) / 0.6B (CPU) + context term list   ← default
-                 Fun-ASR-Nano-2512 + hotwords (funasr SDK)                ← fallback (faster on CPU)
-                 SeACo-Paraformer                                          ← lightweight fast mode
+[2] ASR          Qwen3-ASR 1.7B (CUDA, or CPU with native BF16) / 0.6B (CPU without BF16)
+                 + context term list                                       ← default (M4, docs/M4_BAKEOFF.md)
+                 SeACo-Paraformer (fp32)                                   ← fast draft mode
+                 Fun-ASR-Nano-2512 (native transformers)                   ← optional, not default
 [3] Align        Qwen3-ForcedAligner-0.6B → character timestamps (funasr route has its own; skip)
 [4] Diarize      FunASR CAM++ (default) / pyannote.audio 3.1 (optional, HF token)
 [5] Merge        each character/sentence takes the speaker with max time overlap; merge adjacent same-speaker runs
@@ -312,7 +313,7 @@ Timestamps are seconds (float) throughout; the cloud provider converts from mill
 | M1 | Backend basics: upload (target dir + validation + chunks), job queue + SSE, SQLite, Transcript model, settings, X-API-Key, decode/probe via bundled ffmpeg | curl can upload and create a job |
 | M2 | Cloud provider: file transfer (default strategy from research) → submit → poll → normalise; term sets → vocabulary | A real recording yields a speaker-labelled Transcript via the cloud |
 | M3 | Frontend v1: Upload (with directory picker), Jobs, Transcript (waveform + dialogue + seek), export, Settings (backend URL / provider / cloud key) | Browser flow: upload → cloud transcribe → view → export |
-| M4 | Local ASR bake-off: 3–5 min of own audio across Qwen3-ASR-0.6B/1.7B, Fun-ASR-Nano, SeACo-Paraformer (CER / term recall / RTF); pick default | Results table in `docs/` |
+| M4 ✅ | Local ASR bake-off: 3–5 min of own audio across Qwen3-ASR-0.6B/1.7B, Fun-ASR-Nano, SeACo-Paraformer (CER / term recall / RTF); pick default | Results table in `docs/` — done 2026-10-29, `docs/M4_BAKEOFF.md` (incl. 9 cloud models) |
 | M5 | Local provider: preprocess + VAD + ASR + align + CAM++ + merge wired into the queue; CLI wrapper | Local output has the same Transcript shape as cloud; speaker mis-assignment < 10% |
 | M6 | Term sets both ways (local context/hotwords, cloud vocabulary); local model management in Settings; CUDA verification; preprocessing toggles in UI | Visible term-recall gain; `device=cuda` works on an NVIDIA host |
 | M7 | Frontend v2: speaker rename / merge / reassign / split, autosave + revert, term highlight + replace, search, shortcuts | Proofreading a 10-min recording without leaving the page |
@@ -371,6 +372,7 @@ Default local models (ModelScope, cached after first download):
 ## 10. Decisions taken
 
 - Language: Chinese-primary with English terms → local default Qwen3-ASR; cloud `qwen-audio-3.1-asr-flash-filetrans`; term sets injected on both paths.
+- Local ASR default (M4 bake-off): Qwen3-ASR-1.7B in bfloat16 on CUDA or CPUs with native BF16 (AVX512_BF16 / AMX; RTF 0.43, 8.6 % lenient CER, best term recall), Qwen3-ASR-0.6B otherwise; SeACo-Paraformer as fast draft mode. Fun-ASR-Nano dropped as fallback.
 - Deployment: separated frontend and backend over HTTP; backend may run on a GPU host; CPU on the dev machine; Docker images for both.
 - Storage: frontend picks the server directory; backend persists inside allowed roots.
 - Providers: local and cloud, switchable in Settings, overridable per job.

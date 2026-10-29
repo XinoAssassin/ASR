@@ -38,7 +38,7 @@ MODELS: dict[str, ModelSpec] = {
             "asr",
             "qwen3_asr",
             "model.safetensors",
-            "Qwen3-ASR 0.6B (CPU default candidate)",
+            "Qwen3-ASR 0.6B (default on CPUs without native BF16)",
         ),
         ModelSpec(
             "qwen3-asr-1.7b",
@@ -47,7 +47,7 @@ MODELS: dict[str, ModelSpec] = {
             "asr",
             "qwen3_asr",
             "model.safetensors",
-            "Qwen3-ASR 1.7B (CUDA default candidate)",
+            "Qwen3-ASR 1.7B (default on CUDA and CPUs with native BF16)",
             mirror="Qwen/Qwen3-ASR-1.7B-hf",
         ),
         ModelSpec(
@@ -57,7 +57,7 @@ MODELS: dict[str, ModelSpec] = {
             "asr",
             "fun_asr_nano",
             "model.safetensors",
-            "Fun-ASR-Nano-2512 (native hotwords)",
+            "Fun-ASR-Nano-2512 (optional; dominated by Qwen3-0.6B in M4)",
         ),
         ModelSpec(
             "seaco-paraformer",
@@ -66,7 +66,7 @@ MODELS: dict[str, ModelSpec] = {
             "asr",
             "funasr",
             "model.pt",
-            "SeACo-Paraformer large (fast, hotwords)",
+            "SeACo-Paraformer large (fast draft mode, fp32 only)",
         ),
         ModelSpec(
             "fsmn-vad",

@@ -233,11 +233,18 @@ Errors: FastAPI default `{"detail": ...}`; 401 for missing/wrong `X-API-Key`, 40
 | D26 | 422 responses drop `input` / `ctx` from validation errors | Review L1: a rejected DashScope key was echoed to the browser |
 | D27 | Stored upload paths are re-resolved and must stay inside a root before the audio route or a job reads them | Review L2: symlink swap after upload/register |
 | D28 | Chunked init: max 16 open sessions (429), free-space check on data dir and target (507); upload roots must not contain `ASR_DATA_DIR` (startup error) | Review L3 / L4 |
+| D29 | M4 stack: transformers 5.21 runs Qwen3-ASR and Fun-ASR-Nano natively (no `qwen-asr` package and its transformers 4.57 pin); funasr only for SeACo-Paraformer / FSMN-VAD / CAM++; no torchaudio (stops at 2.11, torch is 2.14) — funasr's kaldi-native-fbank shim stands in, also for Fun-ASR-Nano's feature extractor. `asr_transformers.py` replaces the planned `asr_qwen3.py` / `asr_funasr.py` split | M4 |
+| D30 | Models download only via `asr models download [--mirror]` into `ASR_MODEL_CACHE_DIR/<hub>/<repo>`; loaders use local files only; "downloaded" = weights file present and no partial files | AGENTS rule 6; HF Xet stalls through the proxy, ModelScope mirrors HF repos |
+| D31 | `resolve_dtype("auto")` picks bfloat16 on CUDA and on CPUs with native BF16 (oneDNN check), float32 otherwise; `ASR_LOCAL_DTYPE` overrides; SeACo-Paraformer is fp32-only (CIF predictor breaks in bf16) | Measured 3.3x speed-up for Qwen3-1.7B at +0.17 points CER |
+| D32 | Local ASR default: Qwen3-ASR-1.7B bf16 where bf16 is native, else 0.6B; Paraformer = fast draft mode; Fun-ASR-Nano optional | `docs/M4_BAKEOFF.md` |
+| D33 | Bake-off reference = video subtitles; primary metric = filler-lenient mixed error rate (CJK chars + Latin words) | Subtitles omit fillers that faithful models transcribe |
 
 ### Follow-ups (not in M0–M3 scope)
 - `JobOut.upload_name` / `JobOut.duration` to avoid one `GET /api/uploads/{id}` per row in the Jobs table.
 - `POST /api/uploads/register` could return the existing upload for an already-registered path.
 - `GET /api/uploads/{id}?stream_index=` to re-probe another track of a multi-track file (OBS selector, M6+).
+- Evaluate a "cloud chunked" mode (local VAD + `qwen3-asr-flash` with terms + local CAM++) against the filetrans provider after M5: short-audio models scored 8.2–9.3 % vs 11.6 % lenient CER in M4.
+- Collect a technical-terms clip (chip / English terms) for M6's term-recall acceptance.
 - ~~Confirm on a live run: `max_file_size_mb` and getPolicy on the Qianwen endpoint~~ — confirmed 2026-10-29: getPolicy works on `cn-beijing.maas.qianwenaiapi.com`, limit 1024 MB. The workspace endpoint is still unverified.
 
 ### drvfs workarounds (WSL only)
@@ -274,3 +281,7 @@ client unchanged on regeneration.
 | M2-b live 4-speaker Transcript | PASS (2026-10-29) | Qianwen endpoint `cn-beijing.maas.qianwenaiapi.com`, speaker count **auto**: 4 speakers, 496 segments, 1888 s, ~2 min end to end (stereo downmixed to 16 kHz mono FLAC, temp upload, poll, fetch). Known flaw: two self-introductions in the opening line merged into one segment |
 | M3-a typecheck / build | PASS | |
 | M3-b browser flow | PASS (fake provider) / BLOCKED (real cloud) | Real UI + backend up to a failed cloud job; full upload → SSE → transcript → seek → export with a stand-in provider, with and without `ASR_API_KEY` |
+
+## 7. M4 (2026-10-29)
+
+Local ASR bake-off done: `docs/M4_BAKEOFF.md` (8 local configurations, 9 cloud models, same 12 VAD chunks). Default decided per D32.
