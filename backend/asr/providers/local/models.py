@@ -140,4 +140,8 @@ def download(cache_dir: Path, key: str, *, mirror: bool = False) -> Path:
         ms_snapshot_download(s.mirror if mirror else s.repo_id, local_dir=str(target))
     if not (target / s.marker).is_file():
         raise RuntimeError(f"download of {key} finished without {s.marker}")
+    # The hub reported success, so any partial file left is a stale leftover of an earlier,
+    # interrupted transfer (e.g. a stalled Xet download that a retry finished over plain HTTPS).
+    for partial in [p for p in target.rglob("*") if p.name.endswith(_PARTIAL_SUFFIXES)]:
+        partial.unlink(missing_ok=True)
     return target
