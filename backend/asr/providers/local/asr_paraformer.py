@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import contextlib
 from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
 
-from asr.providers.local.device import resolve_dtype
 from asr.providers.local.models import model_dir
 
 SAMPLE_RATE = 16_000
@@ -18,17 +16,15 @@ class ParaformerAsr:
     key = "seaco-paraformer"
 
     def __init__(self, cache_dir: Path, *, device: str = "cpu", dtype: str = "auto") -> None:
-        import torch
         from funasr import AutoModel
 
-        self.dtype = resolve_dtype(dtype, device=device)
-        # Weights stay float32; bfloat16 runs under autocast so the fbank frontend keeps full
-        # precision while Linear / Conv layers use the native BF16 (AVX512_BF16 / AMX) kernels.
-        self._autocast = (
-            torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16)
-            if self.dtype == "bfloat16"
-            else contextlib.nullcontext()
-        )
+        # Always float32: the CIF predictor accumulates per-frame weights into token boundaries,
+        # and in bfloat16 that sum drifts on long chunks until it emits fewer timestamps than
+        # tokens (funasr then fails with IndexError in sentence_postprocess). The model is already
+        # ~30x faster than real time on CPU, so bf16 would gain little.
+        if dtype not in ("auto", "float32"):
+            raise ValueError("SeACo-Paraformer runs in float32 only (CIF precision)")
+        self.dtype = "float32"
 
         self._model = AutoModel(
             model=str(model_dir(cache_dir, self.key)),
@@ -56,7 +52,6 @@ class ParaformerAsr:
             kwargs: dict[str, object] = {"input": audio.astype(np.float32), "fs": SAMPLE_RATE}
             if hotword:
                 kwargs["hotword"] = hotword
-            with self._autocast:
-                result = self._model.generate(**kwargs)
+            result = self._model.generate(**kwargs)
             texts.append(result[0].get("text", "").strip() if result else "")
         return texts

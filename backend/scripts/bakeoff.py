@@ -146,7 +146,11 @@ def main() -> None:
     dtypes = [d.strip() for d in args.dtypes.split(",") if d.strip()]
     keys = [k.strip() for k in args.models.split(",") if k.strip()]
     rows = []
-    for key, dtype in [(k, d) for k in keys for d in dtypes]:
+    # SeACo-Paraformer is float32-only (CIF precision, see asr_paraformer.py).
+    combos = [
+        (k, d) for k in keys for d in dtypes if not (k == "seaco-paraformer" and d != "float32")
+    ]
+    for key, dtype in combos:
         print(f"== {key} [{dtype}]", file=sys.stderr)
         cmd = [
             sys.executable,
