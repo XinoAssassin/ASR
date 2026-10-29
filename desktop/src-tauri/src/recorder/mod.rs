@@ -3,7 +3,11 @@
 pub mod capture;
 pub mod engine;
 pub mod flac;
+#[cfg(target_os = "linux")]
+mod pulse_capture;
 pub mod resample;
+#[cfg(target_os = "macos")]
+mod sck_capture;
 pub mod timeline;
 #[cfg(windows)]
 mod wasapi_capture;
@@ -121,6 +125,7 @@ impl Recorder {
                 mic: opts.mic,
                 output_device: opts.output_device.clone(),
                 input_device: opts.input_device.clone(),
+                process_id: opts.process_id.filter(|_| opts.system),
                 partial: partial.clone(),
             },
             live.clone(),
@@ -195,6 +200,8 @@ fn status_of(inner: &Inner, take_peaks: bool) -> RecorderStatus {
         file: Some(s.partial.to_string_lossy().into_owned()),
         drift_ms: l.drift_ms,
         warnings: l.warnings.clone(),
+        sources: l.sources,
+        process_id: l.process_id,
     };
     if take_peaks {
         l.peak_system = 0.0;

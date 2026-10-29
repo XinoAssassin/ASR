@@ -32,6 +32,14 @@ pub struct Levels {
     pub mic: f32,
 }
 
+/// What is actually being captured (M10).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Sources {
+    pub system: bool,
+    pub mic: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecorderStatus {
@@ -41,6 +49,9 @@ pub struct RecorderStatus {
     pub file: Option<String>,
     pub drift_ms: Option<f64>,
     pub warnings: Vec<String>,
+    pub sources: Sources,
+    /// Process tree being captured; None = whole render device.
+    pub process_id: Option<u32>,
 }
 
 impl RecorderStatus {
@@ -52,6 +63,8 @@ impl RecorderStatus {
             file,
             drift_ms: None,
             warnings: Vec::new(),
+            sources: Sources::default(),
+            process_id: None,
         }
     }
 }
@@ -67,6 +80,9 @@ pub struct StartOptions {
     pub input_device: Option<String>,
     #[serde(default)]
     pub out_dir: Option<String>,
+    /// Capture only this process tree (Windows process loopback); None = whole render device.
+    #[serde(default)]
+    pub process_id: Option<u32>,
 }
 
 impl Default for StartOptions {
@@ -77,6 +93,68 @@ impl Default for StartOptions {
             output_device: None,
             input_device: None,
             out_dir: None,
+            process_id: None,
+        }
+    }
+}
+
+/// A process with an audio session (M10).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioProcess {
+    pub pid: u32,
+    pub name: String,
+    pub title: Option<String>,
+}
+
+/// Optional local backend started by the app (M10).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SidecarConfig {
+    pub enabled: bool,
+    pub command: String,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub port: u16,
+}
+
+impl Default for SidecarConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            command: String::new(),
+            args: vec!["serve".into(), "--port".into(), "8000".into()],
+            cwd: None,
+            port: 8000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SidecarState {
+    Stopped,
+    Starting,
+    Running,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SidecarStatus {
+    pub state: SidecarState,
+    pub pid: Option<u32>,
+    pub url: Option<String>,
+    pub error: Option<String>,
+}
+
+impl SidecarStatus {
+    pub fn stopped() -> Self {
+        Self {
+            state: SidecarState::Stopped,
+            pid: None,
+            url: None,
+            error: None,
         }
     }
 }
@@ -167,6 +245,22 @@ mod tests {
         let s = serde_json::to_value(RecorderStatus::idle(None)).unwrap();
         assert_eq!(s["state"], "idle");
         assert!(s.get("driftMs").is_some());
+        assert_eq!(
+            s["sources"],
+            serde_json::json!({"system": false, "mic": false})
+        );
+        assert!(s["processId"].is_null());
+        // processId is optional in StartOptions
+        let o: StartOptions = serde_json::from_value(
+            serde_json::json!({"system": true, "mic": true, "processId": 42}),
+        )
+        .unwrap();
+        assert_eq!(o.process_id, Some(42));
+        let st = serde_json::to_value(SidecarStatus::stopped()).unwrap();
+        assert_eq!(st["state"], "stopped");
+        let c = serde_json::to_value(SidecarConfig::default()).unwrap();
+        assert_eq!(c["args"][0], "serve");
+        assert_eq!(c["port"], 8000);
         let o: StartOptions = serde_json::from_value(serde_json::json!({
             "system": true, "mic": false, "outputDevice": null, "inputDevice": "x", "outDir": null
         }))

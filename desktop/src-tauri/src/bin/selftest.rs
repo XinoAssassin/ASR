@@ -40,6 +40,7 @@ mod win {
     const MARKER_EVERY_S: f64 = 2.0;
     const CHIRP_S: f64 = 0.1;
     const AMP: f32 = 0.08;
+    const TONE_HZ: f64 = 1000.0;
 
     struct StderrLog;
     impl log::Log for StderrLog {
@@ -65,6 +66,11 @@ mod win {
         asr_model: Option<String>,
         wait_job: u64,
         mic_device: Option<String>,
+        /// Child mode: "chirp" or "tone" (render only, no recording).
+        play: Option<String>,
+        seconds: f64,
+        process_test: bool,
+        probe: bool,
     }
 
     fn parse() -> Res<Args> {
@@ -79,6 +85,10 @@ mod win {
             asr_model: None,
             wait_job: 0,
             mic_device: None,
+            play: None,
+            seconds: 60.0,
+            process_test: false,
+            probe: false,
         };
         let mut it = std::env::args().skip(1);
         while let Some(k) = it.next() {
@@ -96,6 +106,16 @@ mod win {
                 // A render device id here records its loopback as the "mic" track (machines
                 // without a microphone, e.g. over RDP).
                 "--mic-device" => a.mic_device = Some(v()?),
+                "--play" => a.play = Some(v()?),
+                "--seconds" => a.seconds = v()?.parse().map_err(|e| format!("{e}"))?,
+                "--process-test" => a.process_test = true,
+                "--probe-process" => a.probe = true,
+                "--list-processes" => {
+                    capture::init_thread();
+                    let p = capture::processes()?;
+                    println!("{}", serde_json::to_string_pretty(&p).unwrap());
+                    std::process::exit(0);
+                }
                 "--list-devices" => {
                     capture::init_thread();
                     let d = capture::devices()?;
@@ -106,7 +126,11 @@ mod win {
             }
         }
         if a.gap_at < 0.0 {
-            a.gap_at = a.minutes * 60.0 / 2.0;
+            a.gap_at = if a.play.is_some() || a.process_test {
+                a.seconds / 2.0
+            } else {
+                a.minutes * 60.0 / 2.0
+            };
         }
         Ok(a)
     }
@@ -134,7 +158,7 @@ mod win {
 
     /// Play `dur` seconds with a chirp every MARKER_EVERY_S (first at 1 s) on the default render
     /// device, then release the stream. Returns marker play times (QPC) from IAudioClock.
-    fn play_part(part: usize, dur: f64, source_offset: f64) -> Res<Vec<Played>> {
+    fn play_part(part: usize, dur: f64, source_offset: f64, tone: bool) -> Res<Vec<Played>> {
         capture::init_thread();
         let e2s = |e: wasapi::WasapiError| e.to_string();
         let en = DeviceEnumerator::new().map_err(e2s)?;
@@ -167,6 +191,9 @@ mod win {
             .take_while(|&f| f + c.len() < total)
             .collect();
         let sample = |i: usize| -> f32 {
+            if tone {
+                return (2.0 * std::f64::consts::PI * TONE_HZ * i as f64 / rate).sin() as f32 * AMP;
+            }
             // markers are sparse: find the one covering i
             let k = ((i as f64 / rate - 1.0) / MARKER_EVERY_S).floor();
             if k < 0.0 {
@@ -225,6 +252,9 @@ mod win {
             (1.0 / (b * rate) - 1.0) * 1e6,
             pts.len()
         );
+        if tone {
+            return Ok(Vec::new());
+        }
         Ok(marker_frames
             .iter()
             .map(|&f| Played {
@@ -300,7 +330,16 @@ mod win {
     pub fn main() -> Res<()> {
         let _ = log::set_logger(&StderrLog).map(|()| log::set_max_level(log::LevelFilter::Info));
         let a = parse()?;
+        if let Some(kind) = a.play.clone() {
+            return player(&kind, &a);
+        }
         std::fs::create_dir_all(&a.out).map_err(|e| e.to_string())?;
+        if a.probe {
+            return probe_process(&a);
+        }
+        if a.process_test {
+            return process_test(&a);
+        }
         let total = a.minutes * 60.0;
         let part_a = a.gap_at;
         let part_b = total - a.gap_at - a.gap;
@@ -311,183 +350,15 @@ mod win {
             "plan: {part_a:.0} s playback, {:.0} s idle (stream released), {part_b:.0} s playback",
             a.gap
         );
-        let rec = Arc::new(Recorder::new());
-        let st = rec.start(
-            &StartOptions {
-                system: true,
-                mic: a.mic,
-                output_device: None,
-                input_device: a.mic_device.clone(),
-                out_dir: None,
-            },
-            &a.out,
-        )?;
-        log::info!("recording to {:?}", st.file);
-        let monitor = {
-            let rec = rec.clone();
-            std::thread::spawn(move || {
-                let mut last = Instant::now();
-                let mut drift: Vec<(f64, f64)> = Vec::new();
-                while rec.state() == asr_recorder::ipc::RecorderState::Recording {
-                    std::thread::sleep(Duration::from_millis(250));
-                    let s = rec.status(true);
-                    if let Some(d) = s.drift_ms {
-                        drift.push((s.elapsed, d));
-                    }
-                    if last.elapsed() >= Duration::from_secs(30) {
-                        last = Instant::now();
-                        log::info!(
-                            "t={:.0}s levels sys {:.3} mic {:.3} driftMs {:?} warnings {:?}",
-                            s.elapsed,
-                            s.levels.system,
-                            s.levels.mic,
-                            s.drift_ms,
-                            s.warnings
-                        );
-                    }
-                }
-                drift
-            })
-        };
-        std::thread::sleep(Duration::from_millis(1500));
-        let t_play = Instant::now();
-        let mut played = play_part(0, part_a, 0.0)?;
-        log::info!("idle gap: render stream released for {:.0} s", a.gap);
-        std::thread::sleep(Duration::from_secs_f64(a.gap));
-        played.extend(play_part(1, part_b, part_a + a.gap)?);
-        log::info!(
-            "playback done after {:.1} s",
-            t_play.elapsed().as_secs_f64()
-        );
-        std::thread::sleep(Duration::from_millis(1500));
-        let fin = rec.stop()?;
-        let drift_log = monitor.join().unwrap_or_default();
-        log::info!(
-            "finished {} ({} ch, {:.2} s, {} bytes)",
-            fin.path.display(),
-            fin.channels,
-            fin.duration,
-            fin.size
-        );
-
-        // ---- analysis
-        let (rate, chans) = read_flac(&fin.path)?;
-        let rate_f = rate as f64;
-        let tpl = chirp(rate_f);
-        let ch0 = &chans[0];
-        // anchor: first marker anywhere in the first 6 s
-        let (l0, s0) = xcorr(ch0, &tpl, 0, (6.0 * rate_f) as usize).ok_or("no audio")?;
-        if s0 < 0.5 {
-            return Err(format!(
-                "first marker not found in channel 0 (score {s0:.2}); is the default output device captured?"
-            ));
-        }
-        let q0 = played[0].t_qpc;
-        let mut rows = Vec::new();
-        let mut missing = 0;
-        for p in &played {
-            let expect = l0 + (p.t_qpc - q0) * rate_f;
-            let lo = (expect - 0.3 * rate_f).max(0.0) as usize;
-            let hi = (expect + 0.3 * rate_f) as usize;
-            match xcorr(ch0, &tpl, lo, hi) {
-                Some((lag, s)) if s > 0.5 => {
-                    let offset_ms = (lag - expect) / rate_f * 1000.0;
-                    rows.push((p.part, p.source_t, lag / rate_f, offset_ms, s));
-                }
-                _ => missing += 1,
-            }
-        }
-        if rows.len() < 4 {
-            return Err(format!("only {} markers found", rows.len()));
-        }
-        let off = |part: usize, first: bool| {
-            let v: Vec<_> = rows.iter().filter(|r| r.0 == part).collect();
-            let r = if first { v.first() } else { v.last() };
-            r.map(|r| (r.2, r.3))
-        };
-        println!("== channel 0 (system loopback) vs. QPC play time of each marker ==");
-        println!(
-            "markers found {} / {} (missing {missing})",
-            rows.len(),
-            played.len()
-        );
-        for r in rows.iter().step_by((rows.len() / 12).max(1)) {
-            println!(
-                "  part {} src {:7.2}s  rec {:8.3}s  offset {:+7.2} ms  score {:.2}",
-                r.0, r.1, r.2, r.3, r.4
-            );
-        }
-        let (a0, a1) = (off(0, true), off(0, false));
-        let (b0, b1) = (off(1, true), off(1, false));
-        if let (Some(a0), Some(a1)) = (a0, a1) {
-            println!(
-                "part A: offset start {:+.2} ms (t={:.1}s) end {:+.2} ms (t={:.1}s) -> drift {:+.2} ms",
-                a0.1, a0.0, a1.1, a1.0, a1.1 - a0.1
-            );
-        }
-        if let (Some(b0), Some(b1)) = (b0, b1) {
-            println!(
-                "part B: offset start {:+.2} ms (t={:.1}s) end {:+.2} ms (t={:.1}s) -> drift {:+.2} ms",
-                b0.1, b0.0, b1.1, b1.0, b1.1 - b0.1
-            );
-        }
-        if let (Some(a1), Some(b0)) = (a1, b0) {
-            println!(
-                "across the {:.0} s idle gap: offset change {:+.2} ms (silence fill timing error)",
-                a.gap,
-                b0.1 - a1.1
-            );
-        }
-        let first = rows.first().unwrap();
-        let last = rows.last().unwrap();
-        println!(
-            "OVERALL: offset at start {:+.2} ms, at end {:+.2} ms (t={:.1}s) -> drift {:+.2} ms over {:.1} min",
-            first.3,
-            last.3,
-            last.2,
-            last.3 - first.3,
-            (last.2 - first.2) / 60.0
-        );
-        if chans.len() > 1 {
-            let ch1 = &chans[1];
-            println!("== channel 1 (mic) ==");
-            println!(
-                "mic rms {:.5} (ch0 rms {:.5}), samples {} = ch0 {}",
-                rms(ch1),
-                rms(ch0),
-                ch1.len(),
-                ch0.len()
-            );
-            // Acoustic pickup of the markers (only if speakers + mic are live).
-            let mut mic_rows = Vec::new();
-            for r in &rows {
-                let c = (r.2 * rate_f) as usize;
-                let lo = c.saturating_sub((0.05 * rate_f) as usize);
-                let hi = c + (0.2 * rate_f) as usize;
-                if let Some((lag, s)) = xcorr(ch1, &tpl, lo, hi) {
-                    if s > 0.4 {
-                        mic_rows.push((r.2, (lag / rate_f - r.2) * 1000.0));
-                    }
-                }
-            }
-            if mic_rows.len() >= 4 {
-                let (f, l) = (mic_rows.first().unwrap(), mic_rows.last().unwrap());
-                println!(
-                    "channel 1 carries {} markers (acoustic pickup, or loopback via --mic-device): ch1-ch0 offset start {:+.2} ms, end {:+.2} ms (t={:.1}s) -> drift {:+.2} ms",
-                    mic_rows.len(), f.1, l.1, l.0, l.1 - f.1
-                );
-            } else {
-                println!("channel 1 does not carry the markers ({} found); inter-channel sync not measurable", mic_rows.len());
-            }
-            if let (Some(f), Some(l)) = (drift_log.first(), drift_log.last()) {
-                let max = drift_log.iter().map(|d| d.1.abs()).fold(0.0, f64::max);
-                println!(
-                    "controller residual driftMs: first {:+.2} (t={:.0}s) last {:+.2} (t={:.0}s) max |{max:.2}|",
-                    f.1, f.0, l.1, l.0
-                );
-            }
-        }
-
+        let gap = a.gap;
+        let (fin, played, drift_log) = record(&a, None, a.mic, move || {
+            let mut played = play_part(0, part_a, 0.0, false)?;
+            log::info!("idle gap: render stream released for {gap:.0} s");
+            std::thread::sleep(Duration::from_secs_f64(gap));
+            played.extend(play_part(1, part_b, part_a + gap, false)?);
+            Ok(played)
+        })?;
+        analyze(&fin, &played, &drift_log, a.gap)?;
         // ---- upload
         if let Some(url) = a.backend {
             let data = a.out.join(format!("upload-state-{}", std::process::id()));
@@ -583,6 +454,418 @@ mod win {
                 v["options"]["local"]["asr_model"]
             );
         }
+        Ok(())
+    }
+
+    type Recorded = (
+        asr_recorder::recorder::Finished,
+        Vec<Played>,
+        Vec<(f64, f64)>,
+    );
+
+    /// Record (system [+ mic]) while `play` runs; returns the finished file and marker times.
+    fn record(
+        a: &Args,
+        process_id: Option<u32>,
+        mic: bool,
+        play: impl FnOnce() -> Res<Vec<Played>>,
+    ) -> Res<Recorded> {
+        let rec = Arc::new(Recorder::new());
+        let st = rec.start(
+            &StartOptions {
+                system: true,
+                mic,
+                output_device: None,
+                input_device: a.mic_device.clone(),
+                out_dir: None,
+                process_id,
+            },
+            &a.out,
+        )?;
+        log::info!(
+            "recording to {:?} sources {:?} processId {:?} warnings {:?}",
+            st.file,
+            st.sources,
+            st.process_id,
+            st.warnings
+        );
+        let monitor = {
+            let rec = rec.clone();
+            std::thread::spawn(move || {
+                let mut last = Instant::now();
+                let mut drift: Vec<(f64, f64)> = Vec::new();
+                while rec.state() == asr_recorder::ipc::RecorderState::Recording {
+                    std::thread::sleep(Duration::from_millis(250));
+                    let s = rec.status(true);
+                    if let Some(d) = s.drift_ms {
+                        drift.push((s.elapsed, d));
+                    }
+                    if last.elapsed() >= Duration::from_secs(30) {
+                        last = Instant::now();
+                        log::info!(
+                            "t={:.0}s levels sys {:.3} mic {:.3} driftMs {:?} warnings {:?}",
+                            s.elapsed,
+                            s.levels.system,
+                            s.levels.mic,
+                            s.drift_ms,
+                            s.warnings
+                        );
+                    }
+                }
+                drift
+            })
+        };
+        std::thread::sleep(Duration::from_millis(1500));
+        let t_play = Instant::now();
+        let played = play();
+        log::info!(
+            "playback done after {:.1} s",
+            t_play.elapsed().as_secs_f64()
+        );
+        std::thread::sleep(Duration::from_millis(1500));
+        let fin = rec.stop()?;
+        let drift_log = monitor.join().unwrap_or_default();
+        log::info!(
+            "finished {} ({} ch, {:.2} s, {} bytes)",
+            fin.path.display(),
+            fin.channels,
+            fin.duration,
+            fin.size
+        );
+        Ok((fin, played?, drift_log))
+    }
+
+    /// Locate the markers and print offsets / drift. Returns marker positions (s) in the file.
+    fn analyze(
+        fin: &asr_recorder::recorder::Finished,
+        played: &[Played],
+        drift_log: &[(f64, f64)],
+        gap: f64,
+    ) -> Res<Vec<f64>> {
+        let (rate, chans) = read_flac(&fin.path)?;
+        let rate_f = rate as f64;
+        let tpl = chirp(rate_f);
+        let ch0 = &chans[0];
+        // anchor: first marker anywhere in the first 6 s
+        let (l0, s0) = xcorr(ch0, &tpl, 0, (6.0 * rate_f) as usize).ok_or("no audio")?;
+        if s0 < 0.5 {
+            return Err(format!(
+                "first marker not found in channel 0 (score {s0:.2}); is the default output device captured?"
+            ));
+        }
+        let q0 = played[0].t_qpc;
+        let mut rows = Vec::new();
+        let mut missing = 0;
+        for p in played {
+            let expect = l0 + (p.t_qpc - q0) * rate_f;
+            let lo = (expect - 0.3 * rate_f).max(0.0) as usize;
+            let hi = (expect + 0.3 * rate_f) as usize;
+            match xcorr(ch0, &tpl, lo, hi) {
+                Some((lag, s)) if s > 0.5 => {
+                    let offset_ms = (lag - expect) / rate_f * 1000.0;
+                    rows.push((p.part, p.source_t, lag / rate_f, offset_ms, s));
+                }
+                _ => missing += 1,
+            }
+        }
+        if rows.len() < 4 {
+            return Err(format!("only {} markers found", rows.len()));
+        }
+        let off = |part: usize, first: bool| {
+            let v: Vec<_> = rows.iter().filter(|r| r.0 == part).collect();
+            let r = if first { v.first() } else { v.last() };
+            r.map(|r| (r.2, r.3))
+        };
+        println!("== channel 0 (system loopback) vs. QPC play time of each marker ==");
+        println!(
+            "markers found {} / {} (missing {missing})",
+            rows.len(),
+            played.len()
+        );
+        for r in rows.iter().step_by((rows.len() / 12).max(1)) {
+            println!(
+                "  part {} src {:7.2}s  rec {:8.3}s  offset {:+7.2} ms  score {:.2}",
+                r.0, r.1, r.2, r.3, r.4
+            );
+        }
+        let (a0, a1) = (off(0, true), off(0, false));
+        let (b0, b1) = (off(1, true), off(1, false));
+        if let (Some(a0), Some(a1)) = (a0, a1) {
+            println!(
+                "part A: offset start {:+.2} ms (t={:.1}s) end {:+.2} ms (t={:.1}s) -> drift {:+.2} ms",
+                a0.1, a0.0, a1.1, a1.0, a1.1 - a0.1
+            );
+        }
+        if let (Some(b0), Some(b1)) = (b0, b1) {
+            println!(
+                "part B: offset start {:+.2} ms (t={:.1}s) end {:+.2} ms (t={:.1}s) -> drift {:+.2} ms",
+                b0.1, b0.0, b1.1, b1.0, b1.1 - b0.1
+            );
+        }
+        if let (Some(a1), Some(b0)) = (a1, b0) {
+            println!(
+                "across the {:.0} s idle gap: offset change {:+.2} ms (silence fill timing error)",
+                gap,
+                b0.1 - a1.1
+            );
+        }
+        let first = rows.first().unwrap();
+        let last = rows.last().unwrap();
+        println!(
+            "OVERALL: offset at start {:+.2} ms, at end {:+.2} ms (t={:.1}s) -> drift {:+.2} ms over {:.1} min",
+            first.3,
+            last.3,
+            last.2,
+            last.3 - first.3,
+            (last.2 - first.2) / 60.0
+        );
+        if chans.len() > 1 {
+            let ch1 = &chans[1];
+            println!("== channel 1 (mic) ==");
+            println!(
+                "mic rms {:.5} (ch0 rms {:.5}), samples {} = ch0 {}",
+                rms(ch1),
+                rms(ch0),
+                ch1.len(),
+                ch0.len()
+            );
+            // Acoustic pickup of the markers (only if speakers + mic are live).
+            let mut mic_rows = Vec::new();
+            for r in &rows {
+                let c = (r.2 * rate_f) as usize;
+                let lo = c.saturating_sub((0.05 * rate_f) as usize);
+                let hi = c + (0.2 * rate_f) as usize;
+                if let Some((lag, s)) = xcorr(ch1, &tpl, lo, hi) {
+                    if s > 0.4 {
+                        mic_rows.push((r.2, (lag / rate_f - r.2) * 1000.0));
+                    }
+                }
+            }
+            if mic_rows.len() >= 4 {
+                let (f, l) = (mic_rows.first().unwrap(), mic_rows.last().unwrap());
+                println!(
+                    "channel 1 carries {} markers (acoustic pickup, or loopback via --mic-device): ch1-ch0 offset start {:+.2} ms, end {:+.2} ms (t={:.1}s) -> drift {:+.2} ms",
+                    mic_rows.len(), f.1, l.1, l.0, l.1 - f.1
+                );
+            } else {
+                println!("channel 1 does not carry the markers ({} found); inter-channel sync not measurable", mic_rows.len());
+            }
+            if let (Some(f), Some(l)) = (drift_log.first(), drift_log.last()) {
+                let max = drift_log.iter().map(|d| d.1.abs()).fold(0.0, f64::max);
+                println!(
+                    "controller residual driftMs: first {:+.2} (t={:.0}s) last {:+.2} (t={:.0}s) max |{max:.2}|",
+                    f.1, f.0, l.1, l.0
+                );
+            }
+        }
+        Ok(rows.iter().map(|r| r.2).collect())
+    }
+
+    /// Child mode: render a chirp track (waits for "GO" on stdin, prints marker QPC times) or a
+    /// continuous 1 kHz tone.
+    fn player(kind: &str, a: &Args) -> Res<()> {
+        use std::io::{BufRead, Write};
+        match kind {
+            "tone" => {
+                println!("READY {}", std::process::id());
+                std::io::stdout().flush().ok();
+                play_part(0, a.seconds, 0.0, true)?;
+                Ok(())
+            }
+            "chirp" => {
+                println!("READY {}", std::process::id());
+                std::io::stdout().flush().ok();
+                let mut line = String::new();
+                std::io::stdin().lock().read_line(&mut line).ok();
+                let part_a = a.gap_at.min(a.seconds);
+                let mut played = play_part(0, part_a, 0.0, false)?;
+                if a.seconds - part_a - a.gap >= 5.0 {
+                    std::thread::sleep(Duration::from_secs_f64(a.gap));
+                    played.extend(play_part(
+                        1,
+                        a.seconds - part_a - a.gap,
+                        part_a + a.gap,
+                        false,
+                    )?);
+                }
+                for p in &played {
+                    println!("M {} {:.7} {:.4}", p.part, p.t_qpc, p.source_t);
+                }
+                std::io::stdout().flush().ok();
+                Ok(())
+            }
+            other => Err(format!("unknown --play {other}")),
+        }
+    }
+
+    struct Child {
+        child: std::process::Child,
+        pid: u32,
+        out: std::io::BufReader<std::process::ChildStdout>,
+    }
+
+    fn spawn_player(kind: &str, a: &Args, seconds: f64) -> Res<Child> {
+        use std::io::BufRead;
+        use std::process::{Command, Stdio};
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let mut child = Command::new(exe)
+            .args(["--play", kind, "--seconds", &seconds.to_string()])
+            .args([
+                "--gap-at",
+                &a.gap_at.to_string(),
+                "--gap",
+                &a.gap.to_string(),
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        out.read_line(&mut line).map_err(|e| e.to_string())?;
+        let pid = line
+            .strip_prefix("READY ")
+            .and_then(|p| p.trim().parse().ok())
+            .ok_or(format!("player {kind} did not start: {line:?}"))?;
+        Ok(Child { child, pid, out })
+    }
+
+    /// RMS (dBFS) and 1 kHz Goertzel level of channel 0 outside the chirp markers.
+    fn tone_level(fin: &asr_recorder::recorder::Finished, markers: &[f64]) -> Res<(f64, f64)> {
+        let (rate, chans) = read_flac(&fin.path)?;
+        let r = rate as f64;
+        let ch0 = &chans[0];
+        // middle of the recording, away from start/stop edges
+        let lo = (3.0 * r) as usize;
+        let hi = ch0.len().saturating_sub((3.0 * r) as usize);
+        let mut kept: Vec<f32> = Vec::new();
+        for (i, v) in ch0.iter().enumerate().take(hi).skip(lo) {
+            let t = i as f64 / r;
+            if markers.iter().any(|m| t > m - 0.1 && t < m + 0.35) {
+                continue;
+            }
+            kept.push(*v);
+        }
+        let rms_db = 20.0 * rms(&kept).max(1e-10).log10();
+        // Goertzel at 1 kHz over the kept samples (normalised to a sine amplitude).
+        let w = 2.0 * std::f64::consts::PI * TONE_HZ / r;
+        let (mut s1, mut s2) = (0.0f64, 0.0f64);
+        for v in &kept {
+            let s0 = *v as f64 + 2.0 * w.cos() * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        let power = s1 * s1 + s2 * s2 - 2.0 * w.cos() * s1 * s2;
+        let amp = 2.0 * power.max(0.0).sqrt() / kept.len().max(1) as f64;
+        Ok((rms_db, 20.0 * amp.max(1e-10).log10()))
+    }
+
+    /// Two players at once (chirps / 1 kHz tone, separate processes). Run 1 records only the
+    /// chirp player's process tree, run 2 the whole device.
+    fn process_test(a: &Args) -> Res<()> {
+        use std::io::{BufRead, Write};
+        let mut results = Vec::new();
+        for (label, by_process) in [
+            ("process loopback (chirp player only)", true),
+            ("whole device", false),
+        ] {
+            println!("== {label} ==");
+            let mut tone = spawn_player("tone", a, a.seconds + 8.0)?;
+            let mut chirp = spawn_player("chirp", a, a.seconds)?;
+            log::info!("players: chirp pid {} tone pid {}", chirp.pid, tone.pid);
+            let pid = by_process.then_some(chirp.pid);
+            let stdin = chirp.child.stdin.take();
+            let (fin, played, drift) = record(a, pid, false, move || {
+                if let Some(mut i) = stdin {
+                    writeln!(i, "GO").map_err(|e| e.to_string())?;
+                }
+                let mut played = Vec::new();
+                let mut line = String::new();
+                while chirp.out.read_line(&mut line).map_err(|e| e.to_string())? > 0 {
+                    let f: Vec<&str> = line.split_whitespace().collect();
+                    if f.len() == 4 && f[0] == "M" {
+                        played.push(Played {
+                            part: f[1].parse().unwrap_or(0),
+                            t_qpc: f[2].parse().unwrap_or(0.0),
+                            source_t: f[3].parse().unwrap_or(0.0),
+                        });
+                    }
+                    line.clear();
+                }
+                let _ = chirp.child.wait();
+                Ok(played)
+            })?;
+            let _ = tone.child.kill();
+            let _ = tone.child.wait();
+            let markers = analyze(&fin, &played, &drift, a.gap)?;
+            let (rms_db, tone_db) = tone_level(&fin, &markers)?;
+            println!(
+                "markers found {}/{}; channel 0 outside markers: RMS {rms_db:.1} dBFS, 1 kHz tone {tone_db:.1} dBFS (played at {:.1} dBFS)",
+                markers.len(),
+                played.len(),
+                20.0 * (AMP as f64).log10()
+            );
+            results.push((label, markers.len(), played.len(), rms_db, tone_db));
+        }
+        println!("== summary ==");
+        for r in &results {
+            println!(
+                "{}: chirps {}/{}, other process (1 kHz tone) {:.1} dBFS, residual RMS {:.1} dBFS",
+                r.0, r.1, r.2, r.4, r.3
+            );
+        }
+        Ok(())
+    }
+
+    /// Diagnostic: packet timing of process loopback while a chirp player runs (with its gap).
+    fn probe_process(a: &Args) -> Res<()> {
+        use std::io::Write;
+        let mut chirp = spawn_player("chirp", a, a.seconds)?;
+        capture::init_thread();
+        let mut src = capture::open(capture::SourceKind::System, None, Some(chirp.pid))?;
+        let rate = src.rate();
+        if let Some(mut i) = chirp.child.stdin.take() {
+            writeln!(i, "GO").map_err(|e| e.to_string())?;
+        }
+        let t0 = capture::now();
+        let mut frames = 0u64;
+        let mut first_ts: Option<f64> = None;
+        let mut prev_end: Option<f64> = None;
+        let (mut maxjump, mut packets, mut zero_ts) = (0.0f64, 0u64, 0u64);
+        let mut last_print = t0;
+        let mut pk = Vec::new();
+        while capture::now() - t0 < a.seconds + 2.0 {
+            pk.clear();
+            src.poll(&mut pk)?;
+            let now = capture::now();
+            for p in &pk {
+                packets += 1;
+                if p.t <= 0.0 {
+                    zero_ts += 1;
+                }
+                if let Some(e) = prev_end {
+                    maxjump = maxjump.max((p.t - e).abs());
+                }
+                prev_end = Some(p.t + p.samples.len() as f64 / rate);
+                first_ts.get_or_insert(p.t);
+                frames += p.samples.len() as u64;
+                let lag = now - p.t;
+                if now - last_print >= 2.0 {
+                    last_print = now;
+                    let el = now - t0;
+                    println!(
+                        "t={el:6.2}s frames/rate={:7.3}s ts-span={:7.3}s lag(now-ts)={:6.1}ms max ts discontinuity {:.2}ms packets {packets} zero-ts {zero_ts}",
+                        frames as f64 / rate,
+                        p.t - first_ts.unwrap(),
+                        lag * 1000.0,
+                        maxjump * 1000.0
+                    );
+                    maxjump = 0.0;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = chirp.child.wait();
         Ok(())
     }
 }

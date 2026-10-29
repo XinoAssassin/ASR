@@ -4,12 +4,13 @@
 use std::sync::OnceLock;
 
 use wasapi::{
-    AudioCaptureClient, AudioClient, DeviceEnumerator, Direction, SampleType, StreamMode,
+    AudioCaptureClient, AudioClient, DeviceEnumerator, Direction, Handle, SampleType, SessionState,
+    StreamMode, WaveFormat,
 };
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
 use super::capture::{CaptureSource, Packet, SourceKind};
-use crate::ipc::{Device, DeviceList};
+use crate::ipc::{AudioProcess, Device, DeviceList};
 
 /// QPC in seconds; the same clock (in 100 ns units) as WASAPI's `u64QPCPosition`.
 pub fn qpc_now() -> f64 {
@@ -44,6 +45,9 @@ pub struct WasapiSource {
     fmt: Fmt,
     block: usize,
     raw: Vec<u8>,
+    device_id: Option<String>,
+    /// Event handle of event-mode clients (process loopback); kept alive, never waited on.
+    _event: Option<Handle>,
 }
 
 // SAFETY: the COM objects are created on the recorder thread (MTA) and only used there.
@@ -86,6 +90,7 @@ impl WasapiSource {
         let capture = client.get_audiocaptureclient().map_err(e2s)?;
         client.start_stream().map_err(e2s)?;
         let name = dev.get_friendlyname().unwrap_or_default();
+        let device_id = dev.get_id().ok();
         log::info!(
             "opened {kind:?} '{name}': {} Hz, {} ch, {bits} bit",
             format.get_samplespersec(),
@@ -99,6 +104,40 @@ impl WasapiSource {
             fmt,
             block: format.get_blockalign() as usize,
             raw: Vec::new(),
+            device_id,
+            _event: None,
+        })
+    }
+
+    /// Process loopback (Windows 10 2004+): only the audio rendered by `pid` and its child
+    /// processes, on whatever device they play. The engine converts it to 48 kHz float stereo.
+    pub fn open_process(pid: u32) -> Result<Self, String> {
+        let mut client = AudioClient::new_application_loopback_client(pid, true)
+            .map_err(|e| format!("process loopback for pid {pid}: {e}"))?;
+        let format = WaveFormat::new(32, 32, &SampleType::Float, 48000, 2, None);
+        // The process-loopback virtual device only supports event-driven streams; the event
+        // handle must exist before Start, but the recorder keeps polling.
+        let mode = StreamMode::EventsShared {
+            autoconvert: true,
+            buffer_duration_hns: 10_000_000,
+        };
+        client
+            .initialize_client(&format, &Direction::Capture, &mode)
+            .map_err(e2s)?;
+        let event = client.set_get_eventhandle().map_err(e2s)?;
+        let capture = client.get_audiocaptureclient().map_err(e2s)?;
+        client.start_stream().map_err(e2s)?;
+        log::info!("opened process loopback for pid {pid} (tree): 48000 Hz, 2 ch, float");
+        Ok(Self {
+            capture,
+            client,
+            rate: 48000.0,
+            channels: 2,
+            fmt: Fmt::F32,
+            block: format.get_blockalign() as usize,
+            raw: Vec::new(),
+            device_id: None,
+            _event: Some(event),
         })
     }
 
@@ -136,6 +175,10 @@ impl WasapiSource {
 impl CaptureSource for WasapiSource {
     fn rate(&self) -> f64 {
         self.rate
+    }
+
+    fn device_id(&self) -> Option<String> {
+        self.device_id.clone()
     }
 
     fn poll(&mut self, out: &mut Vec<Packet>) -> Result<(), String> {
@@ -203,4 +246,149 @@ pub fn devices() -> Result<DeviceList, String> {
         outputs: list(&en, Direction::Render)?,
         inputs: list(&en, Direction::Capture)?,
     })
+}
+
+fn direction(kind: SourceKind) -> Direction {
+    match kind {
+        SourceKind::System => Direction::Render,
+        SourceKind::Mic => Direction::Capture,
+    }
+}
+
+pub fn default_device_id(kind: SourceKind) -> Option<String> {
+    let en = DeviceEnumerator::new().ok()?;
+    en.get_default_device(&direction(kind)).ok()?.get_id().ok()
+}
+
+fn process_name(pid: u32) -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: plain Win32 calls with a local buffer; the handle is closed below.
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok =
+            QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
+        let _ = CloseHandle(h);
+        ok.ok()?;
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        Some(path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string())
+    }
+}
+
+/// Visible, unowned top-level window titles per pid.
+fn window_titles() -> std::collections::HashMap<u32, String> {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindow, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+        IsWindowVisible, GW_OWNER,
+    };
+    unsafe extern "system" fn cb(hwnd: HWND, lp: LPARAM) -> BOOL {
+        // SAFETY: lp is the &mut HashMap passed to EnumWindows below, alive for the call.
+        let map = unsafe { &mut *(lp.0 as *mut std::collections::HashMap<u32, String>) };
+        unsafe {
+            if !IsWindowVisible(hwnd).as_bool()
+                || GetWindow(hwnd, GW_OWNER).is_ok_and(|o| !o.is_invalid())
+            {
+                return true.into();
+            }
+            let n = GetWindowTextLengthW(hwnd);
+            if n <= 0 {
+                return true.into();
+            }
+            let mut buf = vec![0u16; n as usize + 1];
+            let got = GetWindowTextW(hwnd, &mut buf);
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if got > 0 && pid != 0 {
+                map.entry(pid)
+                    .or_insert_with(|| String::from_utf16_lossy(&buf[..got as usize]));
+            }
+        }
+        true.into()
+    }
+    let mut map = std::collections::HashMap::new();
+    // SAFETY: the callback only touches `map` through the pointer while EnumWindows runs.
+    unsafe {
+        let _ = EnumWindows(Some(cb), LPARAM(&mut map as *mut _ as isize));
+    }
+    map
+}
+
+/// Processes with a non-expired audio session on any active render device, active ones first.
+pub fn processes() -> Result<Vec<AudioProcess>, String> {
+    let en = DeviceEnumerator::new().map_err(e2s)?;
+    let coll = en.get_device_collection(&Direction::Render).map_err(e2s)?;
+    let own = std::process::id();
+    let mut found: Vec<(u32, bool)> = Vec::new();
+    for i in 0..coll.get_nbr_devices().map_err(e2s)? {
+        let Ok(dev) = coll.get_device_at_index(i) else {
+            continue;
+        };
+        let Ok(mgr) = dev.get_iaudiosessionmanager() else {
+            continue;
+        };
+        let Ok(sessions) = mgr.get_audiosessionenumerator() else {
+            continue;
+        };
+        for j in 0..sessions.get_count().unwrap_or(0) {
+            let Ok(s) = sessions.get_session(j) else {
+                continue;
+            };
+            let Ok(pid) = s.get_process_id() else {
+                continue;
+            };
+            let state = s.get_state().unwrap_or(SessionState::Expired);
+            if pid == 0 || pid == own || state == SessionState::Expired {
+                continue;
+            }
+            let active = state == SessionState::Active;
+            match found.iter_mut().find(|(p, _)| *p == pid) {
+                Some(f) => f.1 |= active,
+                None => found.push((pid, active)),
+            }
+        }
+    }
+    let titles = window_titles();
+    let mut out: Vec<(bool, AudioProcess)> = found
+        .into_iter()
+        .map(|(pid, active)| {
+            (
+                active,
+                AudioProcess {
+                    pid,
+                    name: process_name(pid).unwrap_or_else(|| format!("pid {pid}")),
+                    title: titles.get(&pid).cloned(),
+                },
+            )
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()))
+    });
+    Ok(out.into_iter().map(|(_, p)| p).collect())
+}
+
+pub fn process_exists(pid: u32) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: plain Win32 calls; the handle is closed below.
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code).is_ok();
+        let _ = CloseHandle(h);
+        ok && code == STILL_ACTIVE.0 as u32
+    }
 }

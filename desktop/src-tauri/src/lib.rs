@@ -5,6 +5,7 @@
 pub mod config;
 pub mod ipc;
 pub mod recorder;
+pub mod sidecar;
 pub mod uploader;
 pub mod util;
 

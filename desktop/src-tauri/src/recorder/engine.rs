@@ -16,6 +16,7 @@ const POLL: Duration = Duration::from_millis(10);
 const CHECKPOINT_S: f64 = 1.0;
 const SYNC_S: f64 = 10.0;
 const REOPEN_S: f64 = 2.0;
+const DEFAULT_CHECK_S: f64 = 2.0;
 pub const SILENCE_WARN_S: f64 = 60.0;
 
 pub struct SessionConfig {
@@ -23,6 +24,8 @@ pub struct SessionConfig {
     pub mic: bool,
     pub output_device: Option<String>,
     pub input_device: Option<String>,
+    /// System audio of this process tree only (process loopback).
+    pub process_id: Option<u32>,
     pub partial: PathBuf,
 }
 
@@ -36,6 +39,9 @@ pub struct Live {
     pub follower_ppm: Option<f64>,
     pub warnings: Vec<String>,
     pub frames: u64,
+    /// Sources actually captured.
+    pub sources: crate::ipc::Sources,
+    pub process_id: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +55,9 @@ pub struct SessionResult {
 struct Slot {
     kind: SourceKind,
     device: Option<String>,
+    process: Option<u32>,
+    /// Endpoint id actually opened (to notice default-device changes).
+    opened_id: Option<String>,
     src: Option<Box<dyn CaptureSource>>,
     rate: f64,
     lost_at: Option<f64>,
@@ -59,6 +68,13 @@ fn label(kind: SourceKind) -> &'static str {
     match kind {
         SourceKind::System => "系统音频",
         SourceKind::Mic => "麦克风",
+    }
+}
+
+fn label_en(kind: SourceKind) -> &'static str {
+    match kind {
+        SourceKind::System => "system audio",
+        SourceKind::Mic => "microphone",
     }
 }
 
@@ -94,34 +110,70 @@ fn run(
 ) -> Result<SessionResult, String> {
     capture::init_thread();
     let mut slots = Vec::new();
+    let mut start_warnings = Vec::new();
+    let mut errors = Vec::new();
     let kinds = [
-        (cfg.system, SourceKind::System, cfg.output_device.clone()),
-        (cfg.mic, SourceKind::Mic, cfg.input_device.clone()),
+        (
+            cfg.system,
+            SourceKind::System,
+            cfg.output_device.clone(),
+            cfg.process_id,
+        ),
+        (cfg.mic, SourceKind::Mic, cfg.input_device.clone(), None),
     ];
-    for (on, kind, device) in kinds {
+    for (on, kind, device, mut process) in kinds {
         if !on {
             continue;
         }
-        match capture::open(kind, device.as_deref()) {
+        if let Some(pid) = process.filter(|p| !capture::process_exists(*p)) {
+            log::warn!("process {pid} is gone; capturing the whole device");
+            start_warnings.push(format!(
+                "进程 {pid} 已不存在，改为录制整个输出设备 / process {pid} is gone, recording the whole output device"
+            ));
+            process = None;
+        }
+        match capture::open(kind, device.as_deref(), process) {
             Ok(src) => slots.push(Slot {
                 kind,
                 device,
+                process,
+                opened_id: src.device_id(),
                 rate: src.rate(),
                 src: Some(src),
                 lost_at: None,
                 last_try: 0.0,
             }),
             Err(e) => {
-                let msg = format!("{}无法打开: {e}", label(kind));
-                let _ = started.send(Err(msg.clone()));
-                return Err(msg);
+                log::warn!("{kind:?} unavailable: {e}");
+                errors.push(format!("{}: {e}", label_en(kind)));
+                start_warnings.push(format!(
+                    "{}不可用，本次未录制 / {} unavailable, not recorded: {e}",
+                    label(kind),
+                    label_en(kind)
+                ));
             }
         }
     }
     if slots.is_empty() {
-        let msg = "no audio source enabled".to_string();
+        let msg = if errors.is_empty() {
+            "no audio source enabled".to_string()
+        } else {
+            format!("no audio source could be opened ({})", errors.join("; "))
+        };
         let _ = started.send(Err(msg.clone()));
         return Err(msg);
+    }
+    {
+        let mut l = live.lock().unwrap_or_else(|p| p.into_inner());
+        l.sources = crate::ipc::Sources {
+            system: slots.iter().any(|s| s.kind == SourceKind::System),
+            mic: slots.iter().any(|s| s.kind == SourceKind::Mic),
+        };
+        l.process_id = slots
+            .iter()
+            .find(|s| s.kind == SourceKind::System)
+            .and_then(|s| s.process);
+        l.warnings = start_warnings.clone();
     }
     let channels = slots.len() as u16;
     let mut wav = match WavWriter::create(&cfg.partial, channels, OUT_RATE as u32) {
@@ -165,7 +217,28 @@ fn run(
     let mut last_checkpoint = t0;
     let mut last_sync = t0;
     let mut io_error: Option<String> = None;
+    let mut last_default_check = t0;
+    let mut process_gone = false;
     loop {
+        // Follow a change of the Windows default device (only for "default" sources).
+        if capture::now() - last_default_check >= DEFAULT_CHECK_S {
+            last_default_check = capture::now();
+            process_gone = slots
+                .iter()
+                .any(|s| s.process.is_some_and(|p| !capture::process_exists(p)));
+            for s in slots.iter_mut() {
+                if s.device.is_some() || s.process.is_some() || s.src.is_none() {
+                    continue;
+                }
+                let current = capture::default_device_id(s.kind);
+                if current.is_some() && s.opened_id.is_some() && current != s.opened_id {
+                    log::info!("{:?}: default device changed, switching", s.kind);
+                    s.src = None;
+                    s.lost_at = None;
+                    s.last_try = f64::MIN; // reopen right away
+                }
+            }
+        }
         let stopping = stop.load(Ordering::Acquire);
         for (i, s) in slots.iter_mut().enumerate() {
             let now = capture::now();
@@ -185,9 +258,10 @@ fn run(
                 }
                 None if !stopping && now - s.last_try >= REOPEN_S => {
                     s.last_try = now;
-                    match capture::open(s.kind, s.device.as_deref()) {
+                    match capture::open(s.kind, s.device.as_deref(), s.process) {
                         Ok(src) => {
                             log::info!("{:?} capture reopened", s.kind);
+                            s.opened_id = src.device_id();
                             if src.rate() != s.rate {
                                 s.rate = src.rate();
                                 tl.reset_rate(i, s.rate);
@@ -231,8 +305,13 @@ fn run(
             l.frames = tl.written();
             l.drift_ms = tl.drift_ms();
             l.follower_ppm = tl.follower_ppm();
-            l.warnings.clear();
+            l.warnings.clone_from(&start_warnings);
             for (i, s) in slots.iter().enumerate() {
+                if let Some(pid) = s.process.filter(|_| process_gone) {
+                    l.warnings.push(format!(
+                        "被录制的进程 {pid} 已退出 / captured process {pid} has exited"
+                    ));
+                }
                 let p = peaks[i];
                 match s.kind {
                     SourceKind::System => l.peak_system = l.peak_system.max(p),
@@ -250,10 +329,7 @@ fn run(
                             "{}已静音 {} 秒 / {} silent for {} s",
                             label(s.kind),
                             silent as u64,
-                            match s.kind {
-                                SourceKind::System => "system audio",
-                                SourceKind::Mic => "microphone",
-                            },
+                            label_en(s.kind),
                             silent as u64
                         ));
                     }

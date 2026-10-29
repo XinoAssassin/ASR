@@ -39,7 +39,54 @@ pub struct ClockMap {
     anchor_t: f64,
     anchor_pos: f64,
     rate: f64,
-    segment: Option<(f64, f64)>,
+    segment: Option<Fit>,
+}
+
+/// Running least-squares fit of output position vs. time within one continuous segment
+/// (coordinates relative to the segment start for numerical stability). A single badly
+/// timestamped packet barely moves the slope, unlike a two-point estimate.
+#[derive(Debug, Clone)]
+struct Fit {
+    t0: f64,
+    p0: f64,
+    n: f64,
+    sx: f64,
+    sy: f64,
+    sxx: f64,
+    sxy: f64,
+}
+
+impl Fit {
+    fn new(t0: f64, p0: f64) -> Self {
+        Self {
+            t0,
+            p0,
+            n: 0.0,
+            sx: 0.0,
+            sy: 0.0,
+            sxx: 0.0,
+            sxy: 0.0,
+        }
+    }
+
+    fn add(&mut self, t: f64, pos: f64) {
+        let (x, y) = (t - self.t0, pos - self.p0);
+        self.n += 1.0;
+        self.sx += x;
+        self.sy += y;
+        self.sxx += x * x;
+        self.sxy += x * y;
+    }
+
+    fn span(&self, t: f64) -> f64 {
+        t - self.t0
+    }
+
+    /// Slope in output frames per second.
+    fn slope(&self) -> Option<f64> {
+        let d = self.n * self.sxx - self.sx * self.sx;
+        (d > 0.0).then(|| (self.n * self.sxy - self.sx * self.sy) / d)
+    }
 }
 
 impl ClockMap {
@@ -63,16 +110,20 @@ impl ClockMap {
 
     fn observe(&mut self, t: f64, pos: f64, new_segment: bool) {
         if new_segment {
-            self.segment = Some((t, pos));
+            let mut fit = Fit::new(t, pos);
+            fit.add(t, pos);
+            self.segment = Some(fit);
             self.anchor_t = t;
             self.anchor_pos = pos;
             return;
         }
-        if let Some((t0, p0)) = self.segment {
-            let span = t - t0;
-            if span >= RATE_MIN_SPAN_S {
-                let r = (pos - p0) / (span * OUT_RATE);
-                self.rate = r.clamp(1.0 - MAX_RATE_DEV, 1.0 + MAX_RATE_DEV);
+        if let Some(fit) = self.segment.as_mut() {
+            fit.add(t, pos);
+            if fit.span(t) >= RATE_MIN_SPAN_S {
+                if let Some(slope) = fit.slope() {
+                    let r = slope / OUT_RATE;
+                    self.rate = r.clamp(1.0 - MAX_RATE_DEV, 1.0 + MAX_RATE_DEV);
+                }
             }
         }
         let predicted = self.pos_at(t);
@@ -601,6 +652,18 @@ mod tests {
         // 0.1 s of signal kept, then silence
         let loud = f.iter().filter(|v| v.abs() > 1000).count();
         assert!((1500..1700).contains(&loud), "{loud}");
+    }
+
+    #[test]
+    fn rate_fit_ignores_one_bad_timestamp() {
+        let mut m = ClockMap::new(0.0);
+        // first packet stamped 60 ms early, then 40 s of exact 10 ms packets at +100 ppm
+        m.observe(-0.06, 0.0, true);
+        for k in 1..4000 {
+            let t = k as f64 * 0.01;
+            m.observe(t, t * OUT_RATE * (1.0 + 100e-6), false);
+        }
+        assert!((m.rate() - (1.0 + 100e-6)).abs() < 20e-6, "{}", m.rate());
     }
 
     #[test]

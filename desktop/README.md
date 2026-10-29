@@ -2,8 +2,11 @@
 
 Tauri 2 shell around the SPA in `../frontend` that records **system audio** ("what you hear",
 WASAPI loopback) and the **microphone** into one 2-channel 16 kHz FLAC and uploads it to the
-backend, which transcribes it as a `per_channel` job. Windows first (PLAN §6.3, milestone M9).
-The IPC contract with the SPA is frozen in [`docs/desktop-ipc.md`](../docs/desktop-ipc.md).
+backend, which transcribes it as a `per_channel` job. Windows first (PLAN §6.3, milestones M9 /
+M10): per-application capture, an optional local backend sidecar and an NSIS installer; macOS
+(ScreenCaptureKit) and Linux (PulseAudio / PipeWire) capture are implemented in the recorder
+library (see the status table at the end). The IPC contract with the SPA is frozen in
+[`docs/desktop-ipc.md`](../docs/desktop-ipc.md).
 
 ## Layout
 
@@ -18,9 +21,12 @@ desktop/
     src/
       ipc.rs                contract payload types (serde camelCase)
       config.rs             BackendConfig store (key in its own file, masked as "***")
+      sidecar.rs            optional local backend: spawn, health check, logs, stop (tree)
       recorder/
-        capture.rs          CaptureSource trait, monotonic clock, device list
-        wasapi_capture.rs   WASAPI loopback / capture, QPC timestamps (Windows)
+        capture.rs          CaptureSource trait, monotonic clock, devices, processes
+        wasapi_capture.rs   WASAPI loopback / capture / process loopback, QPC (Windows)
+        sck_capture.rs      ScreenCaptureKit system / app / mic audio (macOS)
+        pulse_capture.rs    PulseAudio-protocol monitor + source, pure Rust (Linux)
         resample.rs         band-limited variable-ratio resampler
         timeline.rs         clock map, drift control, silence fill  (the sync logic)
         engine.rs           recorder thread: poll -> timeline -> partial WAV, device re-open
@@ -73,8 +79,8 @@ GNU-toolchain specifics:
   paths). Verified: the exe has exactly one manifest.
 * `pnpm tauri build` produces `target/release/bundle/nsis/ASR Recorder_0.1.0_x64-setup.exe`
   (~3.3 MiB; NSIS is downloaded by the bundler); the installer includes `WebView2Loader.dll`.
-* `cargo build --no-default-features --bin recorder-selftest` builds the self-test without Tauri
-  (no WebView2Loader.dll needed).
+* `cargo build --no-default-features --features selftest --bin recorder-selftest` builds the
+  self-test (it is not part of the app or the installer; no WebView2Loader.dll needed).
 
 Test hooks (environment variables, for automated checks only):
 
@@ -84,6 +90,8 @@ Test hooks (environment variables, for automated checks only):
 | `ASR_RECORDER_AUTO_RECORD=<s>` | record system audio for `s` seconds right after start |
 | `ASR_RECORDER_AUTO_RECORD_DIR=<dir>` | output folder for the auto recording |
 | `ASR_RECORDER_AUTO_RECORD_MIC=1` | include the mic in the auto recording |
+| `ASR_RECORDER_AUTO_RECORD_PID=<pid>` | auto recording captures only this process tree |
+| `ASR_RECORDER_AUTO_TOGGLE=<s>` | press the tray / hotkey toggle, and again `s` seconds later |
 | `ASR_RECORDER_TEST_MIC_SKEW_PPM=<n>` | pretend the mic clock is off by `n` ppm (drift-controller test) |
 
 ## How recording works
@@ -112,10 +120,27 @@ Test hooks (environment variables, for automated checks only):
   If FLAC fails the WAV is kept as `<stem>.wav`. After a crash, orphaned `*.partial.wav` files in
   the known output folders are repaired (sizes from the file length) and finalised at the next
   start.
+* **Sources that cannot be opened** do not fail the start: with mic + system requested and no
+  microphone, the recording runs system-only (mono) with a bilingual warning; only when no
+  source opens does `recorder_start` fail. `RecorderStatus.sources` reports what is captured.
 * **Device loss.** A capture error does not stop the recording: the track is silence-filled, a
   warning is shown, and the device is reopened every 2 s (rate changes are handled).
-* **Warnings** (`RecorderStatus.warnings`, shown verbatim by the SPA): a source silent for
-  ≥ 60 s, a disconnected device, a write error.
+* **Default-device changes** are followed: for sources recording "the default device", the
+  default endpoint id is checked every 2 s and the source reopens on the new device (the track
+  continues; the switch is placed by timestamps like any gap).
+* **Per-application capture** (`StartOptions.processId`, Windows 10 2004+): WASAPI process
+  loopback (`AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS`, include the process tree) via the `wasapi`
+  crate, 48 kHz float stereo, event-mode client polled like the others. The process-loopback
+  stream is produced continuously by the audio engine (silence while the app is quiet) with
+  QPC timestamps that match its sample count, so it is a regular reference track; the clock
+  map's rate estimate is a least-squares fit, so one badly stamped packet cannot skew it. A
+  `processId` that no longer exists falls back to the whole device with a warning; an app that
+  exits mid-recording yields a warning (and silence). `recorder_processes` lists processes with
+  a non-expired audio session on any render endpoint (active first) with exe name and main
+  window title.
+* **Warnings** (`RecorderStatus.warnings`, bilingual, shown verbatim by the SPA): a source that
+  could not be opened, a source silent for ≥ 60 s, a disconnected device, a vanished target
+  process, a write error.
 * **driftMs** is the follower's filtered residual offset against the map (ms) — what is left
   after resampling; it stays well below 1 ms in steady state.
 
@@ -139,13 +164,34 @@ creations immediately (the SPA pushes its backend URL and key at every start); 4
 upload restarts that stage. While a job is transcribing, an unreachable backend only delays the
 next poll. Error texts are redacted (no query strings / keys). Recordings are never deleted.
 
+## Local backend sidecar
+
+`SidecarConfig` (`sidecar.json` in the app data dir): `command`, `args` (default
+`serve --port 8000`), `cwd`, `port`, `enabled`. When enabled the app starts it at launch;
+`sidecar_start` / `sidecar_stop` do it on demand; `sidecar://status` reports every change.
+
+* Spawned without a console window (`CREATE_NO_WINDOW`) in its own process group and in a Job
+  object with `KILL_ON_JOB_CLOSE`, so the whole process tree dies with the app even if the app
+  crashes. stdout/stderr go to `<app log dir>\sidecar.log` (rotated at 5 MB, one `.1` backup).
+* Startup: `GET http://127.0.0.1:{port}/api/health` every 0.5 s until 200 (`running`, `url`
+  set), early exit (`failed` with the exit code and the last output lines) or 120 s (`failed`,
+  process tree killed).
+* Never two: start/stop are serialised, a second start while running is a no-op, and a port
+  that is already in use (e.g. a backend started by hand) is reported as `failed` instead of
+  spawning another server.
+* Stop (also on quit): `CTRL_BREAK` to the sidecar's process group (uvicorn shuts down
+  gracefully on SIGBREAK; possible because the release app has no console of its own), 10 s
+  grace, then the Job object is terminated (kills the tree). On Linux / macOS: SIGTERM to the
+  process group, then SIGKILL.
+
 ## Tray, hotkey, window
 
-* Tray icon: start/stop recording, show window, quit (quit finalises a running recording first).
-  Left click shows the window.
-* `Ctrl+Alt+R` toggles recording with the last used start options (both sources, default
-  devices, default folder if never started from the UI). If the shortcut is taken by another
-  app, the app still starts (logged).
+* Tray icon: start/stop recording, show window, quit (quit finalises a running recording and
+  stops the sidecar first). Left click shows the window.
+* `Ctrl+Alt+R` toggles recording with the last stored start options (`recorder_start` and
+  `recorder_set_options` store them; default: both sources, default devices, default folder).
+  A missing mic only produces a warning, so the toggle works on mic-less machines. If the
+  shortcut is taken by another app, the app still starts (logged).
 * Closing the window hides it to the tray; recording and uploads continue.
 * Single instance: starting the app again focuses the running one.
 
@@ -177,15 +223,55 @@ error that the controller must remove):
 All 890 markers of the 30-min run were found; the FLAC (2 ch, 16 kHz, 1803.1 s, 2.8 MB) was
 uploaded and the job was created with `preprocess.channels = "per_channel"`.
 
-## Known limitations (M9)
+**Per-application capture** (`--process-test --seconds 40 --gap-at 20 --gap 8`): the self-test
+starts two child players, one playing the chirp track (with a stream release in the middle), one
+a continuous 1 kHz tone at −22 dBFS, and records (1) with `processId` = the chirp player, then
+(2) the whole device; it reports the markers found and the residual / 1 kHz level of channel 0
+outside the markers. `--probe-process` prints the raw packet timing of process loopback.
 
-* Windows only; macOS (ScreenCaptureKit) and per-process loopback are M10.
-* Device-wide loopback records every sound on the output device, including notifications.
-* The default device is resolved at start; switching the Windows default output mid-recording
-  is not followed (a removed device is reopened, by id, when it comes back).
+| Run (2026-10-30) | Chirps found | 1 kHz tone of the other process | Notes |
+|---|---|---|---|
+| process loopback, chirp player only | 16 / 16 | absent: −200 dBFS (digital silence), residual RMS −200 dBFS | drift within each half 0.00 ms |
+| whole device | not measured | — | the RDP audio endpoint disappeared (session disconnected) just as this run started |
+
+Process loopback delivers packets continuously (silence while the app is quiet) with timestamps
+that match the sample count exactly (probe: 30 s, 0.00 ms discontinuity). Across the player's
+stream restart the markers moved by −30 ms against the device play position: process loopback
+taps the app's stream when the engine mixes it, while the reference time comes from the render
+device clock (`IAudioClock`), whose latency differs per render stream — a property of the
+reference, not of the recording (no silence was inserted or dropped).
+
+## Installer (Windows)
+
+`pnpm tauri build` → `target/release/bundle/nsis/ASR Recorder_0.1.0_x64-setup.exe`:
+per-user install (`installMode: currentUser`, no admin rights), Simplified Chinese / English
+installer UI chosen from the system language, Start-menu folder "ASR Recorder", publisher /
+description metadata in "Apps & features". The uninstaller removes the program files, the
+Start-menu entry and the uninstall registry key; it never touches recordings (they live in
+`Documents\ASR Recordings` or the chosen folder) and keeps the app data (queue, config) unless
+the user ticks "delete app data". Silent mode: `setup.exe /S /D=<dir>`, `uninstall.exe /S`.
+
+**SmartScreen (unsigned build).** The installer and exe are not code-signed, so Windows shows
+"Windows protected your PC" on first run: click **More info → Run anyway** (or right-click the
+file → Properties → tick **Unblock** before running). Signing with an Authenticode certificate
+(`bundle.windows.certificateThumbprint` / `signCommand`) removes this once the tool leaves the
+team.
+
+## Platform status
+
+| Platform | Capture | Built / tested here |
+|---|---|---|
+| Windows 10/11 | WASAPI device loopback + mic; process loopback (2004+) | yes: unit tests, self-tests, app + installer |
+| macOS 13+ | ScreenCaptureKit: display audio or one app (`processId`); mic through SCK on macOS 15+ (older: system only + warning); needs Screen Recording / Microphone permission | recorder library `cargo check`/`clippy --target aarch64-apple-darwin --no-default-features` clean from Windows; the Tauri shell needs Apple's toolchain (`objc2-exception-helper` compiles Objective-C); **never run on a Mac** |
+| Linux | PulseAudio native protocol (pure Rust, works with PipeWire-pulse): monitor of the default sink + default source | unit tests on WSL; a real 2-channel capture through WSLg's PulseAudio (RDP sink / source) recorded a 4.0 s FLAC; per-process capture not supported |
+
+## Known limitations
+
+* Device-wide loopback records every sound on the output device, including notifications; use
+  per-application capture to avoid that.
 * Exclusive-mode / DRM-protected audio is silent in loopback (the 60 s silence warning shows).
-* Unsigned binaries: SmartScreen warns on first start.
-* Starting fails (with an error) when an enabled source cannot be opened, e.g. no microphone;
-  the tray / hotkey toggle reuses the last options, so on a machine without a mic it only works
-  after a start with the mic switched off.
+* Unsigned binaries: SmartScreen warns on first start (see above).
 * Upload progress within a file is not reported (only state changes).
+* macOS: the Tauri shell has not been built (needs a Mac); `devices()` returns pseudo devices
+  (SCK has no endpoint list); `processes()` lists all shareable apps, not only those with audio.
+* Linux: no per-process capture; desktop shell untested (needs WebKitGTK).

@@ -11,19 +11,23 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use crate::config::ConfigStore;
 use crate::ipc::{
-    BackendConfig, DeviceList, RecorderState, RecorderStatus, Recording, StartOptions,
+    AudioProcess, BackendConfig, DeviceList, RecorderState, RecorderStatus, Recording,
+    SidecarConfig, SidecarStatus, StartOptions,
 };
 use crate::recorder::{self, capture, Recorder};
+use crate::sidecar::Sidecar;
 use crate::uploader::{queue::Store, Uploader};
 
 pub const EV_STATUS: &str = "recorder://status";
 pub const EV_RECORDINGS: &str = "recordings://changed";
+pub const EV_SIDECAR: &str = "sidecar://status";
 const HOTKEY: &str = "ctrl+alt+r";
 
 pub struct AppState {
     recorder: Arc<Recorder>,
     config: Arc<ConfigStore>,
     uploader: Arc<Uploader>,
+    sidecar: Arc<Sidecar>,
     default_out: PathBuf,
     tray_toggle: Mutex<Option<MenuItem<Wry>>>,
 }
@@ -125,11 +129,13 @@ fn toggle(app: &AppHandle) {
 fn quit(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
-        if app.state::<AppState>().recorder.state() == RecorderState::Recording {
+        let state = app.state::<AppState>();
+        if state.recorder.state() == RecorderState::Recording {
             if let Err(e) = do_stop(&app) {
                 log::error!("stop on quit: {e}");
             }
         }
+        state.sidecar.stop();
         app.exit(0);
     });
 }
@@ -155,6 +161,52 @@ async fn recorder_stop(app: AppHandle) -> Res<Recording> {
     tauri::async_runtime::spawn_blocking(move || do_stop(&app))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn recorder_set_options(state: State<'_, AppState>, options: StartOptions) {
+    state
+        .config
+        .update_settings(|s| s.last_start = Some(options));
+}
+
+#[tauri::command]
+async fn recorder_processes() -> Res<Vec<AudioProcess>> {
+    tauri::async_runtime::spawn_blocking(|| {
+        capture::init_thread();
+        capture::processes()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn sidecar_get_config(state: State<'_, AppState>) -> SidecarConfig {
+    state.sidecar.config()
+}
+
+#[tauri::command]
+fn sidecar_set_config(state: State<'_, AppState>, config: SidecarConfig) -> Res<SidecarConfig> {
+    state.sidecar.set_config(config)
+}
+
+#[tauri::command]
+fn sidecar_status(state: State<'_, AppState>) -> SidecarStatus {
+    state.sidecar.status()
+}
+
+#[tauri::command]
+async fn sidecar_start(app: AppHandle) -> Res<SidecarStatus> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppState>().sidecar.start())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn sidecar_stop(app: AppHandle) -> Res<SidecarStatus> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppState>().sidecar.stop())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -243,10 +295,30 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             let _ = ev.emit(EV_RECORDINGS, r);
         }),
     );
+    let log_dir = app
+        .path()
+        .app_log_dir()
+        .unwrap_or_else(|_| data_dir.join("logs"));
+    let ev = handle.clone();
+    let sidecar = Sidecar::new(
+        &data_dir,
+        &log_dir,
+        Arc::new(move |st: &SidecarStatus| {
+            let _ = ev.emit(EV_SIDECAR, st);
+        }),
+    );
+    if sidecar.config().enabled {
+        let sc = sidecar.clone();
+        std::thread::spawn(move || {
+            let st = sc.start();
+            log::info!("sidecar on launch: {:?}", st.state);
+        });
+    }
     app.manage(AppState {
         recorder: Arc::new(Recorder::new()),
         config: config.clone(),
         uploader: uploader.clone(),
+        sidecar,
         default_out: default_out.clone(),
         tray_toggle: Mutex::new(None),
     });
@@ -337,6 +409,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             let opts = StartOptions {
                 mic: std::env::var("ASR_RECORDER_AUTO_RECORD_MIC").is_ok(),
                 out_dir: std::env::var("ASR_RECORDER_AUTO_RECORD_DIR").ok(),
+                process_id: std::env::var("ASR_RECORDER_AUTO_RECORD_PID")
+                    .ok()
+                    .and_then(|v| v.parse().ok()),
                 ..StartOptions::default()
             };
             match do_start(&handle, opts) {
@@ -351,6 +426,29 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 ),
                 Err(e) => log::error!("auto-record stop failed: {e}"),
             }
+        });
+    }
+
+    // Test hook: press the tray / hotkey toggle twice, N seconds apart (replays the stored
+    // last options, like Ctrl+Alt+R).
+    if let Some(secs) = std::env::var("ASR_RECORDER_AUTO_TOGGLE")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        let handle = handle.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(2));
+            toggle(&handle);
+            std::thread::sleep(Duration::from_secs(secs));
+            let st = handle.state::<AppState>().recorder.status(false);
+            log::info!(
+                "auto-toggle status: state {:?} sources {:?} processId {:?} warnings {:?}",
+                st.state,
+                st.sources,
+                st.process_id,
+                st.warnings
+            );
+            toggle(&handle);
         });
     }
 
@@ -409,6 +507,13 @@ pub fn run() {
             recordings_list,
             recording_upload,
             recording_reveal,
+            recorder_set_options,
+            recorder_processes,
+            sidecar_get_config,
+            sidecar_set_config,
+            sidecar_status,
+            sidecar_start,
+            sidecar_stop,
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Tauri application");
@@ -421,6 +526,10 @@ pub fn run() {
                 api.prevent_exit();
                 quit(handle);
             }
+        }
+        if let RunEvent::Exit = &event {
+            // Last chance (e.g. exit from elsewhere): never leave the sidecar running.
+            handle.state::<AppState>().sidecar.stop();
         }
     });
 }
