@@ -54,6 +54,7 @@ type Recording = {
     attempts: number
     uploadId: string | null
     jobId: string | null
+    transcriptId: string | null  // set once the job succeeded
     error: string | null       // last error, redacted (no keys / signed URLs)
     nextRetryAt: string | null
   }
@@ -66,6 +67,8 @@ type BackendConfig = {
   autoUpload: boolean
   jobOptions: object | null    // body.options for POST /api/jobs (JobOptions); null = no job
   provider: 'local' | 'cloud' | null
+  termSetIds: string[]         // body.term_set_ids for POST /api/jobs
+  extraTerms: object[]         // body.extra_terms (Term objects)
 }
 ```
 
@@ -99,7 +102,8 @@ microphone. With only one source enabled the file is mono. 16 kHz, 16-bit FLAC, 
 converts it to FLAC and only then removes the `.partial.wav`.
 
 Jobs for 2-channel recordings use `options.preprocess.channels = "per_channel"` unless the SPA's
-`jobOptions` say otherwise.
+`jobOptions` say otherwise. For a **mono** recording Rust replaces `per_channel` with `auto` (the
+backend rejects `per_channel` on mono files).
 
 ## Backend notes
 
