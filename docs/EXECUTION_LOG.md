@@ -254,6 +254,10 @@ Errors: FastAPI default `{"detail": ...}`; 401 for missing/wrong `X-API-Key`, 40
 | D47 | Server logging: `ASR_LOG_LEVEL`, `ASR_LOG_FORMAT=text\|json`, `ASR_LOG_FILE` (10 MB x 5); one root handler set shared with uvicorn; every handler redacts signed URLs, bearer tokens and `sk-` keys; job start / finish lines carry `job_id` | Operability without leaking secrets (AGENTS rule 3) |
 | D48 | `asr batch`: files and directories, one provider / model load, outputs next to inputs or in `--out-dir`, existing outputs skipped, failures collected (exit 1). CLI `transcribe` / `batch` apply the same [5b] L1 + repetition filter as server jobs | Same text whether a file goes through the API or the CLI |
 | D49 | Desktop: Windows Rust toolchain = rustup `x86_64-pc-windows-gnu` (user-local, no PATH change) + WinLibs mingw; no MSVC / admin needed. Tauri 2 probe builds and runs. Rust core and SPA meet at the frozen contract `docs/desktop-ipc.md`; Rust owns capture, the persistent upload queue and uploads | Uploads must retry with no window open (AGENTS rule 8) |
+| D50 | LLM meeting summary is opt-in per click (cost + privacy confirmation), stored per transcript (schema v4 `summary_json`), never refreshed implicitly; stale when `updated_at > summary.created_at`; edits and revert keep it | Same policy as L3 suggestions (D44) |
+| D51 | faster-whisper is an optional extra and an explicit `local.asr_model` choice only; `language_hints == ["en"]` still uses Qwen3-ASR (WER 3.42 % 1.7B / 4.11 % 0.6B vs whisper-turbo 4.02 %, small 7.27 % on 73 LibriSpeech clips) | docs/M11_EXTRAS.md |
+| D52 | [5b] L2 (MacBERT4CSC) not shipped: on 19 LLM-ASR hypotheses 4 edits helped, 27 hurt at p >= 0.5, none helped at 0.9; pyannote not run (gated HF models, needs torchaudio which stops at torch 2.11) | docs/M11_EXTRAS.md |
+| D53 | CLI commands load the same `.env` files as `asr serve` through a startup hook registered by `server.cli` (real env vars win); `ASR_TORCH_THREADS` / `ASR_LOCAL_DTYPE` are validated settings propagated to the core library | Deploy agent found `.env` ignored by the CLI and these two knobs |
 
 ### Follow-ups (not in M0–M3 scope)
 - `JobOut.upload_name` / `JobOut.duration` to avoid one `GET /api/uploads/{id}` per row in the Jobs table.
@@ -369,4 +373,23 @@ The user asked to fan out. Disjoint ownership; agents never commit, the lead rev
 | desktop-core | `desktop/**` | M9 (then M10) Rust/Tauri recorder + uploader |
 | desktop-ui | `frontend/src/platform/**`, recorder view/store/components, router, `App.vue`, locales, Settings desktop section, `frontend/package.json` | M9 SPA side |
 | m11-backend | `backend/**`, `docs/M11_*.md` | M11 summary, faster-whisper, L2, pyannote |
+
+## 12. M8 and M11 results (2026-10-29)
+
+**M8.** `asr serve`, `asr batch`, logging (D46–D48, D53); images run `asr serve`, CUDA override,
+nginx / systemd / Windows examples, `docs/DEPLOYMENT.md`. Two-host acceptance, simulated on one PC
+with mirrored networking: production SPA served by a Windows `http.server` with `config.js` → backend
+`asr serve --host 0.0.0.0` in WSL reached via the LAN IP with an API key; Settings key → chunked
+upload of a 30 s clip → local job (Paraformer) → transcript → TXT export, all through the browser.
+Also checked: 401 without / with a wrong key, CORS preflight from an unlisted origin refused,
+auth-off server refuses a non-loopback Host (403), forwarded headers honoured with
+`--forwarded-allow-ips`, 211 JSON log lines valid with `job_id`, no key in logs, `asr batch` writes
+and then skips. **Not verified:** Docker image builds (no daemon / compose plugin; compose files
+validated against the compose-spec schema), nginx configs, real systemd, two physical machines.
+Found and fixed: the Upload page could not start local jobs (f5584d5), nested `.env` in the Docker
+context (3c7723a), `.env` ignored by the CLI and two pipeline knobs (3569d45).
+
+**M11.** See `docs/M11_EXTRAS.md` and D50–D52. Summary UI checked in the browser with one live
+qwen-plus call on a 45 s transcript: generate → stale after an edit (persisted) → delete (persisted);
+Settings marks the Whisper models. Linux desktop capture belongs to the desktop track (M10).
 
