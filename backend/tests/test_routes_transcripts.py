@@ -101,8 +101,14 @@ async def test_update_speakers(client: httpx.AsyncClient, tr: dict[str, Any]) ->
     resp = await client.put(url, json={"speakers": [{"id": "SPEAKER_01", "name": "老李"}]})
     assert resp.json()["speakers"][1]["color"] == "#00aa00"
 
+    # An unknown id adds a speaker (a voice diarization missed); it gets a palette colour.
+    resp = await client.put(url, json={"speakers": [{"id": "SPEAKER_77", "name": "王五"}]})
+    added = resp.json()["speakers"][-1]
+    assert (
+        added["id"] == "SPEAKER_77" and added["name"] == "王五" and added["color"].startswith("#")
+    )
+
     bad = [
-        {"speakers": [{"id": "SPEAKER_77", "name": "x"}]},
         {"speakers": [{"id": "SPEAKER_00", "name": "x", "color": "red"}]},
         {"speakers": [{"id": "SPEAKER_00", "name": "a"}, {"id": "SPEAKER_00", "name": "b"}]},
         {"speakers": [{"id": "SPEAKER_00", "name": "   "}]},

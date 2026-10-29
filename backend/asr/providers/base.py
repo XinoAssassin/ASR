@@ -162,14 +162,27 @@ class CorrectionOptions(BaseModel):
     )
 
 
-class Correction(BaseModel):
-    """One automatic edit of a segment's text (raw text stays in ``original``)."""
+def _correction_id() -> str:
+    import uuid
 
+    return uuid.uuid4().hex[:12]
+
+
+class Correction(BaseModel):
+    """One edit proposed or made automatically ([5b]); the raw text stays in ``original``.
+
+    ``applied``: made automatically (L1 / repetition), reviewable; ``suggested``: proposed only
+    (L3 LLM), applied when accepted; ``accepted`` / ``rejected``: reviewed by a person.
+    """
+
+    id: str = Field(default_factory=_correction_id)
     segment_id: str
-    source: Literal["term", "repetition"]
+    source: Literal["term", "repetition", "llm"]
     before: str
     after: str
     score: float | None = None
+    status: Literal["applied", "suggested", "accepted", "rejected"] = "applied"
+    offset: int | None = Field(default=None, ge=0, description="Character offset of `before`.")
 
 
 class JobOptions(BaseModel):

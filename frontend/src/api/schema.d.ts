@@ -324,9 +324,8 @@ export interface paths {
         head?: never;
         /**
          * Patch Transcript
-         * @description Apply ops to ``segments`` only; ``original`` is immutable (rule 9).
-         *
-         *     All ops are validated before anything is written (all-or-nothing).
+         * @description Apply ops in order to ``segments`` / ``speakers`` / ``corrections``; ``original`` is
+         *     immutable (rule 9). All ops are validated before anything is written (all-or-nothing).
          */
         patch: operations["patch_transcript_api_transcripts__transcript_id__patch"];
         trace?: never;
@@ -379,7 +378,8 @@ export interface paths {
         get?: never;
         /**
          * Update Speakers
-         * @description Rename / recolour existing speakers; speakers not listed are unchanged.
+         * @description Rename / recolour speakers; an id not in the transcript yet adds a new speaker (for a
+         *     voice diarization missed). Speakers not listed are unchanged.
          */
         put: operations["update_speakers_api_transcripts__transcript_id__speakers_put"];
         post?: never;
@@ -576,13 +576,23 @@ export interface components {
         };
         /**
          * Correction
-         * @description One automatic edit of a segment's text (raw text stays in ``original``).
+         * @description One edit proposed or made automatically ([5b]); the raw text stays in ``original``.
+         *
+         *     ``applied``: made automatically (L1 / repetition), reviewable; ``suggested``: proposed only
+         *     (L3 LLM), applied when accepted; ``accepted`` / ``rejected``: reviewed by a person.
          */
         Correction: {
             /** After */
             after: string;
             /** Before */
             before: string;
+            /** Id */
+            id?: string;
+            /**
+             * Offset
+             * @description Character offset of `before`.
+             */
+            offset?: number | null;
             /** Score */
             score?: number | null;
             /** Segment Id */
@@ -591,7 +601,13 @@ export interface components {
              * Source
              * @enum {string}
              */
-            source: "term" | "repetition";
+            source: "term" | "repetition" | "llm";
+            /**
+             * Status
+             * @default applied
+             * @enum {string}
+             */
+            status: "applied" | "suggested" | "accepted" | "rejected";
         };
         /**
          * CorrectionOptions
@@ -863,6 +879,31 @@ export interface components {
             /** Diarize Model */
             diarize_model?: string | null;
         };
+        /** MergeOp */
+        MergeOp: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "merge";
+            /**
+             * Segment Id
+             * @description Merged with the next segment in time order.
+             */
+            segment_id: string;
+        };
+        /** MergeSpeakersOp */
+        MergeSpeakersOp: {
+            /** From Id */
+            from_id: string;
+            /** Into Id */
+            into_id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "merge_speakers";
+        };
         /** PreprocessOptions */
         PreprocessOptions: {
             /**
@@ -942,6 +983,33 @@ export interface components {
              * @description Index among the container's audio streams.
              */
             stream_index: number;
+        };
+        /** ReplaceOp */
+        ReplaceOp: {
+            /** Find */
+            find: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "replace";
+            /** Replace */
+            replace: string;
+        };
+        /** ReviewCorrectionOp */
+        ReviewCorrectionOp: {
+            /** Correction Id */
+            correction_id: string;
+            /**
+             * Decision
+             * @enum {string}
+             */
+            decision: "accept" | "reject";
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "review_correction";
         };
         /** Segment */
         Segment: {
@@ -1030,6 +1098,21 @@ export interface components {
         SpeakersUpdate: {
             /** Speakers */
             speakers: components["schemas"]["SpeakerUpdate"][];
+        };
+        /** SplitOp */
+        SplitOp: {
+            /**
+             * At
+             * @description Character offset in the text where the second part starts.
+             */
+            at: number;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "split";
+            /** Segment Id */
+            segment_id: string;
         };
         /** Term */
         Term: {
@@ -1138,7 +1221,7 @@ export interface components {
         /** TranscriptPatch */
         TranscriptPatch: {
             /** Ops */
-            ops: (components["schemas"]["EditTextOp"] | components["schemas"]["SetSpeakerOp"])[];
+            ops: (components["schemas"]["EditTextOp"] | components["schemas"]["SetSpeakerOp"] | components["schemas"]["SplitOp"] | components["schemas"]["MergeOp"] | components["schemas"]["ReplaceOp"] | components["schemas"]["MergeSpeakersOp"] | components["schemas"]["ReviewCorrectionOp"])[];
         };
         /** UploadInitIn */
         UploadInitIn: {

@@ -100,15 +100,16 @@ async def test_job_stores_raw_original_and_corrections(
     t = (await client.get(f"/api/transcripts/{done['transcript_id']}")).json()
     assert [s["text"] for s in t["segments"]] == ["Townfall我确实不是很想玩", "今天天气不错"]
     assert [s["text"] for s in t["original"]] == ["汤泡我确实不是很想玩", "今天天气不错"]
-    assert t["corrections"] == [
-        {
-            "segment_id": "seg_00000",
-            "source": "term",
-            "before": "汤泡",
-            "after": "Townfall",
-            "score": 1.0,
-        }
-    ]
+    (c,) = t["corrections"]
+    assert {k: c[k] for k in ("segment_id", "source", "before", "after", "score", "status")} == {
+        "segment_id": "seg_00000",
+        "source": "term",
+        "before": "汤泡",
+        "after": "Townfall",
+        "score": 1.0,
+        "status": "applied",
+    }
+    assert c["id"]
     reverted = (await client.post(f"/api/transcripts/{t['id']}/revert")).json()
     assert reverted["segments"][0]["text"] == "汤泡我确实不是很想玩"
     assert reverted["corrections"] == []

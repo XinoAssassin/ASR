@@ -250,8 +250,45 @@ class SetSpeakerOp(BaseModel):
     speaker_id: str = Field(min_length=1, max_length=100)
 
 
-# ``split`` / ``merge_segments`` join this union in M7 (D14).
-TranscriptOp = Annotated[EditTextOp | SetSpeakerOp, Field(discriminator="op")]
+class SplitOp(BaseModel):
+    op: Literal["split"]
+    segment_id: str
+    at: int = Field(ge=1, description="Character offset in the text where the second part starts.")
+
+
+class MergeOp(BaseModel):
+    op: Literal["merge"]
+    segment_id: str = Field(description="Merged with the next segment in time order.")
+
+
+class ReplaceOp(BaseModel):
+    op: Literal["replace"]
+    find: str = Field(min_length=1, max_length=200)
+    replace: str = Field(max_length=200)
+
+
+class MergeSpeakersOp(BaseModel):
+    op: Literal["merge_speakers"]
+    from_id: str = Field(min_length=1, max_length=100)
+    into_id: str = Field(min_length=1, max_length=100)
+
+
+class ReviewCorrectionOp(BaseModel):
+    op: Literal["review_correction"]
+    correction_id: str = Field(min_length=1, max_length=64)
+    decision: Literal["accept", "reject"]
+
+
+TranscriptOp = Annotated[
+    EditTextOp
+    | SetSpeakerOp
+    | SplitOp
+    | MergeOp
+    | ReplaceOp
+    | MergeSpeakersOp
+    | ReviewCorrectionOp,
+    Field(discriminator="op"),
+]
 
 
 class TranscriptPatch(BaseModel):

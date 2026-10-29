@@ -452,6 +452,7 @@ class Database:
         *,
         segments: Sequence[Segment] | None = None,
         speakers: Sequence[Speaker] | None = None,
+        corrections: Sequence[Correction] | None = None,
     ) -> TranscriptOut | None:
         """Update the editable columns. ``original`` has no setter (rule 9)."""
         sets = ["updated_at = ?"]
@@ -462,6 +463,9 @@ class Database:
         if speakers is not None:
             sets.append("speakers_json = ?")
             params.append(_dump_speakers(speakers))
+        if corrections is not None:
+            sets.append("corrections_json = ?")
+            params.append(_CORRECTIONS.dump_json(list(corrections)).decode("utf-8"))
         cur = await self.conn.execute(
             f"UPDATE transcripts SET {', '.join(sets)} WHERE id = ?",  # noqa: S608
             (*params, transcript_id),

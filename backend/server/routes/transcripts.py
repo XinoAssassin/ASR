@@ -1,4 +1,4 @@
-"""Transcripts (PLAN §5.3). Owned by ``backend-jobs`` (M1).
+"""Transcripts (PLAN §5.3): read, proofread (M7 ops), revert, export.
 
 Edits only ever touch ``segments`` / ``speakers``; ``original`` is immutable (rule 9).
 """
@@ -11,6 +11,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 from fastapi import APIRouter, HTTPException, Query, Response, status
 
+from asr.editing import EditError, EditState, add_speakers
 from asr.providers.base import SPEAKER_COLORS, Speaker, Transcript
 from asr.writers import MEDIA_TYPES, write
 from server.db import Database
@@ -18,7 +19,13 @@ from server.deps import DbDep
 from server.schemas import (
     EditTextOp,
     ExportFormat,
+    MergeOp,
+    MergeSpeakersOp,
+    ReplaceOp,
+    ReviewCorrectionOp,
+    SetSpeakerOp,
     SpeakersUpdate,
+    SplitOp,
     TranscriptOut,
     TranscriptPatch,
 )
@@ -43,31 +50,40 @@ async def get_transcript(transcript_id: str, db: DbDep) -> TranscriptOut:
 
 @router.patch("/{transcript_id}", response_model=TranscriptOut)
 async def patch_transcript(transcript_id: str, body: TranscriptPatch, db: DbDep) -> TranscriptOut:
-    """Apply ops to ``segments`` only; ``original`` is immutable (rule 9).
-
-    All ops are validated before anything is written (all-or-nothing).
-    """
+    """Apply ops in order to ``segments`` / ``speakers`` / ``corrections``; ``original`` is
+    immutable (rule 9). All ops are validated before anything is written (all-or-nothing)."""
     current = await _get_or_404(db, transcript_id)
-    segments = [s.model_copy() for s in current.segments]
-    index = {s.id: i for i, s in enumerate(segments)}
-    original_text = {s.id: s.text for s in current.original}
-    speaker_ids = {s.id for s in current.speakers}
-
+    state = EditState(
+        segments=list(current.segments),
+        speakers=list(current.speakers),
+        corrections=list(current.corrections),
+        original_text={s.id: s.text for s in current.original},
+    )
     for n, op in enumerate(body.ops):
-        i = index.get(op.segment_id)
-        if i is None:
-            raise HTTPException(_422, f"ops[{n}]: unknown segment {op.segment_id!r}")
-        seg = segments[i]
-        if isinstance(op, EditTextOp):
-            # ``edited`` reflects whether the text differs from the recognition result.
-            edited = op.text != original_text.get(seg.id)
-            segments[i] = seg.model_copy(update={"text": op.text, "edited": edited})
-        else:
-            if op.speaker_id not in speaker_ids:
-                raise HTTPException(_422, f"ops[{n}]: unknown speaker {op.speaker_id!r}")
-            segments[i] = seg.model_copy(update={"speaker_id": op.speaker_id})
-
-    updated = await db.update_transcript(transcript_id, segments=segments)
+        try:
+            match op:
+                case EditTextOp():
+                    state.edit_text(op.segment_id, op.text)
+                case SetSpeakerOp():
+                    state.set_speaker(op.segment_id, op.speaker_id)
+                case SplitOp():
+                    state.split(op.segment_id, op.at)
+                case MergeOp():
+                    state.merge(op.segment_id)
+                case ReplaceOp():
+                    state.replace(op.find, op.replace)
+                case MergeSpeakersOp():
+                    state.merge_speakers(op.from_id, op.into_id)
+                case ReviewCorrectionOp():
+                    state.review_correction(op.correction_id, op.decision)
+        except EditError as exc:
+            raise HTTPException(_422, f"ops[{n}]: {exc}") from None
+    updated = await db.update_transcript(
+        transcript_id,
+        segments=state.segments,
+        speakers=state.speakers,
+        corrections=state.corrections,
+    )
     if updated is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "transcript not found")
     return updated
@@ -75,22 +91,25 @@ async def patch_transcript(transcript_id: str, body: TranscriptPatch, db: DbDep)
 
 @router.put("/{transcript_id}/speakers", response_model=TranscriptOut)
 async def update_speakers(transcript_id: str, body: SpeakersUpdate, db: DbDep) -> TranscriptOut:
-    """Rename / recolour existing speakers; speakers not listed are unchanged."""
+    """Rename / recolour speakers; an id not in the transcript yet adds a new speaker (for a
+    voice diarization missed). Speakers not listed are unchanged."""
     current = await _get_or_404(db, transcript_id)
     by_id = {s.id: s for s in current.speakers}
     seen: set[str] = set()
+    order = [s.id for s in current.speakers]
     for n, upd in enumerate(body.speakers):
         if upd.id in seen:
             raise HTTPException(_422, f"speakers[{n}]: duplicate id {upd.id!r}")
         seen.add(upd.id)
         if upd.id not in by_id:
-            raise HTTPException(_422, f"speakers[{n}]: unknown speaker {upd.id!r}")
+            by_id[upd.id] = add_speakers(list(by_id.values()), [upd.id])[-1]
+            order.append(upd.id)
         name = upd.name.strip()
         if not name:
             raise HTTPException(_422, f"speakers[{n}]: name must not be blank")
         prev = by_id[upd.id]
         by_id[upd.id] = Speaker(id=prev.id, name=name, color=upd.color or prev.color)
-    speakers = [by_id[s.id] for s in current.speakers]
+    speakers = [by_id[sid] for sid in order]
     updated = await db.update_transcript(transcript_id, speakers=speakers)
     if updated is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "transcript not found")

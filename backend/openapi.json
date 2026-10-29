@@ -161,7 +161,7 @@
         "type": "object"
       },
       "Correction": {
-        "description": "One automatic edit of a segment's text (raw text stays in ``original``).",
+        "description": "One edit proposed or made automatically ([5b]); the raw text stays in ``original``.\n\n``applied``: made automatically (L1 / repetition), reviewable; ``suggested``: proposed only\n(L3 LLM), applied when accepted; ``accepted`` / ``rejected``: reviewed by a person.",
         "properties": {
           "after": {
             "title": "After",
@@ -170,6 +170,23 @@
           "before": {
             "title": "Before",
             "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "offset": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Character offset of `before`.",
+            "title": "Offset"
           },
           "score": {
             "anyOf": [
@@ -189,9 +206,21 @@
           "source": {
             "enum": [
               "term",
-              "repetition"
+              "repetition",
+              "llm"
             ],
             "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "default": "applied",
+            "enum": [
+              "applied",
+              "suggested",
+              "accepted",
+              "rejected"
+            ],
+            "title": "Status",
             "type": "string"
           }
         },
@@ -923,6 +952,54 @@
         "title": "LocalSettingsUpdate",
         "type": "object"
       },
+      "MergeOp": {
+        "properties": {
+          "op": {
+            "const": "merge",
+            "title": "Op",
+            "type": "string"
+          },
+          "segment_id": {
+            "description": "Merged with the next segment in time order.",
+            "title": "Segment Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "segment_id"
+        ],
+        "title": "MergeOp",
+        "type": "object"
+      },
+      "MergeSpeakersOp": {
+        "properties": {
+          "from_id": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "From Id",
+            "type": "string"
+          },
+          "into_id": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Into Id",
+            "type": "string"
+          },
+          "op": {
+            "const": "merge_speakers",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "from_id",
+          "into_id"
+        ],
+        "title": "MergeSpeakersOp",
+        "type": "object"
+      },
       "PreprocessOptions": {
         "properties": {
           "channels": {
@@ -1056,6 +1133,63 @@
           "channel_policy"
         ],
         "title": "ProbeInfo",
+        "type": "object"
+      },
+      "ReplaceOp": {
+        "properties": {
+          "find": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Find",
+            "type": "string"
+          },
+          "op": {
+            "const": "replace",
+            "title": "Op",
+            "type": "string"
+          },
+          "replace": {
+            "maxLength": 200,
+            "title": "Replace",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "find",
+          "replace"
+        ],
+        "title": "ReplaceOp",
+        "type": "object"
+      },
+      "ReviewCorrectionOp": {
+        "properties": {
+          "correction_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Correction Id",
+            "type": "string"
+          },
+          "decision": {
+            "enum": [
+              "accept",
+              "reject"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "op": {
+            "const": "review_correction",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "correction_id",
+          "decision"
+        ],
+        "title": "ReviewCorrectionOp",
         "type": "object"
       },
       "Segment": {
@@ -1287,6 +1421,32 @@
           "speakers"
         ],
         "title": "SpeakersUpdate",
+        "type": "object"
+      },
+      "SplitOp": {
+        "properties": {
+          "at": {
+            "description": "Character offset in the text where the second part starts.",
+            "minimum": 1.0,
+            "title": "At",
+            "type": "integer"
+          },
+          "op": {
+            "const": "split",
+            "title": "Op",
+            "type": "string"
+          },
+          "segment_id": {
+            "title": "Segment Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "segment_id",
+          "at"
+        ],
+        "title": "SplitOp",
         "type": "object"
       },
       "Term": {
@@ -1532,7 +1692,12 @@
               "discriminator": {
                 "mapping": {
                   "edit_text": "#/components/schemas/EditTextOp",
-                  "set_speaker": "#/components/schemas/SetSpeakerOp"
+                  "merge": "#/components/schemas/MergeOp",
+                  "merge_speakers": "#/components/schemas/MergeSpeakersOp",
+                  "replace": "#/components/schemas/ReplaceOp",
+                  "review_correction": "#/components/schemas/ReviewCorrectionOp",
+                  "set_speaker": "#/components/schemas/SetSpeakerOp",
+                  "split": "#/components/schemas/SplitOp"
                 },
                 "propertyName": "op"
               },
@@ -1542,6 +1707,21 @@
                 },
                 {
                   "$ref": "#/components/schemas/SetSpeakerOp"
+                },
+                {
+                  "$ref": "#/components/schemas/SplitOp"
+                },
+                {
+                  "$ref": "#/components/schemas/MergeOp"
+                },
+                {
+                  "$ref": "#/components/schemas/ReplaceOp"
+                },
+                {
+                  "$ref": "#/components/schemas/MergeSpeakersOp"
+                },
+                {
+                  "$ref": "#/components/schemas/ReviewCorrectionOp"
                 }
               ]
             },
@@ -2705,7 +2885,7 @@
         ]
       },
       "patch": {
-        "description": "Apply ops to ``segments`` only; ``original`` is immutable (rule 9).\n\nAll ops are validated before anything is written (all-or-nothing).",
+        "description": "Apply ops in order to ``segments`` / ``speakers`` / ``corrections``; ``original`` is\nimmutable (rule 9). All ops are validated before anything is written (all-or-nothing).",
         "operationId": "patch_transcript_api_transcripts__transcript_id__patch",
         "parameters": [
           {
@@ -2895,7 +3075,7 @@
     },
     "/api/transcripts/{transcript_id}/speakers": {
       "put": {
-        "description": "Rename / recolour existing speakers; speakers not listed are unchanged.",
+        "description": "Rename / recolour speakers; an id not in the transcript yet adds a new speaker (for a\nvoice diarization missed). Speakers not listed are unchanged.",
         "operationId": "update_speakers_api_transcripts__transcript_id__speakers_put",
         "parameters": [
           {
