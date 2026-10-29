@@ -160,6 +160,77 @@
         "title": "ConnectionTestResult",
         "type": "object"
       },
+      "Correction": {
+        "description": "One automatic edit of a segment's text (raw text stays in ``original``).",
+        "properties": {
+          "after": {
+            "title": "After",
+            "type": "string"
+          },
+          "before": {
+            "title": "Before",
+            "type": "string"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "segment_id": {
+            "title": "Segment Id",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "term",
+              "repetition"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "segment_id",
+          "source",
+          "before",
+          "after"
+        ],
+        "title": "Correction",
+        "type": "object"
+      },
+      "CorrectionOptions": {
+        "description": "[5b] post-correction toggles (docs/research/post-correction.md), for every provider.",
+        "properties": {
+          "repetition": {
+            "default": true,
+            "description": "Collapse runaway repetitions.",
+            "title": "Repetition",
+            "type": "boolean"
+          },
+          "terms": {
+            "default": true,
+            "description": "L1 phoneme-level term replacement.",
+            "title": "Terms",
+            "type": "boolean"
+          },
+          "threshold": {
+            "default": 0.85,
+            "description": "Phoneme similarity needed to replace.",
+            "maximum": 1.0,
+            "minimum": 0.5,
+            "title": "Threshold",
+            "type": "number"
+          }
+        },
+        "title": "CorrectionOptions",
+        "type": "object"
+      },
       "EditTextOp": {
         "properties": {
           "op": {
@@ -434,6 +505,9 @@
               }
             ],
             "title": "Context"
+          },
+          "correction": {
+            "$ref": "#/components/schemas/CorrectionOptions"
           },
           "language_hints": {
             "items": {
@@ -1323,6 +1397,14 @@
       },
       "TranscriptOut": {
         "properties": {
+          "corrections": {
+            "description": "[5b] automatic edits that turned ``original`` into ``segments``.",
+            "items": {
+              "$ref": "#/components/schemas/Correction"
+            },
+            "title": "Corrections",
+            "type": "array"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",

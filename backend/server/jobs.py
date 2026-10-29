@@ -29,11 +29,14 @@ from pathlib import Path
 from typing import Any
 
 import asr.providers
+from asr.correct import correct_segments
 from asr.providers.base import (
     AudioSource,
+    Correction,
     JobCancelled,
     ProgressEvent,
     ProviderError,
+    Segment,
     Transcript,
     TranscriptionProvider,
 )
@@ -498,6 +501,22 @@ class JobManager:
         if job is not None:
             self._publish(job)
 
+    async def _post_correct(
+        self, job: JobOut, transcript: Transcript
+    ) -> tuple[list[Segment], list[Correction]]:
+        """[5b] correction for every provider; a failure keeps the raw text and adds a warning."""
+        opts = job.options.correction
+        if not (opts.terms or opts.repetition):
+            return list(transcript.segments), []
+        try:
+            return await asyncio.to_thread(
+                correct_segments, transcript.segments, job.options.terms, opts
+            )
+        except Exception:
+            log.exception("post-correction failed for job %s", job.id)
+            transcript.warnings.append("Automatic correction failed; showing raw text")
+            return list(transcript.segments), []
+
     async def _succeed(self, state: _Running, transcript: Transcript) -> None:
         await self._settle(state)
         job_id = state.job.id
@@ -505,7 +524,14 @@ class JobManager:
         if current is None or current.status != "running":  # deleted meanwhile
             return
         transcript_id = uuid.uuid4().hex
-        await self.db.insert_transcript(transcript_id, job_id, transcript)
+        segments, corrections = await self._post_correct(state.job, transcript)
+        await self.db.insert_transcript(
+            transcript_id,
+            job_id,
+            transcript.model_copy(update={"segments": segments}),
+            original=transcript.segments,
+            corrections=corrections,
+        )
         job = await self.db.transition_job(
             job_id,
             ("running",),

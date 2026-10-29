@@ -22,16 +22,17 @@ import aiosqlite
 from pydantic import TypeAdapter
 
 from asr.audio.types import ProbeInfo
-from asr.providers.base import JobOptions, Segment, Speaker, Term, Transcript
+from asr.providers.base import Correction, JobOptions, Segment, Speaker, Term, Transcript
 from server.schemas import JobOut, JobStatus, TermSetOut, TranscriptOut, UploadOut
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SEGMENTS = TypeAdapter(list[Segment])
 _SPEAKERS = TypeAdapter(list[Speaker])
 _TERMS = TypeAdapter(list[Term])
+_CORRECTIONS = TypeAdapter(list[Correction])
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -82,7 +83,8 @@ CREATE TABLE IF NOT EXISTS transcripts (
     original_json  TEXT NOT NULL,
     warnings_json  TEXT NOT NULL DEFAULT '[]',
     created_at     TEXT NOT NULL,
-    updated_at     TEXT NOT NULL
+    updated_at     TEXT NOT NULL,
+    corrections_json TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS transcripts_job ON transcripts(job_id);
 
@@ -165,6 +167,7 @@ def _transcript_from_row(row: aiosqlite.Row) -> TranscriptOut:
         segments=_SEGMENTS.validate_json(row["segments_json"]),
         original=_SEGMENTS.validate_json(row["original_json"]),
         warnings=json.loads(row["warnings_json"]),
+        corrections=_CORRECTIONS.validate_json(row["corrections_json"]),
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
     )
@@ -211,6 +214,11 @@ class Database:
             # v2: uploads.registered (files registered in place must never be deleted).
             await conn.execute(
                 "ALTER TABLE uploads ADD COLUMN registered INTEGER NOT NULL DEFAULT 0"
+            )
+        if current is not None and current < 3:
+            # v3: transcripts.corrections_json ([5b] post-correction records).
+            await conn.execute(
+                "ALTER TABLE transcripts ADD COLUMN corrections_json TEXT NOT NULL DEFAULT '[]'"
             )
         if current is None or current < SCHEMA_VERSION:
             await conn.execute(
@@ -390,15 +398,27 @@ class Database:
 
     # -------------------------------------------------------------------------- transcripts
     async def insert_transcript(
-        self, transcript_id: str, job_id: str, transcript: Transcript
+        self,
+        transcript_id: str,
+        job_id: str,
+        transcript: Transcript,
+        *,
+        original: Sequence[Segment] | None = None,
+        corrections: Sequence[Correction] = (),
     ) -> TranscriptOut:
-        """Store ``transcript``; ``segments`` and the immutable ``original`` start equal."""
+        """Store ``transcript``.
+
+        ``original`` (immutable, rule 9) is the raw recognition result and defaults to
+        ``transcript.segments``; ``corrections`` describe how the segments differ from it.
+        """
         now = _ts(utcnow())
         segments = _dump_segments(transcript.segments)
+        raw = segments if original is None else _dump_segments(original)
         await self.conn.execute(
             "INSERT INTO transcripts (id, job_id, provider, duration, language, speakers_json,"
-            " segments_json, original_json, warnings_json, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " segments_json, original_json, warnings_json, created_at, updated_at,"
+            " corrections_json)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 transcript_id,
                 job_id,
@@ -407,10 +427,11 @@ class Database:
                 transcript.language,
                 _dump_speakers(transcript.speakers),
                 segments,
-                segments,
+                raw,
                 json.dumps(transcript.warnings, ensure_ascii=False),
                 now,
                 now,
+                _CORRECTIONS.dump_json(list(corrections)).decode("utf-8"),
             ),
         )
         await self.conn.commit()
@@ -451,9 +472,10 @@ class Database:
         return await self.get_transcript(transcript_id)
 
     async def revert_transcript(self, transcript_id: str) -> TranscriptOut | None:
-        """``segments <- original``."""
+        """``segments <- original``; the automatic corrections no longer apply, so they go too."""
         cur = await self.conn.execute(
-            "UPDATE transcripts SET segments_json = original_json, updated_at = ? WHERE id = ?",
+            "UPDATE transcripts SET segments_json = original_json, corrections_json = '[]',"
+            " updated_at = ? WHERE id = ?",
             (_ts(utcnow()), transcript_id),
         )
         await self.conn.commit()

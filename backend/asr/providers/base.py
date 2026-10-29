@@ -152,6 +152,26 @@ class CloudOptions(BaseModel):
     keep_dialect: bool = False
 
 
+class CorrectionOptions(BaseModel):
+    """[5b] post-correction toggles (docs/research/post-correction.md), for every provider."""
+
+    terms: bool = Field(default=True, description="L1 phoneme-level term replacement.")
+    repetition: bool = Field(default=True, description="Collapse runaway repetitions.")
+    threshold: float = Field(
+        default=0.85, ge=0.5, le=1.0, description="Phoneme similarity needed to replace."
+    )
+
+
+class Correction(BaseModel):
+    """One automatic edit of a segment's text (raw text stays in ``original``)."""
+
+    segment_id: str
+    source: Literal["term", "repetition"]
+    before: str
+    after: str
+    score: float | None = None
+
+
 class JobOptions(BaseModel):
     provider: ProviderName = "cloud"
     language_hints: list[str] = Field(default_factory=lambda: ["zh", "en"], max_length=10)
@@ -164,6 +184,7 @@ class JobOptions(BaseModel):
     preprocess: PreprocessOptions = Field(default_factory=PreprocessOptions)
     local: LocalOptions = Field(default_factory=LocalOptions)
     cloud: CloudOptions = Field(default_factory=CloudOptions)
+    correction: CorrectionOptions = Field(default_factory=CorrectionOptions)
 
 
 # ------------------------------------------------------------------------------ provider input

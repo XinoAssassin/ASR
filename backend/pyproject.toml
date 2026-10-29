@@ -18,6 +18,7 @@ dependencies = [
   "numpy>=2.5",
   "typer>=0.27",
   "rich>=15.0",
+  "asr-hotword>=0.1",  # [5b] L1 phoneme-level term correction (MIT; pypinyin + rapidfuzz)
 ]
 
 [project.optional-dependencies]

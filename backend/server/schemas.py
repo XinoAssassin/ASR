@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, SecretStr, field_validator, model_validat
 from asr.audio.types import ProbeInfo
 from asr.providers.base import (
     ConnectionTestResult,
+    Correction,
     FileTransferMode,
     JobOptions,
     ProviderName,
@@ -229,6 +230,10 @@ class TranscriptOut(BaseModel):
     segments: list[Segment] = Field(description="Current (possibly edited) segments.")
     original: list[Segment] = Field(description="Immutable recognition result (rule 9).")
     warnings: list[str] = Field(default_factory=list)
+    corrections: list[Correction] = Field(
+        default_factory=list,
+        description="[5b] automatic edits that turned ``original`` into ``segments``.",
+    )
     created_at: datetime
     updated_at: datetime
 

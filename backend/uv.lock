@@ -121,6 +121,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
+    { name = "asr-hotword" },
     { name = "av" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -166,6 +167,7 @@ dev = [
 requires-dist = [
     { name = "accelerate", marker = "extra == 'local'", specifier = ">=1.12" },
     { name = "aiosqlite", specifier = ">=0.22" },
+    { name = "asr-hotword", specifier = ">=0.1" },
     { name = "av", specifier = ">=19" },
     { name = "fastapi", specifier = ">=0.162" },
     { name = "funasr", marker = "extra == 'local'", specifier = ">=1.4.17" },
@@ -196,6 +198,19 @@ dev = [
     { name = "pytest-timeout", specifier = ">=2.4" },
     { name = "respx", specifier = ">=0.23" },
     { name = "ruff", specifier = ">=0.17" },
+]
+
+[[package]]
+name = "asr-hotword"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pypinyin" },
+    { name = "rapidfuzz" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/16/08/d5e00de9c84550696abd73a9b72dd2c4e810ea7c6b65e392161ca084e240/asr_hotword-0.1.0.tar.gz", hash = "sha256:67bcf02604dccd46df91d7e7966b197707238e89bc610d5688647a383c7f65e0", size = 25051, upload-time = "2026-09-11T01:52:04.543Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6c/0b/8cbe94bb2458bd9bb8f0c811bc90661e2edbf9d70ac2a5d991b478a41086/asr_hotword-0.1.0-py3-none-any.whl", hash = "sha256:9e9bd5a637aa85b1d3a98fef718241f766ea47909a88076292f9b1389a789547", size = 32422, upload-time = "2026-09-11T01:52:03.186Z" },
 ]
 
 [[package]]
@@ -1608,6 +1623,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/fc/c6/e8772d376540049f9caeaffe7927b7f3088982e6c095397bb41d9d224a30/pynndescent-0.7.0.tar.gz", hash = "sha256:54f097a003bfdb917225e1bcf55c4027e283a37a2b5e3cae4b4aaf21197f6d1c", size = 3040551, upload-time = "2026-10-27T17:36:39.385Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e1/63/fe905ec765fcb92a8a235e5a77ba591f620316c192a960dda1ce07d028eb/pynndescent-0.7.0-py3-none-any.whl", hash = "sha256:05592399f5fbf07d77590f532ed2a2e3b035ec066813eb5a097632b9ffb9e938", size = 112578, upload-time = "2026-10-27T17:36:38.091Z" },
+]
+
+[[package]]
+name = "pypinyin"
+version = "0.55.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b4/a4/784cf98c09e0dc22776b0d7d8a4a5b761218bcae4608c2416ce1e167c8af/pypinyin-0.55.0.tar.gz", hash = "sha256:b5711b3a0c6f76e67408ec6b2e3c4987a3a806b7c528076e7c7b86fcf0eaa66b", size = 839836, upload-time = "2025-07-20T12:01:50.657Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b9/7b/4cabc76fcc21c3c7d5c671d8783984d30ac9d3bb387c4ba784fca3cdfa3a/pypinyin-0.55.0-py2.py3-none-any.whl", hash = "sha256:d53b1e8ad2cdb815fb2cb604ed3123372f5a28c6f447571244aca36fc62a286f", size = 840203, upload-time = "2025-07-20T12:01:48.535Z" },
 ]
 
 [[package]]

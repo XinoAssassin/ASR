@@ -554,6 +554,49 @@ export interface components {
             /** Ok */
             ok: boolean;
         };
+        /**
+         * Correction
+         * @description One automatic edit of a segment's text (raw text stays in ``original``).
+         */
+        Correction: {
+            /** After */
+            after: string;
+            /** Before */
+            before: string;
+            /** Score */
+            score?: number | null;
+            /** Segment Id */
+            segment_id: string;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "term" | "repetition";
+        };
+        /**
+         * CorrectionOptions
+         * @description [5b] post-correction toggles (docs/research/post-correction.md), for every provider.
+         */
+        CorrectionOptions: {
+            /**
+             * Repetition
+             * @description Collapse runaway repetitions.
+             * @default true
+             */
+            repetition: boolean;
+            /**
+             * Terms
+             * @description L1 phoneme-level term replacement.
+             * @default true
+             */
+            terms: boolean;
+            /**
+             * Threshold
+             * @description Phoneme similarity needed to replace.
+             * @default 0.85
+             */
+            threshold: number;
+        };
         /** EditTextOp */
         EditTextOp: {
             /**
@@ -664,6 +707,7 @@ export interface components {
             cloud?: components["schemas"]["CloudOptions"];
             /** Context */
             context?: string | null;
+            correction?: components["schemas"]["CorrectionOptions"];
             /** Language Hints */
             language_hints?: string[];
             local?: components["schemas"]["LocalOptions"];
@@ -1014,6 +1058,11 @@ export interface components {
         };
         /** TranscriptOut */
         TranscriptOut: {
+            /**
+             * Corrections
+             * @description [5b] automatic edits that turned ``original`` into ``segments``.
+             */
+            corrections?: components["schemas"]["Correction"][];
             /**
              * Created At
              * Format: date-time
