@@ -41,6 +41,10 @@ def test_diff_and_guard_helpers() -> None:
         "suggested",
         "llm",
     )
+    # whitespace-only edits are noise; padding around a replacement is trimmed
+    assert diff_corrections("s", "玩Townfall吗", "玩 Townfall 吗") == []
+    (c2,) = diff_corrections("s", "玩汤泡吗", "玩 Townfall 吗")
+    assert (c2.before, c2.after, c2.offset) == ("汤泡", "Townfall", 1)
     terms = [Term(term="Townfall")]
     assert unsanctioned_ratio("就是寂静岭汤泡我确实", [c], terms) == 0.0  # writes a term: exempt
     assert unsanctioned_ratio("就是寂静岭汤泡我确实", [c], []) == pytest.approx(0.2)

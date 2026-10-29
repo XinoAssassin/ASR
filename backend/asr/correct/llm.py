@@ -69,32 +69,45 @@ def unsanctioned_ratio(old: str, corrections: Sequence[Correction], terms: Seque
     return changed / max(len(old), 1)
 
 
+def _squash(text: str) -> str:
+    return "".join(text.split())
+
+
+def _trim_padding(before: str, after: str) -> str:
+    """Drop whitespace the model put around a replacement when the original had none there."""
+    if not before[:1].isspace():
+        after = after.lstrip()
+    if not before[-1:].isspace():
+        after = after.rstrip()
+    return after
+
+
 def diff_corrections(segment_id: str, old: str, new: str) -> list[Correction]:
-    """Changed spans of ``old`` -> ``new``; edits separated by <= 1 equal char are joined."""
-    ops = [
-        op
-        for op in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes()
-        if op[0] != "equal" or op[2] - op[1] <= 1
-    ]
+    """Changed spans of ``old`` -> ``new``; edits separated by <= 1 equal char are joined.
+
+    Whitespace-only edits are dropped (models like to space out Latin words in Chinese text).
+    """
     spans: list[list[int]] = []
-    for tag, i1, i2, j1, j2 in ops:
-        if tag == "equal" and (not spans or spans[-1][1] != i1):
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+        None, old, new, autojunk=False
+    ).get_opcodes():
+        if tag == "equal":
             continue
-        if spans and spans[-1][1] == i1:
+        if spans and i1 - spans[-1][1] <= 1:
             spans[-1][1], spans[-1][3] = i2, j2
-        elif tag != "equal":
+        else:
             spans.append([i1, i2, j1, j2])
     return [
         Correction(
             segment_id=segment_id,
             source="llm",
             before=old[i1:i2],
-            after=new[j1:j2],
+            after=_trim_padding(old[i1:i2], new[j1:j2]),
             offset=i1,
             status="suggested",
         )
         for i1, i2, j1, j2 in spans
-        if old[i1:i2] != new[j1:j2]
+        if _squash(old[i1:i2]) != _squash(new[j1:j2])
     ]
 
 
