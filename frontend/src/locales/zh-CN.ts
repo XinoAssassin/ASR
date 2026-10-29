@@ -46,7 +46,6 @@ const zhCN = {
   provider: {
     cloud: '云端',
     local: '本地',
-    localUnavailable: 'M5 前不可用',
   },
   languages: {
     zh: '中文',
@@ -139,7 +138,9 @@ const zhCN = {
     },
     local: {
       title: '本地模型',
-      unavailable: '本地转写将在 M5 提供，以下信息仅供查看。',
+      downloadHint: '本地模型需先在服务器上下载：asr models download <模型键>。缺少模型时提交本地任务会提示需要下载的模型。',
+      auto: '自动（按硬件选择，见 M4 结论）',
+      modelKey: '模型键',
       modelName: '模型',
       kind: '类型',
       size: '大小',

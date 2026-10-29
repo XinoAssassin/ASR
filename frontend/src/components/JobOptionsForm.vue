@@ -38,9 +38,7 @@ const parsed = computed(() => parseTerms(form.value.extraTerms))
     <NFormItem :label="t('jobOptions.provider')">
       <NRadioGroup v-model:value="form.provider" data-testid="job-provider">
         <NRadio value="cloud">{{ t('provider.cloud') }}</NRadio>
-        <NRadio value="local" disabled>
-          {{ t('provider.local') }}（{{ t('provider.localUnavailable') }}）
-        </NRadio>
+        <NRadio value="local">{{ t('provider.local') }}</NRadio>
       </NRadioGroup>
     </NFormItem>
     <NFormItem :label="t('jobOptions.languages')">

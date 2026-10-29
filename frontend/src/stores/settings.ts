@@ -48,7 +48,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const testing = ref(false)
   const lastMaxMb = ref<number | null>(storedMaxMb())
 
-  /** D5: cloud until the local provider ships (M5). */
+  /** Server default provider (settings table, else ASR_PROVIDER_DEFAULT). */
   const defaultProvider = computed<ProviderName>(() => server.value?.provider_default ?? 'cloud')
   const cloudMaxFileSizeMb = computed(() => lastMaxMb.value ?? DEFAULT_CLOUD_MAX_FILE_SIZE_MB)
 

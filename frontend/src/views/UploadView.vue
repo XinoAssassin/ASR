@@ -151,8 +151,7 @@ async function startJobs(): Promise<void> {
 
 function initProvider(): void {
   if (uploads.providerInitialized || !settings.server) return
-  // The local provider is rejected until M5 (D4), so a "local" default still starts as cloud.
-  uploads.jobForm.provider = settings.defaultProvider === 'local' ? 'cloud' : settings.defaultProvider
+  uploads.jobForm.provider = settings.defaultProvider
   uploads.providerInitialized = true
 }
 

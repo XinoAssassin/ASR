@@ -166,12 +166,13 @@ async function runCloudTest(): Promise<void> {
   }
 }
 
-// --- local models (read-only until M5) --------------------------------------------------------
+// --- local models (status only; management in Settings arrives with M6) ----------------------
 
 const localModels = ref<LocalModelOut[]>([])
 const localModelsError = ref<string | null>(null)
 
 const modelColumns = computed<DataTableColumns<LocalModelOut>>(() => [
+  { title: t('settings.local.modelKey'), key: 'id' },
   { title: t('settings.local.modelName'), key: 'name' },
   { title: t('settings.local.kind'), key: 'kind' },
   {
@@ -283,9 +284,7 @@ onMounted(() => {
         <NFormItem :label="t('settings.server.defaultProvider')">
           <NRadioGroup v-model:value="form.provider" data-testid="default-provider">
             <NRadio value="cloud">{{ t('provider.cloud') }}</NRadio>
-            <NRadio value="local" disabled>
-              {{ t('provider.local') }}（{{ t('provider.localUnavailable') }}）
-            </NRadio>
+            <NRadio value="local">{{ t('provider.local') }}</NRadio>
           </NRadioGroup>
         </NFormItem>
         <NFormItem :label="t('settings.cloud.endpoint')">
@@ -397,9 +396,9 @@ onMounted(() => {
       </NAlert>
     </NCard>
 
-    <!-- Local models: read-only placeholder until M5 -->
+    <!-- Local models: download state; downloads go through `asr models download` (rule 6) -->
     <NCard :title="t('settings.local.title')">
-      <NAlert type="info" style="margin-bottom: 16px">{{ t('settings.local.unavailable') }}</NAlert>
+      <NAlert type="info" style="margin-bottom: 16px">{{ t('settings.local.downloadHint') }}</NAlert>
       <NDescriptions
         v-if="settings.server"
         :column="2"
@@ -409,7 +408,7 @@ onMounted(() => {
         style="margin-bottom: 16px"
       >
         <NDescriptionsItem :label="t('settings.local.asrModel')">
-          {{ settings.server.local.asr_model ?? '—' }}
+          {{ settings.server.local.asr_model || t('settings.local.auto') }}
         </NDescriptionsItem>
         <NDescriptionsItem :label="t('settings.local.diarizeModel')">
           {{ settings.server.local.diarize_model ?? '—' }}

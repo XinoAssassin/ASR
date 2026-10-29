@@ -44,7 +44,6 @@ const en: MessageSchema = {
   provider: {
     cloud: 'Cloud',
     local: 'Local',
-    localUnavailable: 'not available until M5',
   },
   languages: {
     zh: 'Chinese',
@@ -138,7 +137,9 @@ const en: MessageSchema = {
     },
     local: {
       title: 'Local models',
-      unavailable: 'Local transcription arrives with M5; this section is read-only.',
+      downloadHint: 'Local models must be downloaded on the server first: asr models download <key>. A local job lists any missing models.',
+      auto: 'Auto (chosen per hardware, see M4)',
+      modelKey: 'Key',
       modelName: 'Model',
       kind: 'Kind',
       size: 'Size',
