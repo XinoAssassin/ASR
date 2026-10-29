@@ -1,0 +1,7 @@
+# Mis-hearings observed in the M4 bake-off outputs on ASR_4people-test.m4a (learning-loop aliases).
+# Collected from the same clip that is scored, so results using this file are optimistic.
+Townfall | 汤泡 | 汤炮 | 汤们 | 汤破 | tomford
+寂静岭 | 基金岭 | 金银脸 | 基金理
+Nadya | 娜姐 | 那的 | 娜点 | 娜迪亚
+Ryoma | 龙马
+死或生 | 死活生
