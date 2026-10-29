@@ -29,6 +29,34 @@ def test_parse_formats() -> None:
     ]
 
 
+def test_parse_hotword_syntax() -> None:
+    terms, errors = parse_terms(
+        "Townfall | 汤泡 | 汤炮 ~~~ 泡面 | 面条, 4, game title\n"
+        "Claude | 克劳德 | cloud\n"
+        "傅平 ~~~ 工作 | 脱贫\n"
+        "Plain\n"
+    )
+    assert not errors
+    by = {t.term: t for t in terms}
+    assert by["Townfall"].aliases == ["汤泡", "汤炮"]
+    assert by["Townfall"].blacklist == ["泡面", "面条"]
+    assert (by["Townfall"].weight, by["Townfall"].note) == (4, "game title")
+    assert by["Claude"].aliases == ["克劳德", "cloud"] and by["Claude"].blacklist == []
+    assert by["傅平"].aliases == [] and by["傅平"].blacklist == ["工作", "脱贫"]
+    assert by["Plain"].aliases == [] and by["Plain"].weight == 3
+
+
+def test_merge_terms_unions_aliases() -> None:
+    merged = merge_terms(
+        [
+            Term(term="Townfall", aliases=["汤泡"], blacklist=["泡面"]),
+            Term(term="townfall", aliases=["汤泡", "汤炮"], blacklist=["面条"]),
+        ]
+    )
+    assert len(merged) == 1
+    assert merged[0].aliases == ["汤泡", "汤炮"] and merged[0].blacklist == ["泡面", "面条"]
+
+
 def test_parse_errors_report_line_numbers() -> None:
     text = "ok\nbad,abc\n,3\nweight,9\n" + "x" * 101 + "\n"
     terms, errors = parse_terms(text)
@@ -54,7 +82,9 @@ async def test_crud(client: httpx.AsyncClient) -> None:
     assert resp.status_code == 201
     ts = resp.json()
     assert ts["name"] == "芯片"
-    assert ts["terms"] == [{"term": "FPGA", "weight": 4, "note": None}]
+    assert ts["terms"] == [
+        {"term": "FPGA", "weight": 4, "note": None, "aliases": [], "blacklist": []}
+    ]
 
     got = (await client.get(f"/api/term-sets/{ts['id']}")).json()
     assert got == ts

@@ -1189,6 +1189,24 @@
       },
       "Term": {
         "properties": {
+          "aliases": {
+            "description": "Known mis-hearings, replaced by the term in post-correction ([5b] L1).",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Aliases",
+            "type": "array"
+          },
+          "blacklist": {
+            "description": "Words that block a replacement when they appear next to the match.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Blacklist",
+            "type": "array"
+          },
           "note": {
             "anyOf": [
               {

@@ -92,6 +92,28 @@ class Term(BaseModel):
         default=3, description="1..5 for normal terms, 50 for boosted terms (cloud vocabulary)."
     )
     note: str | None = Field(default=None, max_length=500)
+    aliases: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Known mis-hearings, replaced by the term in post-correction ([5b] L1).",
+    )
+    blacklist: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Words that block a replacement when they appear next to the match.",
+    )
+
+    @field_validator("aliases", "blacklist")
+    @classmethod
+    def _clean_words(cls, v: list[str]) -> list[str]:
+        out: list[str] = []
+        for word in v:
+            word = word.strip()
+            if len(word) > 100:
+                raise ValueError("aliases / blacklist entries are at most 100 characters")
+            if word and word not in out:
+                out.append(word)
+        return out
 
     @field_validator("term")
     @classmethod

@@ -38,6 +38,10 @@ def merge_terms(terms: Iterable[Term]) -> list[Term]:
             update["weight"] = term.weight
         if not prev.note and term.note:
             update["note"] = term.note
+        for field in ("aliases", "blacklist"):
+            extra = [w for w in getattr(term, field) if w not in getattr(prev, field)]
+            if extra:
+                update[field] = [*getattr(prev, field), *extra]
         if update:
             merged[key] = prev.model_copy(update=update)
     return list(merged.values())
@@ -53,11 +57,21 @@ def _line_error(line_no: int, line: str, msg: str) -> dict[str, Any]:
     }
 
 
+def _split_hotword(term_part: str) -> tuple[str, list[str], list[str]]:
+    """``Target | alias1 | alias2 ~~~ black1 | black2`` (asr-hotword syntax) -> parts."""
+    left, _, right = term_part.partition("~~~")
+    names = [p.strip() for p in left.split("|")]
+    blacklist = [p.strip() for p in right.split("|")] if right else []
+    return names[0], [n for n in names[1:] if n], [b for b in blacklist if b]
+
+
 def parse_terms(text: str) -> tuple[list[Term], list[dict[str, Any]]]:
     """Parse one term per line: ``term``, ``term,weight``, ``term<TAB>weight<TAB>note``.
 
-    Full-width ``，`` works like ``,``. Blank lines and ``#`` comments are skipped. Returns the
-    terms (not deduplicated) and FastAPI-style errors with 1-based line numbers.
+    The term part may use the asr-hotword syntax ``Target | alias | alias ~~~ black | black``
+    (aliases = known mis-hearings for post-correction, blacklist = neighbouring words that block
+    a replacement). Full-width ``，`` works like ``,``. Blank lines and ``#`` comments are skipped.
+    Returns the terms (not deduplicated) and FastAPI-style errors with 1-based line numbers.
     """
     terms: list[Term] = []
     errors: list[dict[str, Any]] = []
@@ -67,10 +81,15 @@ def parse_terms(text: str) -> tuple[list[Term], list[dict[str, Any]]]:
             continue
         parts = line.split("\t", 2) if "\t" in line else _COMMA_SPLIT.split(line, maxsplit=2)
         parts = [p.strip() for p in parts]
-        term_text = parts[0]
+        term_text, aliases, blacklist = _split_hotword(parts[0])
         weight_text = parts[1] if len(parts) > 1 else ""
         note = parts[2] if len(parts) > 2 and parts[2] else None
-        data: dict[str, Any] = {"term": term_text, "note": note}
+        data: dict[str, Any] = {
+            "term": term_text,
+            "note": note,
+            "aliases": aliases,
+            "blacklist": blacklist,
+        }
         if weight_text:
             try:
                 data["weight"] = int(weight_text)

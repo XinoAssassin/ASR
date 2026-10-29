@@ -955,6 +955,16 @@ export interface components {
         };
         /** Term */
         Term: {
+            /**
+             * Aliases
+             * @description Known mis-hearings, replaced by the term in post-correction ([5b] L1).
+             */
+            aliases?: string[];
+            /**
+             * Blacklist
+             * @description Words that block a replacement when they appear next to the match.
+             */
+            blacklist?: string[];
             /** Note */
             note?: string | null;
             /** Term */
