@@ -243,6 +243,10 @@ Errors: FastAPI default `{"detail": ...}`; 401 for missing/wrong `X-API-Key`, 40
 | D36 | `per_channel`: channel 0 is diarized, every other channel is one fixed speaker (desktop recorder: remote on ch 0, local mic on ch 1; phone calls: one party per channel) | PLAN §4.5 [0b], §6.3 |
 | D37 | Local jobs pin the resolved ASR model and device into `options.local` at creation and return 422 with the exact `asr models download ...` command when a model is missing; no DashScope key needed | Reproducible retries; AGENTS rule 6 |
 | D38 | Post-correction ([5b], docs/research/post-correction.md) runs in the job runner after any provider, not inside the local pipeline | Same treatment for local and cloud transcripts |
+| D39 | `Term` gains `aliases` / `blacklist`; import lines accept `Target \| alias ~~~ black[, weight[, note]]` (asr-hotword syntax). Decoding-time paths (cloud vocabulary, Qwen3 context, Paraformer hotwords) use the target only | M6 |
+| D40 | [5b] L1 = asr-hotword `PhonemeCorrector` (MIT, base dependency since cloud jobs use it too), threshold 0.85; repetition filter collapses a 2–10 char unit repeated 5+ times and a char repeated 8+ times (to 3). Both on by default, per-job `options.correction` | docs/M6_TERM_CORRECTION.md: 0.80 over-corrects |
+| D41 | Transcripts store the raw provider output as the immutable `original`, the corrected text as `segments`, and every edit in `corrections` (schema v3); revert clears corrections | AGENTS rule 9; audit trail for the M7 review UI |
+| D42 | Settings downloads only registry models, one at a time in a background thread, optional ModelScope mirror; state is in memory | AGENTS rule 6 ("explicit settings endpoint") |
 
 ### Follow-ups (not in M0–M3 scope)
 - `JobOut.upload_name` / `JobOut.duration` to avoid one `GET /api/uploads/{id}` per row in the Jobs table.
@@ -307,3 +311,14 @@ Local provider implemented and wired into the job queue, CLI (`asr transcribe --
 
 Known limitations: short interjections (对 / 是 / 什么意思) are the main diarization errors; a tiny extra cluster can
 survive folding after merge; two speakers introducing themselves inside one sentence are merged (cloud does the same).
+
+
+## 9. M6 (2026-10-29)
+
+| Item | State |
+|---|---|
+| Term sets both ways | Done: cloud `vocabulary` 10 → 13 term hits, local Qwen3 context 10 → 15 (docs/M6_TERM_CORRECTION.md) |
+| [5b] L1 term correction + repetition filter | Done, default on for both providers; aliases (learning loop) reach 15–16 / 17; 5/5 correct replacements on 31 min without aliases, 11/12 with |
+| Local model management in Settings | Done: status, download (mirror), ASR model and device selection |
+| Preprocessing toggles in UI | Partial: channel override (M3) and level boost. Denoise / dereverb / separation are not built: PLAN requires a benchmark against raw audio first and the research expects them to hurt |
+| CUDA verification (`device=cuda` on an NVIDIA host) | **Blocked**: no NVIDIA GPU here. Code paths exist (`resolve_dtype` picks bf16/fp16 on CUDA, `--device cuda`, settings), untested |
