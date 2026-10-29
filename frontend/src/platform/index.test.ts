@@ -74,6 +74,7 @@ describe('tauri facade (docs/desktop-ipc.md)', () => {
     await p.recordings.upload('r1')
     await p.recordings.reveal('r1')
     await p.recorder.processes()
+    await p.recorder.setOptions(options)
     const sidecar = { enabled: true, command: 'asr.exe', args: ['serve'], cwd: null, port: 8000 }
     await p.sidecar.getConfig()
     await p.sidecar.setConfig(sidecar)
@@ -92,6 +93,7 @@ describe('tauri facade (docs/desktop-ipc.md)', () => {
       ['recording_upload', { id: 'r1' }],
       ['recording_reveal', { id: 'r1' }],
       ['recorder_processes', {}],
+      ['recorder_set_options', { options }],
       ['sidecar_get_config', {}],
       ['sidecar_set_config', { config: sidecar }],
       ['sidecar_status', {}],

@@ -25,6 +25,8 @@ import {
 } from '@/platform'
 
 const OPTIONS_KEY = 'asr.recorder.startOptions'
+/** Debounce for pushing start options to the core (`recorder_set_options`). */
+export const SET_OPTIONS_DEBOUNCE_MS = 500
 const SOURCE_KEY = 'asr.recorder.systemSource'
 
 /** System track: the whole render device, or one application's process tree (M10). */
@@ -166,6 +168,40 @@ export const useRecorderStore = defineStore('recorder', () => {
     writeStorage(SOURCE_KEY, JSON.stringify({ mode, processName: name })),
   )
 
+  // Hand the core the options the tray / Ctrl+Alt+R toggle should replay (docs/desktop-ipc.md),
+  // debounced, whenever they change while idle. Changes during init (restored options, a
+  // remembered app re-matched by pid) are not pushed: only edits after the store is ready.
+  let pushTimer: ReturnType<typeof setTimeout> | null = null
+  /** An older core without `recorder_set_options`: stop calling it after the first failure. */
+  let setOptionsUnsupported = false
+
+  function cancelPush(): void {
+    if (pushTimer !== null) clearTimeout(pushTimer)
+    pushTimer = null
+  }
+
+  async function pushOptions(): Promise<void> {
+    pushTimer = null
+    if (setOptionsUnsupported || active.value) return
+    try {
+      await (await getDesktop()).recorder.setOptions({ ...startOptions.value })
+    } catch (e) {
+      // Not worth bothering the user: the next start stores the options anyway.
+      setOptionsUnsupported = /not found|unknown command|recorder_set_options/i.test(ipcErrorMessage(e))
+    }
+  }
+
+  watch(
+    startOptions,
+    () => {
+      if (!available || !initialized.value || active.value || setOptionsUnsupported) return
+      cancelPush()
+      pushTimer = setTimeout(() => void pushOptions(), SET_OPTIONS_DEBOUNCE_MS)
+    },
+    // sync: the `initialized` gate must see the state at the moment of the change.
+    { deep: true, flush: 'sync' },
+  )
+
   function selectProcess(pid: number | null): void {
     processId.value = pid
     const proc = pid == null ? undefined : processes.value.find((p) => p.pid === pid)
@@ -277,6 +313,7 @@ export const useRecorderStore = defineStore('recorder', () => {
   }
 
   function dispose(): void {
+    cancelPush()
     for (const off of unlisteners) off()
     unlisteners = []
     initPromise = null
@@ -285,6 +322,7 @@ export const useRecorderStore = defineStore('recorder', () => {
 
   async function start(): Promise<void> {
     if (!canStart.value) return
+    cancelPush() // recorder_start stores the same options
     busy.value = true
     try {
       setStatus(await (await getDesktop()).recorder.start({ ...startOptions.value }))

@@ -31,6 +31,8 @@ export interface FakeDesktop extends DesktopPlatform {
     processes: AudioProcess[]
     /** Pretend the mic cannot be opened: start falls back to system-only (M10). */
     noMic: boolean
+    /** What `recorder_set_options` / `recorder_start` stored for the tray / hotkey toggle. */
+    lastOptions: StartOptions | null
     sidecarConfig: SidecarConfig
     sidecar: SidecarStatus
     /** Commands that reject like an older core would. */
@@ -100,6 +102,7 @@ export function createFakeDesktop(): FakeDesktop {
       { pid: 5150, name: 'chrome.exe', title: null },
     ],
     noMic: false,
+    lastOptions: null,
     sidecarConfig: {
       enabled: false,
       command: '',
@@ -132,6 +135,7 @@ export function createFakeDesktop(): FakeDesktop {
       start: (options: StartOptions) =>
         call('recorder_start', { options }, () => {
           if (state.status.state !== 'idle') throw 'already recording'
+          state.lastOptions = structuredClone(options)
           const mic = options.mic && !state.noMic
           state.status = {
             ...state.status,
@@ -158,6 +162,10 @@ export function createFakeDesktop(): FakeDesktop {
         }),
       status: () => call('recorder_status', undefined, () => structuredClone(state.status)),
       processes: () => call('recorder_processes', undefined, () => structuredClone(state.processes)),
+      setOptions: (options: StartOptions) =>
+        call('recorder_set_options', { options }, () => {
+          state.lastOptions = structuredClone(options)
+        }),
     },
     sidecar: {
       getConfig: () => call('sidecar_get_config', undefined, () => structuredClone(state.sidecarConfig)),

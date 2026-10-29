@@ -130,6 +130,8 @@ export interface DesktopPlatform {
     stop(): Promise<Recording>
     status(): Promise<RecorderStatus>
     processes(): Promise<AudioProcess[]>
+    /** Store the options the tray / Ctrl+Alt+R toggle replays, without starting. */
+    setOptions(options: StartOptions): Promise<void>
   }
   sidecar: {
     getConfig(): Promise<SidecarConfig>

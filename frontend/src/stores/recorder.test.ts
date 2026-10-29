@@ -20,7 +20,8 @@ vi.mock('@/api', () => ({
   getJob: vi.fn(async (id: string) => ({ id, transcript_id: `tr-${id}` })),
 }))
 
-const { DESKTOP_DEFAULT_BACKEND, normalizeStatus, useRecorderStore } = await import('./recorder')
+const { DESKTOP_DEFAULT_BACKEND, SET_OPTIONS_DEBOUNCE_MS, normalizeStatus, useRecorderStore } =
+  await import('./recorder')
 
 let fake: FakeDesktop
 
@@ -245,6 +246,7 @@ describe('recorder store', () => {
     await store.init()
     expect(store.sourceMode).toBe('process')
     expect(store.processId).toBe(5150)
+    expect(fake.calls.some(([n]) => n === 'recorder_set_options')).toBe(false) // init: not pushed
     fake.state.processes = [{ pid: 9999, name: 'chrome.exe', title: 'Meet' }]
     await store.refreshProcesses()
     expect(store.processId).toBe(9999)
@@ -273,5 +275,74 @@ describe('recorder store', () => {
     const s = normalizeStatus(old as never, { ...store.options, mic: false })
     expect(s.sources).toEqual({ system: true, mic: false })
     expect(s.processId).toBeNull()
+  })
+
+  describe('recorder_set_options (tray / hotkey defaults)', () => {
+    afterEach(() => vi.useRealTimers())
+
+    const pushes = () => fake.calls.filter(([n]) => n === 'recorder_set_options')
+
+    it('pushes edits while idle, debounced, but not the restored options at init', async () => {
+      const store = useRecorderStore()
+      await store.init()
+      vi.useFakeTimers()
+      await nextTick()
+      expect(pushes()).toHaveLength(0)
+      store.options.mic = false
+      await nextTick()
+      store.options.outputDevice = 'out-2'
+      await nextTick()
+      vi.advanceTimersByTime(SET_OPTIONS_DEBOUNCE_MS - 1)
+      expect(pushes()).toHaveLength(0)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(pushes()).toHaveLength(1)
+      expect(fake.state.lastOptions).toEqual({
+        system: true,
+        mic: false,
+        outputDevice: 'out-2',
+        inputDevice: null,
+        outDir: null,
+        processId: null,
+      })
+      // Choosing an app sends its pid.
+      store.sourceMode = 'process'
+      store.selectProcess(4242)
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(SET_OPTIONS_DEBOUNCE_MS)
+      expect(pushes()).toHaveLength(2)
+      expect(fake.state.lastOptions?.processId).toBe(4242)
+    })
+
+    it('does not push while recording; start cancels a pending push', async () => {
+      const store = useRecorderStore()
+      await store.init()
+      vi.useFakeTimers()
+      store.options.mic = false
+      await nextTick()
+      await store.start()
+      await vi.advanceTimersByTimeAsync(SET_OPTIONS_DEBOUNCE_MS * 2)
+      expect(pushes()).toHaveLength(0)
+      expect(fake.state.lastOptions?.mic).toBe(false) // stored by recorder_start
+      store.options.outDir = 'D:\\rec' // locked in the UI; even so, nothing is pushed
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(SET_OPTIONS_DEBOUNCE_MS)
+      expect(pushes()).toHaveLength(0)
+    })
+
+    it('stops calling an older core that lacks the command', async () => {
+      fake.state.missing.add('recorder_set_options')
+      const store = useRecorderStore()
+      await store.init()
+      vi.useFakeTimers()
+      store.options.mic = false
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(SET_OPTIONS_DEBOUNCE_MS)
+      expect(pushes()).toHaveLength(1)
+      expect(store.error).toBeNull()
+      store.options.mic = true
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(SET_OPTIONS_DEBOUNCE_MS)
+      expect(pushes()).toHaveLength(1)
+    })
   })
 })

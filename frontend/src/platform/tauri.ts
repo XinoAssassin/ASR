@@ -32,6 +32,7 @@ export function createTauriPlatform(): DesktopPlatform {
       stop: () => invoke<Recording>('recorder_stop'),
       status: () => invoke<RecorderStatus>('recorder_status'),
       processes: () => invoke<AudioProcess[]>('recorder_processes'),
+      setOptions: (options: StartOptions) => invoke<void>('recorder_set_options', { options }),
     },
     sidecar: {
       getConfig: () => invoke<SidecarConfig>('sidecar_get_config'),
