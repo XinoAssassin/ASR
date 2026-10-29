@@ -103,7 +103,13 @@ converts it to FLAC and only then removes the `.partial.wav`.
 
 Jobs for 2-channel recordings use `options.preprocess.channels = "per_channel"` unless the SPA's
 `jobOptions` say otherwise. For a **mono** recording Rust replaces `per_channel` with `auto` (the
-backend rejects `per_channel` on mono files).
+backend rejects `per_channel` on mono files). For a 2-channel recording a missing or `auto`
+channels option becomes `per_channel` (the backend's `auto` may downmix correlated stereo);
+explicit `downmix` / `left` / `right` are kept.
+
+Upload state: a transient failure is `failed` with `nextRetryAt` set (it retries by itself); a
+permanent one (4xx other than 408 / 429) has `nextRetryAt: null` and waits for `recording_upload`
+or a config change. Warning strings are bilingual and shown verbatim.
 
 ## Backend notes
 
