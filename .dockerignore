@@ -1,9 +1,9 @@
 # Keep the build context small and free of secrets / local state.
 .git
 .gitignore
-.env
-.env.*
-!.env.example
+**/.env
+**/.env.*
+!**/.env.example
 
 # Python
 **/.venv
