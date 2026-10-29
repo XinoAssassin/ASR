@@ -307,3 +307,12 @@ def test_default_asr_model_follows_bf16(monkeypatch: pytest.MonkeyPatch) -> None
     assert default_asr_model() == "qwen3-asr-1.7b"
     monkeypatch.setattr(pipeline_mod, "resolve_dtype", lambda *a, **k: "float32")
     assert default_asr_model() == "qwen3-asr-0.6b"
+
+
+def test_zero_length_token_gets_minimum_duration() -> None:
+    tokens = [Token("啊", 1.0, 1.0)]
+    segs = build_segments([ChunkResult(0.9, 2.0, "啊，", tokens)], [], default_speaker="S")
+    assert segs[0].start == 1.0 and segs[0].end == pytest.approx(1.08)
+    # Never past the chunk end.
+    segs = build_segments([ChunkResult(0.9, 1.03, "啊", tokens)], [], default_speaker="S")
+    assert segs[0].end == pytest.approx(1.03)

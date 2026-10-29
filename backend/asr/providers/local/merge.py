@@ -20,6 +20,7 @@ SNAP_TOKENS = 4  # a speaker change may move this many tokens to a better bounda
 MIN_RUN_TOKENS = 2  # shorter speaker runs are absorbed by a neighbour ...
 MIN_RUN_SECONDS = 0.4  # ... unless they last at least this long
 PAUSE_SPLIT_S = 0.8  # a silence this long starts a new segment (punctuation-free engines)
+MIN_SEGMENT_S = 0.08  # the aligner's frame; a zero-length token still gets this much time
 
 
 @dataclass(frozen=True)
@@ -172,22 +173,25 @@ def build_segments(
     chunks: Sequence[ChunkResult], turns: Sequence[SpeakerTurn], *, default_speaker: str
 ) -> list[Segment]:
     segments: list[Segment] = []
+    cap = 0.0  # end of the chunk being emitted; a segment never extends past it
 
     def emit(speaker: str, start: float, end: float, text: str, words: list[Word]) -> None:
         text = text.strip()
+        end = min(max(end, start + MIN_SEGMENT_S), max(cap, start))
         if text:
             segments.append(
                 Segment(
                     id=f"seg_{len(segments):05d}",
                     speaker_id=speaker,
                     start=round(start, 3),
-                    end=round(max(end, start), 3),
+                    end=round(end, 3),
                     text=text,
                     words=words,
                 )
             )
 
     for chunk in chunks:
+        cap = chunk.end
         spans = token_spans(chunk.text, chunk.tokens) if chunk.tokens else None
         if not spans:
             speaker = chunk.speaker or speaker_for(chunk.start, chunk.end, turns) or default_speaker
