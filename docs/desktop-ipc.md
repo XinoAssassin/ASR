@@ -30,6 +30,9 @@ type RecorderStatus = {
   file: string | null          // path of the recording in progress / last finished one
   driftMs: number | null       // measured mic-vs-loopback drift, after resampling
   warnings: string[]           // e.g. "system audio silent for 60 s"
+  sources: { system: boolean; mic: boolean }  // M10: what is actually captured (a missing mic
+                               // falls back to system-only with a warning instead of failing)
+  processId: number | null     // M10: process tree being captured, null = whole device
 }
 
 type StartOptions = {
@@ -38,6 +41,25 @@ type StartOptions = {
   outputDevice: string | null  // Device.id from listDevices().outputs; null = default
   inputDevice: string | null
   outDir: string | null        // null = <Documents>/ASR Recordings
+  processId?: number | null    // M10: capture only this process tree (Windows 10 2004+ process
+                               // loopback); null / absent = the whole render device
+}
+
+type AudioProcess = { pid: number; name: string; title: string | null }   // M10
+
+type SidecarConfig = {         // M10: optional local backend started by the app
+  enabled: boolean             // start with the app, stop on quit
+  command: string              // e.g. D:\ASR\backend\.venv\Scripts\asr.exe
+  args: string[]               // default ["serve", "--port", "8000"]
+  cwd: string | null
+  port: number                 // health checked at http://127.0.0.1:{port}/api/health
+}
+
+type SidecarStatus = {
+  state: 'stopped' | 'starting' | 'running' | 'failed'
+  pid: number | null
+  url: string | null           // http://127.0.0.1:{port} while running
+  error: string | null
 }
 
 type UploadState = 'pending' | 'uploading' | 'uploaded' | 'transcribing' | 'done' | 'failed'
@@ -85,6 +107,12 @@ type BackendConfig = {
 | `recordings_list` | — | `Recording[]` | Newest first |
 | `recording_upload` | `{ id: string }` | `Recording` | Queue now (manual or retry) |
 | `recording_reveal` | `{ id: string }` | — | Open the folder in Explorer / Finder |
+| `recorder_processes` | — | `AudioProcess[]` | M10: processes with an active audio session, for `processId` |
+| `sidecar_get_config` | — | `SidecarConfig` | M10 |
+| `sidecar_set_config` | `{ config: SidecarConfig }` | `SidecarConfig` | M10; does not start / stop by itself |
+| `sidecar_status` | — | `SidecarStatus` | M10 |
+| `sidecar_start` | — | `SidecarStatus` | M10; resolves once healthy or failed (timeout 120 s) |
+| `sidecar_stop` | — | `SidecarStatus` | M10 |
 
 ## Events (`listen(name)`)
 
@@ -92,6 +120,7 @@ type BackendConfig = {
 |---|---|---|
 | `recorder://status` | `RecorderStatus` | ~10 Hz while recording, once on each state change |
 | `recordings://changed` | `Recording` | On every upload state change |
+| `sidecar://status` | `SidecarStatus` | M10: on every state change |
 
 ## Recording file
 
