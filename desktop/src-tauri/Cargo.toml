@@ -1,0 +1,71 @@
+[package]
+name = "asr-recorder"
+version = "0.1.0"
+description = "ASR Recorder: system audio + microphone recorder that uploads to the ASR backend"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+default-run = "asr-recorder"
+
+[lib]
+name = "asr_recorder"
+path = "src/lib.rs"
+
+[[bin]]
+name = "asr-recorder"
+path = "src/main.rs"
+required-features = ["app"]
+
+# Headless acceptance test: records loopback + mic while it plays a marker track (Windows only).
+[[bin]]
+name = "recorder-selftest"
+path = "src/bin/selftest.rs"
+
+[features]
+default = ["app"]
+# The Tauri shell. Without it the crate is a plain library, so the audio / queue logic can be
+# unit-tested on hosts without WebView2 / WebKitGTK.
+app = [
+  "dep:tauri",
+  "dep:tauri-build",
+  "dep:tauri-plugin-global-shortcut",
+  "dep:tauri-plugin-single-instance",
+  "dep:tauri-plugin-log",
+]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [], optional = true }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+log = "0.4"
+thiserror = "2"
+flacenc = { version = "0.5", default-features = false }
+claxon = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
+rand = "0.9"
+
+tauri = { version = "2", features = ["tray-icon", "image-png"], optional = true }
+tauri-plugin-global-shortcut = { version = "2", optional = true }
+tauri-plugin-single-instance = { version = "2", optional = true }
+tauri-plugin-log = { version = "2", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+wasapi = "0.26"
+windows = { version = "0.62", features = ["Win32_System_Performance"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+
+# Resampling / FLAC are hot loops; keep debug builds usable for long recordings.
+[profile.dev.package."*"]
+opt-level = 2
+[profile.dev]
+opt-level = 1
