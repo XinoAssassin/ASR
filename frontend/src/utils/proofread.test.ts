@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { Correction, Segment } from '@/api/endpoints'
 
-import { correctionMarks, pieces, searchMarks, termMarks } from './highlight'
+import { correctionContext, correctionMarks, pieces, searchMarks, termMarks } from './highlight'
 import { findMatches, withAlias } from './search'
 
 const corr = (over: Partial<Correction>): Correction =>
@@ -41,6 +41,18 @@ describe('highlight pieces', () => {
       { start: 0, end: 8, kind: 'correction', ref: 'c1' },
       { start: 8, end: 11, kind: 'suggestion', ref: 'c2' },
     ])
+  })
+
+  it('shows the text around a correction', () => {
+    const text = '我们之前聊过的那个Townfall真的很好玩，大家都喜欢'
+    expect(correctionContext(text, corr({}), 4)).toEqual({ left: '…过的那个', hit: 'Townfall', right: '真的很好…' })
+    // pending insertion: located by offset only
+    expect(correctionContext('生化好玩', corr({ before: '', after: '危机', status: 'suggested', offset: 2 }), 4)).toEqual({
+      left: '生化',
+      hit: '',
+      right: '好玩',
+    })
+    expect(correctionContext('别的', corr({ offset: null }))).toBeNull()
   })
 
   it('handles empty text and no marks', () => {

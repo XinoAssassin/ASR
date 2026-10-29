@@ -88,6 +88,7 @@ const speakerList = computed(() => {
 
 const hasAudioSource = computed(() => !!store.job?.upload_id)
 const corrections = computed<Correction[]>(() => store.transcript?.corrections ?? [])
+const segmentTexts = computed(() => Object.fromEntries(segments.value.map((s) => [s.id, s.text])))
 
 function speakerOf(id: string): Speaker {
   return store.speakerMap.get(id) ?? { id, name: id, color: '#888888' }
@@ -525,6 +526,7 @@ onBeforeUnmount(() => {
             <NCard size="small" :title="t('proofread.corrections')">
               <CorrectionsPanel
                 :corrections="corrections"
+                :texts="segmentTexts"
                 :term-sets="termSets.items"
                 :focused-id="focusedCorrection"
                 :llm-running="store.llmRunning"

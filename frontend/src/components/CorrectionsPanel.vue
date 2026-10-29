@@ -8,9 +8,12 @@ import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import type { Correction, TermSetOut } from '@/api'
+import { correctionContext } from '@/utils/highlight'
 
 const props = defineProps<{
   corrections: Correction[]
+  /** Current text per segment id, for the context line. */
+  texts: Record<string, string>
   termSets: TermSetOut[]
   focusedId: string | null
   llmRunning: boolean
@@ -36,6 +39,15 @@ const setOptions = computed(() => [
   ...props.termSets.map((s) => ({ label: s.name, value: s.id })),
   { label: t('proofread.newTermSet'), value: '__new__' },
 ])
+
+const contexts = computed(() => {
+  const out = new Map<Correction, ReturnType<typeof correctionContext>>()
+  for (const c of visible.value) {
+    const text = props.texts[c.segment_id]
+    out.set(c, text === undefined ? null : correctionContext(text, c))
+  }
+  return out
+})
 
 const STATUS_TYPE = { applied: 'success', suggested: 'warning', accepted: 'info', rejected: 'default' } as const
 </script>
@@ -82,6 +94,9 @@ const STATUS_TYPE = { applied: 'success', suggested: 'warning', accepted: 'info'
         <span class="arrow">→</span>
         <ins>{{ c.after || '∅' }}</ins>
       </div>
+      <NText v-if="contexts.get(c)" depth="3" class="context" data-testid="correction-context">
+        {{ contexts.get(c)!.left }}<span class="hit">{{ contexts.get(c)!.hit || '▾' }}</span>{{ contexts.get(c)!.right }}
+      </NText>
       <NSpace size="small" align="center">
         <NTag size="tiny" :type="STATUS_TYPE[c.status ?? 'applied']" :bordered="false">
           {{ t(`proofread.source.${c.source}`) }} · {{ t(`proofread.status.${c.status ?? 'applied'}`) }}
@@ -142,6 +157,17 @@ ins {
   color: #18a058;
   text-decoration: none;
   font-weight: 500;
+}
+
+.context {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.hit {
+  background: rgba(240, 160, 32, 0.25);
+  border-radius: 2px;
+  padding: 0 1px;
 }
 
 .arrow {

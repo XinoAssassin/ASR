@@ -71,6 +71,37 @@ export function correctionMarks(text: string, corrections: Correction[]): Mark[]
   return marks
 }
 
+/**
+ * Text around a correction in its segment, for reviewing it out of line: `hit` is what the segment
+ * currently shows at that place (the new text if applied / accepted, the old one otherwise; empty
+ * for a pending insertion). Null when the place cannot be found any more.
+ */
+export function correctionContext(
+  text: string,
+  c: Correction,
+  width = 10,
+): { left: string; hit: string; right: string } | null {
+  const current = c.status === 'applied' || c.status === 'accepted' ? c.after : c.before
+  const offset = c.offset ?? null
+  let start: number
+  if (offset !== null && offset <= text.length && text.slice(offset, offset + current.length) === current) {
+    start = offset
+  } else if (current) {
+    start = text.indexOf(current)
+    if (start < 0) return null
+  } else {
+    return null
+  }
+  const end = start + current.length
+  const left = text.slice(Math.max(0, start - width), start)
+  const right = text.slice(end, end + width)
+  return {
+    left: (start > width ? '…' : '') + left,
+    hit: current,
+    right: right + (end + width < text.length ? '…' : ''),
+  }
+}
+
 export function pieces(text: string, marks: Mark[]): Piece[] {
   const cuts = new Set<number>([0, text.length])
   for (const m of marks) {
