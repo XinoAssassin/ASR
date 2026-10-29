@@ -9,16 +9,22 @@ from pathlib import PurePosixPath
 from typing import Annotated, Literal
 from urllib.parse import quote, unquote, urlsplit
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query, Response, status
+from fastapi.concurrency import run_in_threadpool
 
+from asr.correct.llm import LlmCorrector
 from asr.editing import EditError, EditState, add_speakers
-from asr.providers.base import SPEAKER_COLORS, Speaker, Transcript
+from asr.providers.base import SPEAKER_COLORS, Correction, ProviderError, Speaker, Transcript
 from asr.writers import MEDIA_TYPES, write
+from server.config import load_effective_settings
 from server.db import Database
-from server.deps import DbDep
+from server.deps import DbDep, EnvDep
 from server.schemas import (
     EditTextOp,
     ExportFormat,
+    LlmSuggestionsIn,
+    LlmSuggestionsOut,
     MergeOp,
     MergeSpeakersOp,
     ReplaceOp,
@@ -87,6 +93,55 @@ async def patch_transcript(transcript_id: str, body: TranscriptPatch, db: DbDep)
     if updated is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "transcript not found")
     return updated
+
+
+MAX_LLM_SEGMENTS = 500
+
+
+@router.post("/{transcript_id}/llm-suggestions", response_model=LlmSuggestionsOut)
+async def llm_suggestions(
+    transcript_id: str, body: LlmSuggestionsIn, db: DbDep, env: EnvDep
+) -> LlmSuggestionsOut:
+    """[5b] L3: ask the DashScope LLM for corrections of mis-heard words. Opt-in, costs money
+    and sends the segment text to the cloud; results are ``suggested`` corrections for review,
+    never applied automatically."""
+    current = await _get_or_404(db, transcript_id)
+    wanted = set(body.segment_ids) if body.segment_ids is not None else None
+    segments = [s for s in current.segments if wanted is None or s.id in wanted]
+    if not segments:
+        raise HTTPException(_422, "no segments to check")
+    if len(segments) > MAX_LLM_SEGMENTS:
+        raise HTTPException(_422, f"at most {MAX_LLM_SEGMENTS} segments per request")
+    settings = await load_effective_settings(env, db)
+    job = await db.get_job(current.job_id)
+    terms = job.options.terms if job else []
+    context = job.options.context if job else None
+
+    def run() -> tuple[list[Correction], int]:
+        with httpx.Client(timeout=120, follow_redirects=False) as http:
+            corrector = LlmCorrector(
+                api_key=settings.cloud_api_key.get_secret_value(),
+                endpoint=settings.cloud_endpoint,
+                model=env.llm_model,
+                http=http,
+            )
+            return corrector.suggest(segments, terms, context)
+
+    try:
+        found, discarded = await run_in_threadpool(run)
+    except ProviderError as exc:
+        status_code = _422 if "not configured" in str(exc) else status.HTTP_502_BAD_GATEWAY
+        raise HTTPException(status_code, str(exc)) from None
+    checked = {s.id for s in segments}
+    kept = [
+        c
+        for c in current.corrections
+        if not (c.source == "llm" and c.status == "suggested" and c.segment_id in checked)
+    ]
+    updated = await db.update_transcript(transcript_id, corrections=[*kept, *found])
+    if updated is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "transcript not found")
+    return LlmSuggestionsOut(transcript=updated, added=len(found), discarded=discarded)
 
 
 @router.put("/{transcript_id}/speakers", response_model=TranscriptOut)

@@ -743,6 +743,52 @@
         "title": "JobOut",
         "type": "object"
       },
+      "LlmSuggestionsIn": {
+        "properties": {
+          "segment_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 500,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Segments to check; default all (max 500).",
+            "title": "Segment Ids"
+          }
+        },
+        "title": "LlmSuggestionsIn",
+        "type": "object"
+      },
+      "LlmSuggestionsOut": {
+        "properties": {
+          "added": {
+            "description": "New suggested corrections.",
+            "title": "Added",
+            "type": "integer"
+          },
+          "discarded": {
+            "description": "Segment rewrites dropped by the edit-ratio guard.",
+            "title": "Discarded",
+            "type": "integer"
+          },
+          "transcript": {
+            "$ref": "#/components/schemas/TranscriptOut"
+          }
+        },
+        "required": [
+          "transcript",
+          "added",
+          "discarded"
+        ],
+        "title": "LlmSuggestionsOut",
+        "type": "object"
+      },
       "LocalModelOut": {
         "properties": {
           "downloaded": {
@@ -3025,6 +3071,59 @@
           }
         },
         "summary": "Export Transcript",
+        "tags": [
+          "transcripts"
+        ]
+      }
+    },
+    "/api/transcripts/{transcript_id}/llm-suggestions": {
+      "post": {
+        "description": "[5b] L3: ask the DashScope LLM for corrections of mis-heard words. Opt-in, costs money\nand sends the segment text to the cloud; results are ``suggested`` corrections for review,\nnever applied automatically.",
+        "operationId": "llm_suggestions_api_transcripts__transcript_id__llm_suggestions_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transcript_id",
+            "required": true,
+            "schema": {
+              "title": "Transcript Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LlmSuggestionsIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmSuggestionsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Llm Suggestions",
         "tags": [
           "transcripts"
         ]

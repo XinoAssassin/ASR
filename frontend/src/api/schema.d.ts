@@ -347,6 +347,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/transcripts/{transcript_id}/llm-suggestions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Llm Suggestions
+         * @description [5b] L3: ask the DashScope LLM for corrections of mis-heard words. Opt-in, costs money
+         *     and sends the segment text to the cloud; results are ``suggested`` corrections for review,
+         *     never applied automatically.
+         */
+        post: operations["llm_suggestions_api_transcripts__transcript_id__llm_suggestions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/transcripts/{transcript_id}/revert": {
         parameters: {
             query?: never;
@@ -810,6 +832,28 @@ export interface components {
             upload_id: string | null;
             /** Warnings */
             warnings?: string[];
+        };
+        /** LlmSuggestionsIn */
+        LlmSuggestionsIn: {
+            /**
+             * Segment Ids
+             * @description Segments to check; default all (max 500).
+             */
+            segment_ids?: string[] | null;
+        };
+        /** LlmSuggestionsOut */
+        LlmSuggestionsOut: {
+            /**
+             * Added
+             * @description New suggested corrections.
+             */
+            added: number;
+            /**
+             * Discarded
+             * @description Segment rewrites dropped by the edit-ratio guard.
+             */
+            discarded: number;
+            transcript: components["schemas"]["TranscriptOut"];
         };
         /** LocalModelOut */
         LocalModelOut: {
@@ -2089,6 +2133,41 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    llm_suggestions_api_transcripts__transcript_id__llm_suggestions_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                transcript_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LlmSuggestionsIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LlmSuggestionsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };

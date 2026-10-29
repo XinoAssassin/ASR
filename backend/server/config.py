@@ -91,6 +91,11 @@ class EnvSettings(BaseSettings):
     cloud_file_transfer: FileTransferMode = Field(
         default="temp_upload", validation_alias="ASR_CLOUD_FILE_TRANSFER"
     )
+    llm_model: str = Field(
+        default="qwen-plus",
+        validation_alias="ASR_LLM_MODEL",
+        description="DashScope chat model for [5b] L3 correction suggestions.",
+    )
 
     @field_validator("cors_origins", mode="before")
     @classmethod

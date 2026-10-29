@@ -291,6 +291,18 @@ TranscriptOp = Annotated[
 ]
 
 
+class LlmSuggestionsIn(BaseModel):
+    segment_ids: list[str] | None = Field(
+        default=None, max_length=500, description="Segments to check; default all (max 500)."
+    )
+
+
+class LlmSuggestionsOut(BaseModel):
+    transcript: TranscriptOut
+    added: int = Field(description="New suggested corrections.")
+    discarded: int = Field(description="Segment rewrites dropped by the edit-ratio guard.")
+
+
 class TranscriptPatch(BaseModel):
     ops: list[TranscriptOp] = Field(min_length=1, max_length=1000)
 
