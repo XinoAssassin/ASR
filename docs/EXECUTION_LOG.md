@@ -250,6 +250,10 @@ Errors: FastAPI default `{"detail": ...}`; 401 for missing/wrong `X-API-Key`, 40
 | D43 | Transcript edits are `PATCH` ops (`edit_text`, `set_speaker`, `split`, `merge`, `replace`, `merge_speakers`, `review_correction`) applied by the Web-free `asr.editing.EditState`; correction offsets follow the edits, rejecting an applied correction restores `before`, accepting a suggestion applies `after` | One code path for UI, CLI and tests; AGENTS rule 9 |
 | D44 | [5b] L3 is a button, not a job option: `POST /api/transcripts/{id}/llm-suggestions` (qwen-plus, DashScope compatible-mode, same key / endpoint allow-list), behind a cost + privacy confirmation. Output is `suggested` corrections only; a segment changing > 15 % of its text (glossary-term edits exempt) is discarded; whitespace-only edits are dropped | Costs money and sends text to the cloud, so it must be explicit; never auto-applied |
 | D45 | The SPA autosaves: text edits are debounced (600 ms) and every mutation goes through one serial queue, so ops never race; the queue is flushed before export and on route leave, and a late response for another transcript is ignored | "Without leaving the page"; export must match the screen |
+| D46 | `asr serve` lives in `server/cli.py`, which extends the core Typer app; the `asr` console script points there. One uvicorn worker only (the job queue is in-process); `--forwarded-allow-ips` for reverse proxies | Core stays Web-free (AGENTS rule 5) |
+| D47 | Server logging: `ASR_LOG_LEVEL`, `ASR_LOG_FORMAT=text\|json`, `ASR_LOG_FILE` (10 MB x 5); one root handler set shared with uvicorn; every handler redacts signed URLs, bearer tokens and `sk-` keys; job start / finish lines carry `job_id` | Operability without leaking secrets (AGENTS rule 3) |
+| D48 | `asr batch`: files and directories, one provider / model load, outputs next to inputs or in `--out-dir`, existing outputs skipped, failures collected (exit 1). CLI `transcribe` / `batch` apply the same [5b] L1 + repetition filter as server jobs | Same text whether a file goes through the API or the CLI |
+| D49 | Desktop: Windows Rust toolchain = rustup `x86_64-pc-windows-gnu` (user-local, no PATH change) + WinLibs mingw; no MSVC / admin needed. Tauri 2 probe builds and runs. Rust core and SPA meet at the frozen contract `docs/desktop-ipc.md`; Rust owns capture, the persistent upload queue and uploads | Uploads must retry with no window open (AGENTS rule 8) |
 
 ### Follow-ups (not in M0–M3 scope)
 - `JobOut.upload_name` / `JobOut.duration` to avoid one `GET /api/uploads/{id}` per row in the Jobs table.
@@ -353,4 +357,16 @@ insertions (`∅ → 危机`) could not be judged from the panel, so each correc
 surrounding text. LLM suggestion quality on this excerpt is mixed (term fixes such as `龙瓦 → Ryoma`,
 `金脸重这儿重置 → 寂静岭重制` are right; punctuation insertions are noise) — suggestions stay opt-in
 and unapplied, as planned.
+
+## 11. M8–M11 crew (2026-10-29)
+
+The user asked to fan out. Disjoint ownership; agents never commit, the lead reviews and commits.
+
+| Agent | Owns | Scope |
+|---|---|---|
+| lead | `PLAN.md`, `docs/EXECUTION_LOG.md`, `docs/desktop-ipc.md`, commits | M8 backend pieces (D46–D48, done), integration, review |
+| deploy | `Dockerfile`, `docker-compose*.yml`, `deploy/**`, `docs/DEPLOYMENT.md`, `.env.example`, `README.md` | M8 images, guide, two-host acceptance |
+| desktop-core | `desktop/**` | M9 (then M10) Rust/Tauri recorder + uploader |
+| desktop-ui | `frontend/src/platform/**`, recorder view/store/components, router, `App.vue`, locales, Settings desktop section, `frontend/package.json` | M9 SPA side |
+| m11-backend | `backend/**`, `docs/M11_*.md` | M11 summary, faster-whisper, L2, pyannote |
 
