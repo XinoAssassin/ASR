@@ -393,3 +393,22 @@ context (3c7723a), `.env` ignored by the CLI and two pipeline knobs (3569d45).
 qwen-plus call on a 45 s transcript: generate → stale after an edit (persisted) → delete (persisted);
 Settings marks the Whisper models. Linux desktop capture belongs to the desktop track (M10).
 
+## 13. M9 desktop app (2026-10-29)
+
+Rust core (`desktop/`, a684dea) + SPA (`frontend/src/platform/**`, recorder page, desktop settings;
+15734e8, 702340b) meeting at `docs/desktop-ipc.md`. Windows build with the gnu toolchain; NSIS
+installer `ASR Recorder_0.1.0_x64-setup.exe` (3.3 MiB).
+
+| Check | Result |
+|---|---|
+| `cargo fmt --check`, `clippy -D warnings`, `cargo test` (Windows with shell, Linux without) | clean, 30 tests each |
+| Self-test 1.2 / 5 / 30 min (chirp every 2 s via WASAPI, 20 s idle gap) | drift −0.01 ms at the end of all runs; gap error ≤ 0.01 ms; ch1−ch0 within 0.26 ms with ±250–300 ppm injected mic skew (90 / 450 ms uncorrected) |
+| 5-min FLAC → upload → local job `per_channel` → transcript id | PASS; 30-min FLAC (2.8 MB) upload + job PASS (job cancelled to free the CPU) |
+| App: launch / IPC from the SPA / record → FLAC → auto-upload → job → done | PASS |
+| Backend down → retry after restart; hard kill mid-recording → partial WAV repaired, converted, uploaded | PASS |
+| SPA (web): no recorder nav, Tauri code only in a lazy chunk; desktop mock: devices, meters, start/stop, uploads, settings push | PASS (Playwright) |
+
+**Not verified:** a real microphone or sound card (the machine is reached over RDP; the only endpoint
+is the virtual remote-audio device, whose clock equals QPC), a real Teams / Feishu call, tray and
+hotkey by hand (no UI automation), the SPA recorder page inside the real WebView.
+
