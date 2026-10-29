@@ -33,11 +33,11 @@ WORKDIR /app/backend
 # Dependency layer first for cache efficiency
 COPY backend/pyproject.toml backend/uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev --extra cpu
+    uv sync --frozen --no-install-project --no-dev --extra cpu --extra local
 
 COPY backend/ ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --extra cpu
+    uv sync --frozen --no-dev --extra cpu --extra local
 
 RUN useradd --create-home --uid 1000 asr \
  && mkdir -p /data/uploads /models \
@@ -80,10 +80,10 @@ WORKDIR /app/backend
 COPY backend/pyproject.toml backend/uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv python install 3.12 \
- && uv sync --frozen --no-install-project --no-dev --extra cuda
+ && uv sync --frozen --no-install-project --no-dev --extra cuda --extra local
 COPY backend/ ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --extra cuda
+    uv sync --frozen --no-dev --extra cuda --extra local
 
 RUN useradd --create-home --uid 1000 asr \
  && mkdir -p /data/uploads /models \
