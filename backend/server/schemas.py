@@ -360,7 +360,11 @@ class TermSetIn(BaseModel):
 
 
 class TermSetImport(BaseModel):
-    """Plain-text import: one term per line, optionally ``term<TAB or ,>weight[<TAB or ,>note]``."""
+    """Plain-text import into a new set.
+
+    One term per line, ``term[<TAB or ,>weight[<TAB or ,>note]]``, where ``term`` may use the
+    asr-hotword syntax ``Target | alias … ~~~ black …``.
+    """
 
     name: str = Field(min_length=1, max_length=100)
     text: str = Field(max_length=200_000)

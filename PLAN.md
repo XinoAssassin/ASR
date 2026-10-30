@@ -298,7 +298,8 @@ Timestamps are seconds (float) throughout; the cloud provider converts from mill
 - SSE live updates; state survives browser restarts
 
 **Term sets**
-- Multiple sets (per customer / project); term + weight + note; paste import, txt import/export
+- Page `/term-sets`: multiple sets (per customer / project); term + weight + note + aliases + blacklist, edited as a table and saved as a draft
+- Paste / txt import (creates a new set; asr-hotword line syntax `Target | alias ~~~ black, weight, note`, per-line errors) and txt export in the same syntax
 - Explanation of cloud weight mapping (1–5 normal, 50 boosted, max 50 boosted)
 
 **Transcript**
@@ -315,6 +316,8 @@ Timestamps are seconds (float) throughout; the cloud provider converts from mill
 - Local: ASR model, diarization model, device (cpu / cuda), model cache dir, download status and one-click download
 - Cloud: endpoint, model name, DashScope key (masked), file transfer method (temp upload / OSS / public URL) and its credentials, "test connection"
 - Privacy notice for cloud mode
+- SiYuan: endpoint, token (masked, write-only), default notebook, path template; test connection
+- "Set by environment" section: read-only facts (auth, CORS, roots, dirs, logging) and env markers on fields
 
 ### 6.3 Desktop app (system-audio recorder)
 
