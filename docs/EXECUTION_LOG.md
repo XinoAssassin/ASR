@@ -263,6 +263,7 @@ Errors: FastAPI default `{"detail": ...}`; 401 for missing/wrong `X-API-Key`, 40
 | D56 | Chunked `complete` is idempotent for 1 h; JSON bodies capped at 2 MB (uploads exempt); migrations atomic and re-runnable | Review findings; lets web and desktop uploaders retry complete safely |
 | D57 | Correction offsets and `SplitOp.at` are code-point indices; every correction records its offset and review applies strictly there (EditError when the text moved); the SPA converts from UTF-16 | Rejects restored text at the wrong occurrence |
 | D58 | Desktop recovery is race-safe per entry (busy stems skipped) instead of gating start; gaps > 10 s with no audio on any track are cut with a warning; write errors are retried from a 300 s backlog, then the session stops itself | AGENTS rule 8 under crash / sleep / disk-full |
+| D59 | DOCX export dropped from the requirements (PLAN, AGENTS, README, API); export formats are txt / srt / vtt / json | User decision 2026-10-30: not needed |
 
 ### Follow-ups (not in M0–M3 scope)
 - `JobOut.upload_name` / `JobOut.duration` to avoid one `GET /api/uploads/{id}` per row in the Jobs table.

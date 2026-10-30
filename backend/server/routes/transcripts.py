@@ -8,7 +8,7 @@ import unicodedata
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 from urllib.parse import quote, unquote, urlsplit
 
 import httpx
@@ -359,18 +359,16 @@ async def _export_stem(db: Database, job_id: str) -> str:
                 "application/json": {"schema": {"type": "string"}},
             },
         },
-        422: {"description": "Invalid parameters, or `docx` (not implemented yet)."},
+        422: {"description": "Invalid parameters or an unknown format."},
     },
 )
 async def export_transcript(
     transcript_id: str,
     db: DbDep,
-    format: Annotated[ExportFormat | Literal["docx"], Query()] = "txt",
+    format: Annotated[ExportFormat, Query()] = "txt",
     timestamps: Annotated[bool, Query()] = True,
     merge_same_speaker: Annotated[bool, Query()] = False,
 ) -> Response:
-    if format == "docx":
-        raise HTTPException(_422, "docx export is not implemented yet")
     current = await _get_or_404(db, transcript_id)
     transcript = Transcript(
         provider=current.provider,

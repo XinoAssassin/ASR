@@ -261,7 +261,7 @@ band; they enter it once per browser in Settings → Connection, and once in the
   (server-sent events; the backend pings every 15 s);
 - `client_max_body_size 2100m` and `proxy_request_buffering off` (the UI uploads 8 MiB chunks,
   single-request uploads may be up to 2 GiB);
-- `proxy_read_timeout 600s` for long requests (DOCX export, big parts);
+- `proxy_read_timeout 600s` for long requests (big upload parts, LLM summaries);
 - `X-Forwarded-For / -Proto / -Host` set, paired with
   `asr serve --host 127.0.0.1 --forwarded-allow-ips 127.0.0.1` so the access log shows client IPs.
 
@@ -345,8 +345,7 @@ asr batch a.m4a b.wav --asr-model seaco-paraformer --device cpu --terms "CUDA" -
 ```
 
 - Inputs: files and/or directories (`-r` recurses). Outputs `<stem>.<fmt>` next to each input or in
-  `--out-dir`; default formats `txt` and `json` (`srt` and `vtt` also available; DOCX only via the
-  API / UI export).
+  `--out-dir`; default formats `txt` and `json` (`srt` and `vtt` also available).
 - Files whose outputs all exist are skipped (`--overwrite` to redo); failures are listed at the end
   and make the exit code 1.
 - Default provider is `local`; `--provider cloud` needs `DASHSCOPE_API_KEY` in the environment and

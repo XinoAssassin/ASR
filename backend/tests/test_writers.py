@@ -120,7 +120,7 @@ def test_empty_and_multiline() -> None:
 def test_render_alias_and_bad_format(transcript: Transcript) -> None:
     assert render is write
     with pytest.raises(ValueError, match="unsupported"):
-        write(transcript, "docx")  # type: ignore[arg-type]
+        write(transcript, "pdf")  # type: ignore[arg-type]
 
 
 def test_speaker_names_with_line_breaks_stay_on_one_line() -> None:

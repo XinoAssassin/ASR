@@ -2202,7 +2202,7 @@ export interface operations {
     export_transcript_api_transcripts__transcript_id__export_get: {
         parameters: {
             query?: {
-                format?: ("txt" | "srt" | "vtt" | "json") | "docx";
+                format?: "txt" | "srt" | "vtt" | "json";
                 timestamps?: boolean;
                 merge_same_speaker?: boolean;
             };
@@ -2226,7 +2226,7 @@ export interface operations {
                     "text/vtt": string;
                 };
             };
-            /** @description Invalid parameters, or `docx` (not implemented yet). */
+            /** @description Invalid parameters or an unknown format. */
             422: {
                 headers: {
                     [name: string]: unknown;

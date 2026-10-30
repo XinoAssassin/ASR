@@ -178,10 +178,11 @@ async def test_export_uses_display_names_and_options(
     )
 
 
-async def test_export_docx_not_implemented(client: httpx.AsyncClient, tr: dict[str, Any]) -> None:
+async def test_export_rejects_unknown_formats(
+    client: httpx.AsyncClient, tr: dict[str, Any]
+) -> None:
     resp = await client.get(f"/api/transcripts/{tr['id']}/export", params={"format": "docx"})
     assert resp.status_code == 422
-    assert "not implemented" in resp.json()["detail"]
     resp = await client.get(f"/api/transcripts/{tr['id']}/export", params={"format": "pdf"})
     assert resp.status_code == 422
 

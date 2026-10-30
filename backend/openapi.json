@@ -3156,23 +3156,15 @@
             "name": "format",
             "required": false,
             "schema": {
-              "anyOf": [
-                {
-                  "enum": [
-                    "txt",
-                    "srt",
-                    "vtt",
-                    "json"
-                  ],
-                  "type": "string"
-                },
-                {
-                  "const": "docx",
-                  "type": "string"
-                }
-              ],
               "default": "txt",
-              "title": "Format"
+              "enum": [
+                "txt",
+                "srt",
+                "vtt",
+                "json"
+              ],
+              "title": "Format",
+              "type": "string"
             }
           },
           {
@@ -3223,7 +3215,7 @@
             "description": "Exported file (Content-Disposition: attachment)."
           },
           "422": {
-            "description": "Invalid parameters, or `docx` (not implemented yet)."
+            "description": "Invalid parameters or an unknown format."
           }
         },
         "summary": "Export Transcript",

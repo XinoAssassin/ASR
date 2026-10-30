@@ -90,7 +90,7 @@ Both providers emit the same `Transcript` (§5.4); the frontend never branches o
 [5b] Correct     applied to local and cloud transcripts alike (docs/research/post-correction.md):
                  L1 phoneme-level term replace (aliases + blacklist, default on), repetition filter (default on),
                  L2 generic homophone CSC (off), L3 LLM pass with glossary (off); every edit is a Correction record
-[6] Output       Transcript → txt / srt / vtt / json / docx
+[6] Output       Transcript → txt / srt / vtt / json
 ```
 
 ### 4.4 Cloud pipeline (provider = cloud, DashScope filetrans)
@@ -187,7 +187,7 @@ backend/
       cloud/
         dashscope_filetrans.py   # upload / submit / poll / normalise
         transfer/                # temp_upload.py, oss.py, public_url.py
-    writers.py            # txt / srt / vtt / json / docx
+    writers.py            # txt / srt / vtt / json
     cli.py                # typer CLI
   server/
     app.py                # FastAPI, CORS, X-API-Key
@@ -240,7 +240,7 @@ GET    /api/transcripts/{id}
 PATCH  /api/transcripts/{id}          incremental ops: edit_text / set_speaker / split / merge_segments
 PUT    /api/transcripts/{id}/speakers rename / merge speakers
 POST   /api/transcripts/{id}/revert   back to the original recognition result
-GET    /api/transcripts/{id}/export?format=txt|srt|vtt|json|docx&timestamps=1&merge_same_speaker=1
+GET    /api/transcripts/{id}/export?format=txt|srt|vtt|json&timestamps=1&merge_same_speaker=1
 GET    /api/audio/{upload_id}         streamed audio with Range support (browser-friendly transcode if needed)
 
 CRUD   /api/term-sets                 term sets; POST /api/term-sets/import (txt / paste)
@@ -306,7 +306,7 @@ Timestamps are seconds (float) throughout; the cloud provider converts from mill
 - Inline text editing with autosave; revert to original
 - Term highlighting; "replace across transcript by term set" for homophone fixes
 - Search
-- Export: txt / srt / vtt / json / docx; options: timestamps, merge consecutive same-speaker
+- Export: txt / srt / vtt / json; options: timestamps, merge consecutive same-speaker
 
 **Settings**
 - Backend URL, X-API-Key
@@ -367,7 +367,6 @@ torch                           # CPU wheel locally; cu12x wheel on NVIDIA hosts
 httpx                           # cloud provider (REST; the dashscope SDK does not accept oss:// temp URLs)
 oss2                            # Alibaba OSS transfer fallback
 typer, rich                     # CLI
-python-docx                     # docx export
 faster-whisper, pyannote.audio>=3.1   # M9
 
 # frontend
@@ -423,6 +422,7 @@ Default local models (ModelScope, cached after first download):
 - Cloud file transfer: DashScope temporary upload is sufficient (confirmed); Alibaba OSS kept as an optional fallback; R2 and tunnels not offered.
 - All documentation in English; UI strings Chinese-first with i18n.
 - Desktop app: Tauri 2 wrapping the same SPA; records system audio + mic as a 2-channel 16 kHz FLAC and uploads via the normal API; Windows first, macOS second.
+- Export formats: txt / srt / vtt / json. DOCX export was dropped (2026-10-30, not needed).
 
 ## 11. Open questions
 
