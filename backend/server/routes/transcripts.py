@@ -17,15 +17,17 @@ from fastapi.concurrency import run_in_threadpool
 
 from asr.correct.llm import LlmCorrector
 from asr.editing import EditError, EditState, add_speakers
+from asr.export.markdown import ExportMeta
 from asr.providers.base import SPEAKER_COLORS, Correction, ProviderError, Speaker, Transcript
 from asr.summarize import Summarizer, TranscriptSummary
 from asr.writers import MEDIA_TYPES, write
-from server.config import load_effective_settings
+from server.config import EnvSettings, load_effective_settings
 from server.db import Database
 from server.deps import DbDep, EnvDep
 from server.schemas import (
     EditTextOp,
     ExportFormat,
+    ExportLocale,
     LlmSuggestionsIn,
     LlmSuggestionsOut,
     MergeOp,
@@ -178,8 +180,7 @@ async def llm_suggestions(
     try:
         found, discarded = await run_in_threadpool(run)
     except ProviderError as exc:
-        status_code = _422 if "not configured" in str(exc) else status.HTTP_502_BAD_GATEWAY
-        raise HTTPException(status_code, str(exc)) from None
+        raise _llm_error(exc) from None
     # The call took up to two minutes: merge into the row as it is *now*. Corrections added or
     # reviewed meanwhile are kept; segments edited meanwhile keep what they have and get none of
     # the (now misplaced) new suggestions.
@@ -346,6 +347,46 @@ async def _export_stem(db: Database, job_id: str) -> str:
     return "transcript"
 
 
+async def export_source(
+    db: Database, env: EnvSettings, current: TranscriptOut
+) -> tuple[Transcript, ExportMeta, str]:
+    """The core transcript, the Markdown metadata and the file stem for an export."""
+    transcript = Transcript(
+        provider=current.provider,
+        duration=current.duration,
+        language=current.language,
+        speakers=current.speakers,
+        segments=current.segments,
+        warnings=current.warnings,
+    )
+    stem = await _export_stem(db, current.job_id)
+    job = await db.get_job(current.job_id)
+    upload = await db.get_upload(job.upload_id) if job and job.upload_id else None
+    source = None
+    if upload is not None:
+        source = PurePosixPath(upload.original_name.replace("\\", "/")).name or None
+    elif job is not None and job.file_url:
+        source = PurePosixPath(unquote(urlsplit(job.file_url).path)).name or None
+    model = None
+    if job is not None:
+        if current.provider == "local":
+            model = job.options.local.asr_model
+        else:
+            model = job.options.cloud.model or (await load_effective_settings(env, db)).cloud_model
+    summary = current.summary
+    meta = ExportMeta(
+        title=None if stem == "transcript" else stem,
+        source_name=source,
+        # The upload time is the closest we have to the meeting time; server-local timezone.
+        created_at=(upload.created_at if upload else current.created_at).astimezone(),
+        model=model,
+        transcript_id=current.id,
+        summary=summary,
+        summary_stale=summary is not None and current.updated_at > summary.created_at,
+    )
+    return transcript, meta, stem
+
+
 @router.get(
     "/{transcript_id}/export",
     response_class=Response,
@@ -357,6 +398,7 @@ async def _export_stem(db: Database, job_id: str) -> str:
                 "application/x-subrip": {"schema": {"type": "string"}},
                 "text/vtt": {"schema": {"type": "string"}},
                 "application/json": {"schema": {"type": "string"}},
+                "text/markdown": {"schema": {"type": "string"}},
             },
         },
         422: {"description": "Invalid parameters or an unknown format."},
@@ -365,21 +407,26 @@ async def _export_stem(db: Database, job_id: str) -> str:
 async def export_transcript(
     transcript_id: str,
     db: DbDep,
+    env: EnvDep,
     format: Annotated[ExportFormat, Query()] = "txt",
     timestamps: Annotated[bool, Query()] = True,
     merge_same_speaker: Annotated[bool, Query()] = False,
+    locale: Annotated[
+        ExportLocale, Query(description="Headings and labels of `md`; other formats ignore it.")
+    ] = "zh",
 ) -> Response:
+    """Download the current segments as txt / srt / vtt / json / md. ``md`` is a Markdown note
+    (front matter, summary if any, speaker table, transcript; docs/research/siyuan-export.md)."""
     current = await _get_or_404(db, transcript_id)
-    transcript = Transcript(
-        provider=current.provider,
-        duration=current.duration,
-        language=current.language,
-        speakers=current.speakers,
-        segments=current.segments,
-        warnings=current.warnings,
+    transcript, meta, stem = await export_source(db, env, current)
+    body = write(
+        transcript,
+        format,
+        timestamps=timestamps,
+        merge_same_speaker=merge_same_speaker,
+        locale=locale,
+        meta=meta,
     )
-    body = write(transcript, format, timestamps=timestamps, merge_same_speaker=merge_same_speaker)
-    stem = await _export_stem(db, current.job_id)
     return Response(
         content=body.encode("utf-8"),
         media_type=MEDIA_TYPES[format],

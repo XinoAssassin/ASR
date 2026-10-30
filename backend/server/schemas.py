@@ -35,6 +35,7 @@ __all__ = [
     "Device",
     "EditTextOp",
     "ExportFormat",
+    "ExportLocale",
     "FsDir",
     "FsDirsOut",
     "FsRoot",
@@ -49,6 +50,12 @@ __all__ = [
     "SetSpeakerOp",
     "SettingsOut",
     "SettingsUpdate",
+    "SiYuanNotebookOut",
+    "SiYuanPushIn",
+    "SiYuanPushOut",
+    "SiYuanSettingsOut",
+    "SiYuanSettingsUpdate",
+    "SiYuanTestOut",
     "SpeakerUpdate",
     "SpeakersUpdate",
     "TermSetImport",
@@ -381,6 +388,31 @@ class CloudSettingsOut(BaseModel):
     file_transfer: FileTransferMode
     api_key_set: bool
     api_key_masked: str | None = Field(description="E.g. 'sk-****abcd'; never the full key.")
+    api_key_source: Literal["env", "settings"] | None = Field(
+        default=None,
+        description="Where the effective DashScope key comes from: `settings` (the override set "
+        "via PUT), `env` (DASHSCOPE_API_KEY; clearing the override falls back to it), or null.",
+    )
+
+
+class EnvironmentOut(BaseModel):
+    """Read-only facts from the server environment (ARCH_REVIEW §4-f). Not updatable via
+    ``PUT /api/settings``; changed by editing the env / ``.env`` and restarting. No secrets."""
+
+    api_key_required: bool = Field(description="ASR_API_KEY is set (the key itself never is).")
+    allow_unauthenticated_network: bool = Field(description="ASR_ALLOW_UNAUTHENTICATED_NETWORK.")
+    cors_origins: list[str] = Field(description="ASR_CORS_ORIGINS.")
+    allowed_hosts: list[str] = Field(description="ASR_ALLOWED_HOSTS.")
+    upload_roots: list[str] = Field(description="ASR_UPLOAD_ROOTS (resolved).")
+    data_dir: str = Field(description="ASR_DATA_DIR (resolved).")
+    model_cache_dir: str = Field(description="ASR_MODEL_CACHE_DIR (resolved).")
+    decoder: str = Field(description="ASR_DECODER.")
+    torch_threads: int | None = Field(description="ASR_TORCH_THREADS; null = automatic.")
+    local_dtype: str = Field(description="ASR_LOCAL_DTYPE.")
+    llm_model: str = Field(description="ASR_LLM_MODEL (L3 suggestions / summary).")
+    log_level: str = Field(description="ASR_LOG_LEVEL.")
+    log_format: str = Field(description="ASR_LOG_FORMAT.")
+    log_file: str | None = Field(description="ASR_LOG_FILE.")
 
 
 class SettingsOut(BaseModel):
@@ -389,6 +421,11 @@ class SettingsOut(BaseModel):
     upload_roots: list[str]
     local: LocalSettingsOut
     cloud: CloudSettingsOut
+    environment: EnvironmentOut
+    env_only: dict[str, str] = Field(
+        description="Fields of this response that only the environment sets (dotted path -> "
+        "variable name), for a 'set via environment' hint in the UI."
+    )
 
 
 class LocalSettingsUpdate(BaseModel):
@@ -427,3 +464,72 @@ class LocalModelOut(BaseModel):
     status: Literal["missing", "downloading", "downloaded", "failed"] = "missing"
     error: str | None = None
     has_mirror: bool = Field(default=False, description="Also available on ModelScope.")
+
+
+# ---------------------------------------------------------------------------- export / SiYuan
+ExportLocale = Literal["zh", "en"]
+_SIYUAN_ID = r"^[0-9]{14}-[0-9a-z]{7}$"
+
+
+class SiYuanSettingsOut(BaseModel):
+    endpoint: str = Field(description="SiYuan kernel URL as reached from the backend host.")
+    token_set: bool
+    token_masked: str | None = Field(description="E.g. '****abcd'; never the full token.")
+    notebook: str | None = Field(description="Default notebook id, null if none chosen.")
+    path_template: str = Field(
+        description="Document path; placeholders {title} {date} {time} {source} {provider}."
+    )
+    path_fields: list[str] = Field(description="Placeholders allowed in `path_template`.")
+
+
+class SiYuanSettingsUpdate(BaseModel):
+    """Partial update; omitted fields are unchanged and ``""`` resets a field to its default.
+    Changing ``endpoint`` without sending ``token`` in the same request clears the stored token,
+    so a saved token is never sent to a host it was not saved for."""
+
+    endpoint: str | None = Field(
+        default=None, max_length=500, description="http(s) URL; default http://127.0.0.1:6806."
+    )
+    token: SecretStr | None = Field(
+        default=None,
+        max_length=500,
+        description="Write-only API token (SiYuan: Settings - About). '' clears it.",
+    )
+    notebook: str | None = Field(default=None, max_length=40, description="Notebook id or ''.")
+    path_template: str | None = Field(default=None, max_length=500)
+
+
+class SiYuanTestOut(BaseModel):
+    ok: bool
+    message: str
+    version: str | None = None
+    notebooks: int | None = Field(default=None, description="Number of notebooks visible.")
+
+
+class SiYuanNotebookOut(BaseModel):
+    id: str
+    name: str
+    closed: bool = Field(description="Closed notebooks cannot receive documents.")
+
+
+class SiYuanPushIn(BaseModel):
+    notebook: str | None = Field(
+        default=None, pattern=_SIYUAN_ID, description="Notebook id; default from settings."
+    )
+    path: str | None = Field(
+        default=None,
+        max_length=1000,
+        description="Document path such as '/会议记录/周会'; default from `path_template`. "
+        "An existing path gets a ' (2)' suffix.",
+    )
+    locale: ExportLocale = "zh"
+    timestamps: bool = True
+    merge_same_speaker: bool = False
+
+
+class SiYuanPushOut(BaseModel):
+    doc_id: str
+    notebook: str
+    path: str = Field(description="Path actually used (may carry a ' (n)' suffix).")
+    url: str = Field(description="siyuan://blocks/<doc_id>, opens the document in SiYuan.")
+    warnings: list[str] = Field(default_factory=list)

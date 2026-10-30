@@ -390,3 +390,72 @@ def mask_secret(secret: SecretStr | str | None) -> str | None:
         return "****"
     prefix = "sk-" if value.startswith("sk-") else ""
     return f"{prefix}****{value[-4:]}"
+
+
+# ------------------------------------------------------------------------------ SiYuan export
+# Settings-table keys for the SiYuan push (docs/research/siyuan-export.md). Table-only: there is
+# no env default, so the token is always bound to the endpoint it was saved with (changing the
+# endpoint without a new token clears it, see routes/siyuan.py).
+SETTING_SIYUAN_ENDPOINT = "siyuan.endpoint"
+SETTING_SIYUAN_TOKEN = "siyuan.token"  # noqa: S105 - a settings key, not a secret
+SETTING_SIYUAN_NOTEBOOK = "siyuan.notebook"
+SETTING_SIYUAN_PATH_TEMPLATE = "siyuan.path_template"
+
+SIYUAN_SETTINGS: frozenset[str] = frozenset(
+    {
+        SETTING_SIYUAN_ENDPOINT,
+        SETTING_SIYUAN_TOKEN,
+        SETTING_SIYUAN_NOTEBOOK,
+        SETTING_SIYUAN_PATH_TEMPLATE,
+    }
+)
+
+
+class SiYuanSettings(BaseModel):
+    """Effective SiYuan settings. The token is a ``SecretStr`` (never returned or logged)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    endpoint: str
+    token: SecretStr
+    notebook: str | None
+    path_template: str
+
+    @property
+    def token_set(self) -> bool:
+        return bool(self.token.get_secret_value())
+
+
+def siyuan_settings(overrides: Mapping[str, str]) -> SiYuanSettings:
+    """Defaults overlaid with the stored values; a stored value that no longer validates is
+    ignored with a warning naming the key only."""
+    from asr.export import siyuan
+
+    endpoint = siyuan.DEFAULT_ENDPOINT
+    template = siyuan.DEFAULT_PATH_TEMPLATE
+    notebook: str | None = None
+    if raw := overrides.get(SETTING_SIYUAN_ENDPOINT):
+        try:
+            endpoint = siyuan.normalize_endpoint(raw)
+        except ValueError:
+            log.warning("ignoring invalid stored setting %r", SETTING_SIYUAN_ENDPOINT)
+    if raw := overrides.get(SETTING_SIYUAN_PATH_TEMPLATE):
+        try:
+            template = siyuan.validate_path_template(raw)
+        except ValueError:
+            log.warning("ignoring invalid stored setting %r", SETTING_SIYUAN_PATH_TEMPLATE)
+    if raw := overrides.get(SETTING_SIYUAN_NOTEBOOK):
+        if siyuan.is_block_id(raw):
+            notebook = raw
+        else:
+            log.warning("ignoring invalid stored setting %r", SETTING_SIYUAN_NOTEBOOK)
+    return SiYuanSettings(
+        endpoint=endpoint,
+        token=SecretStr(overrides.get(SETTING_SIYUAN_TOKEN) or ""),
+        notebook=notebook,
+        path_template=template,
+    )
+
+
+async def load_siyuan_settings(db: "Database") -> SiYuanSettings:
+    return siyuan_settings(await db.get_settings())

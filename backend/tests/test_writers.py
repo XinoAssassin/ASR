@@ -140,3 +140,14 @@ def test_speaker_names_with_line_breaks_stay_on_one_line() -> None:
     vtt = write(t, "vtt")
     assert "<v 张三 2 00:00:00,000 --&gt; 00:00:09,000>你好" in vtt
     assert vtt.count("\n") == 4
+
+
+def test_md(transcript: Transcript) -> None:
+    out = write(transcript, "md")
+    assert out.startswith('---\ntitle: "会议记录"\nduration: "01:02:05"\nprovider: "cloud"\n')
+    assert "**Li \\<Si>** `00:00:09`\\\n好，先说 FPGA\n" in out
+    assert "**SPEAKER_02** `01:00:00`\\\na & b\n" in out
+    merged = write(transcript, "md", merge_same_speaker=True, timestamps=False)
+    assert "**Li \\<Si>**\\\n好，先说 FPGA timing 的问题\n" in merged
+    assert merged.count("**Li \\<Si>**") == 1
+    assert "## Speakers" in write(transcript, "md", locale="en")

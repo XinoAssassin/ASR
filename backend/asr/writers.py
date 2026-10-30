@@ -1,21 +1,28 @@
-"""Transcript export: txt / srt / vtt / json. Owned by ``backend-jobs`` (M1).
+"""Transcript export: txt / srt / vtt / json / md.
 
 Pure functions over the core ``Transcript``; no web imports (AGENTS.md rule 5). Speaker labels use
-the display names from ``Transcript.speakers`` and fall back to the opaque speaker id.
+the display names from ``Transcript.speakers`` and fall back to the opaque speaker id. Markdown
+(``asr.export.markdown``) also uses ``meta`` (title, source, date, model, summary) and ``locale``.
 """
 
+from __future__ import annotations
+
 import json
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from asr.providers.base import Segment, Transcript
 
-ExportFormat = Literal["txt", "srt", "vtt", "json"]
+if TYPE_CHECKING:
+    from asr.export.markdown import ExportMeta, Locale
+
+ExportFormat = Literal["txt", "srt", "vtt", "json", "md"]
 
 MEDIA_TYPES: dict[str, str] = {
     "txt": "text/plain; charset=utf-8",
     "srt": "application/x-subrip; charset=utf-8",
     "vtt": "text/vtt; charset=utf-8",
     "json": "application/json",
+    "md": "text/markdown; charset=utf-8",
 }
 
 __all__ = ["MEDIA_TYPES", "ExportFormat", "merge_consecutive", "render", "write"]
@@ -90,6 +97,8 @@ def write(
     *,
     timestamps: bool = True,
     merge_same_speaker: bool = False,
+    locale: Locale = "zh",
+    meta: ExportMeta | None = None,
 ) -> str:
     """Render ``transcript`` as ``fmt``.
 
@@ -97,7 +106,21 @@ def write(
       ``timestamps=False``).
     - ``srt`` / ``vtt``: subtitle cues; timestamps are inherent, so ``timestamps`` is ignored.
     - ``json``: the transcript model as JSON (``ensure_ascii=False``).
+    - ``md``: a Markdown note (``asr.export.markdown.render_markdown``); ``locale`` picks the
+      heading language, ``meta`` the title / date / source / model / summary. Other formats
+      ignore both.
     """
+    if fmt == "md":
+        from asr.export.markdown import render_markdown
+
+        return render_markdown(
+            transcript,
+            meta,
+            locale=locale,
+            timestamps=timestamps,
+            merge_same_speaker=merge_same_speaker,
+        )
+
     segments = merge_consecutive(transcript.segments) if merge_same_speaker else transcript.segments
     names = {s.id: s.name for s in transcript.speakers}
 

@@ -1,7 +1,8 @@
 # Multi-Speaker ASR
 
 Self-hosted speech-to-text with speaker labels and timestamps, tuned for Chinese audio with
-embedded English technical terms. Exports txt / srt / vtt / json.
+embedded English technical terms. Exports txt / srt / vtt / json / Markdown, or sends the
+note straight to a SiYuan notebook.
 
 - **Backend** (`backend/`): FastAPI + SQLite, `asr` CLI. Two providers behind one interface:
   `local` (VAD → Qwen3-ASR / Paraformer → forced alignment → CAM++ diarization, CPU or CUDA) and

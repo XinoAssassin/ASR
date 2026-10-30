@@ -2,7 +2,17 @@
 
 from fastapi import APIRouter
 
-from server.routes import audio, fs, health, jobs, settings, term_sets, transcripts, uploads
+from server.routes import (
+    audio,
+    fs,
+    health,
+    jobs,
+    settings,
+    siyuan,
+    term_sets,
+    transcripts,
+    uploads,
+)
 
 ROUTERS: tuple[APIRouter, ...] = (
     health.router,
@@ -13,4 +23,5 @@ ROUTERS: tuple[APIRouter, ...] = (
     transcripts.router,
     term_sets.router,
     settings.router,
+    siyuan.router,
 )

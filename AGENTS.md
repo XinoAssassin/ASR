@@ -5,7 +5,7 @@ Guidance for AI coding agents working in this repository. Read this file first, 
 ## Project summary
 
 Self-hosted multi-speaker speech-to-text tool. Chinese-primary audio with embedded English technical terms.
-Output: transcript with speaker labels and timestamps (txt / srt / vtt / json).
+Output: transcript with speaker labels and timestamps (txt / srt / vtt / json / Markdown), or pushed to a SiYuan notebook.
 
 Three deliverables sharing one core library:
 
