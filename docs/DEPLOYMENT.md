@@ -155,6 +155,26 @@ never appears on a command line, and starts `asr serve`. Open the port in Window
 logon, register a scheduled task that starts the script with `powershell.exe -WindowStyle Hidden`.
 Upload roots on Windows are `;`-separated (`D:\ASR\uploads;\\nas\audio`).
 
+### 2.1 Prebuilt images (GitHub Container Registry)
+
+`.github/workflows/docker.yml` builds the images on every push to `main` (and on `v*` tags) and
+publishes them to `ghcr.io/xinoassassin/` (linux/amd64):
+
+| Image | Tags | Use |
+|---|---|---|
+| `asr-backend` | `cpu`, `sha-<commit>-cpu`, `<version>-cpu` | API + local models on CPU |
+| `asr-backend` | `cuda`, `sha-<commit>-cuda`, `<version>-cuda` | API on an NVIDIA GPU (driver + NVIDIA Container Toolkit on the host) |
+| `asr-frontend` | `latest`, `sha-<commit>`, `<version>` | SPA on nginx |
+
+On a NAS (or any Docker host) use `deploy/ghcr/docker-compose.yml`: put it in a folder with a `.env`
+holding at least `NAS_HOST` (how browsers reach the NAS) and `ASR_API_KEY` (mandatory, because the
+backend port is published on the LAN), then `docker compose pull && docker compose up -d`, download
+the models once with `docker compose run --rm backend asr models download … --mirror` (§7) and open
+`http://<NAS_HOST>:8080`. Update with `docker compose pull && docker compose up -d`; pin a build
+with `ASR_BACKEND_TAG=sha-<commit>-cpu`. If a pull asks for credentials, the package is still
+private: make it public in the package settings on GitHub, or `docker login ghcr.io` with a token
+that has `read:packages`.
+
 ## 3. Frontend
 
 The production build is static: `cd frontend && pnpm install --frozen-lockfile && pnpm build`
