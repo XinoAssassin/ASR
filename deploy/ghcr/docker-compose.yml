@@ -10,6 +10,9 @@
 #   4. Open http://<NAS_HOST>:8080, enter the API key in Settings.
 #
 # NVIDIA GPU on the NAS: set ASR_BACKEND_TAG=cuda and ASR_DEVICE=cuda, and uncomment `deploy:`.
+# AMD GPU (ROCm): set ASR_BACKEND_TAG=rocm and ASR_DEVICE=rocm, put the host's render group id in
+#   .env (ASR_RENDER_GID=$(getent group render | cut -d: -f3)) and uncomment `devices:` and
+#   `group_add:` (docs/DEPLOYMENT.md §8: supported GPUs, HSA_OVERRIDE_GFX_VERSION).
 # Update: docker compose pull && docker compose up -d   (pin a build with ASR_BACKEND_TAG=sha-<commit>-cpu)
 
 services:
@@ -45,6 +48,13 @@ services:
     #         - driver: nvidia
     #           count: all
     #           capabilities: [gpu]
+    # AMD (ROCm) instead of the NVIDIA block above:
+    # devices:
+    #   - /dev/kfd
+    #   - /dev/dri
+    # group_add:
+    #   - video
+    #   - "${ASR_RENDER_GID:?set ASR_RENDER_GID}"
 
   frontend:
     image: ghcr.io/${GHCR_OWNER:-xinoassassin}/asr-frontend:${ASR_FRONTEND_TAG:-latest}

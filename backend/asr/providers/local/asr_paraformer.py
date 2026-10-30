@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
+from asr.providers.local.device import cpu_threads
 from asr.providers.local.models import model_dir
 
 SAMPLE_RATE = 16_000
@@ -29,6 +30,7 @@ class ParaformerAsr:
         self._model = AutoModel(
             model=str(model_dir(cache_dir, self.key)),
             device=device,
+            ncpu=cpu_threads(),  # funasr would otherwise reset torch to 4 threads
             disable_update=True,
             disable_pbar=True,
             log_level="ERROR",

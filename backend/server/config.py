@@ -84,7 +84,7 @@ class EnvSettings(BaseSettings):
     )
     data_dir: Path = Field(default=Path("./data"), validation_alias="ASR_DATA_DIR")
     model_cache_dir: Path = Field(default=Path("./models"), validation_alias="ASR_MODEL_CACHE_DIR")
-    device: Literal["cpu", "cuda"] = Field(default="cpu", validation_alias="ASR_DEVICE")
+    device: Literal["cpu", "cuda", "rocm"] = Field(default="cpu", validation_alias="ASR_DEVICE")
     decoder: Literal["pyav", "imageio"] = Field(default="pyav", validation_alias="ASR_DECODER")
     provider_default: ProviderName = Field(default="cloud", validation_alias="ASR_PROVIDER_DEFAULT")
 
@@ -323,7 +323,7 @@ class EffectiveSettings(BaseModel):
     cloud_api_key: SecretStr
     local_asr_model: str | None
     local_diarize_model: str | None
-    local_device: Literal["cpu", "cuda"]
+    local_device: Literal["cpu", "cuda", "rocm"]
     model_cache_dir: Path
 
     @property

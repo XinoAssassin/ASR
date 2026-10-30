@@ -144,7 +144,7 @@ class PreprocessOptions(BaseModel):
 class LocalOptions(BaseModel):
     asr_model: str | None = None
     diarize_model: str | None = None
-    device: Literal["cpu", "cuda"] | None = None
+    device: Literal["cpu", "cuda", "rocm"] | None = None  # rocm = AMD GPU via torch's HIP build
 
 
 class CloudOptions(BaseModel):

@@ -29,6 +29,7 @@ from server.auth import API_KEY_HEADER, EXEMPT_PATHS, ApiKeyMiddleware
 from server.body_limit import MAX_JSON_BODY, BodySizeLimitMiddleware
 from server.config import EnvSettings, apply_core_environ, ensure_dirs, get_env
 from server.db import Database
+from server.hardware import HardwareCache, warm_up
 from server.jobs import JobManager
 from server.logging_setup import SecretRedactingFilter, configure_logging
 from server.model_downloads import ModelDownloads
@@ -158,6 +159,7 @@ def create_app(env: EnvSettings | None = None) -> FastAPI:
             job_manager = JobManager(db=db, env=env)
             app.state.db = db
             app.state.job_manager = job_manager
+            warm_up(app.state.hardware, env)
             try:
                 await job_manager.start()
                 yield
@@ -175,6 +177,7 @@ def create_app(env: EnvSettings | None = None) -> FastAPI:
     )
     app.state.env = env
     app.state.model_downloads = ModelDownloads(env.model_cache_dir)
+    app.state.hardware = HardwareCache()
 
     for router in ROUTERS:
         app.include_router(router)

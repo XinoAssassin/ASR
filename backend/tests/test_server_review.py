@@ -571,7 +571,8 @@ def test_dockerfile_keeps_app_code_read_only() -> None:
     for line in dockerfile.splitlines():
         if "chown" in line:
             assert "/app" not in line and "/opt" not in line, line
-    assert dockerfile.count("UV_COMPILE_BYTECODE=1") == 2  # no .pyc writes at runtime
+    # backend-base, backend-cuda, backend-rocm: no .pyc writes at runtime
+    assert dockerfile.count("UV_COMPILE_BYTECODE=1") == 3
 
 
 def test_nginx_security_headers_in_every_header_block() -> None:

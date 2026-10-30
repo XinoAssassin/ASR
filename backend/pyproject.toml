@@ -25,6 +25,21 @@ dependencies = [
 # Torch flavours (EXECUTION_LOG D9). Exactly one may be selected; tests never import torch.
 cpu = ["torch==2.14.1"]
 cuda = ["torch==2.14.1"]
+# AMD GPUs (ASR_DEVICE=rocm). Linux: pytorch.org's rocm7.2 wheel, which bundles the ROCm libraries.
+# Windows: no ROCm wheels on pytorch.org, AMD's TheRock build instead; its newest torch is 2.14.0
+# and its kernels come per GPU target (gfx1151 = Ryzen AI Max / Radeon 8060S; docs/DEPLOYMENT.md
+# §8.1 for other GPUs). triton-rocm is Linux-only.
+rocm = [
+  "torch==2.14.1; sys_platform == 'linux'",
+  "triton-rocm; sys_platform == 'linux'",
+  "torch==2.14.0+rocm10.1.0; sys_platform == 'win32'",
+  "amd-torch-device-gfx1151==2.14.0+rocm10.1.0; sys_platform == 'win32'",
+  "rocm[libraries]; sys_platform == 'win32'",
+  "rocm-sdk-core; sys_platform == 'win32'",
+  "rocm-sdk-libraries; sys_platform == 'win32'",
+  "rocm-sdk-device-gfx1151; sys_platform == 'win32'",
+  "rocm-bootstrap; sys_platform == 'win32'",
+]
 # Local model stack (M4+), combined with cpu or cuda: Qwen3-ASR and Fun-ASR-Nano run on native
 # transformers; SeACo-Paraformer, FSMN-VAD and CAM++ come from funasr (EXECUTION_LOG D29).
 # No torchaudio: it stops at 2.11, and funasr's inference path falls back to kaldi-native-fbank.
@@ -61,13 +76,22 @@ packages = ["asr", "server"]
 
 # ------------------------------------------------------------------- uv
 [tool.uv]
-conflicts = [[{ extra = "cpu" }, { extra = "cuda" }]]
+conflicts = [[{ extra = "cpu" }, { extra = "cuda" }, { extra = "rocm" }]]
 
 [tool.uv.sources]
 torch = [
   { index = "pytorch-cpu", extra = "cpu" },
   { index = "pytorch-cu126", extra = "cuda" },
+  { index = "pytorch-rocm", extra = "rocm", marker = "sys_platform == 'linux'" },
+  { index = "amd-rocm-windows", extra = "rocm", marker = "sys_platform == 'win32'" },
 ]
+triton-rocm = [{ index = "pytorch-rocm", extra = "rocm" }]
+amd-torch-device-gfx1151 = [{ index = "amd-rocm-windows", extra = "rocm" }]
+rocm = [{ index = "amd-rocm-windows", extra = "rocm" }]
+rocm-sdk-core = [{ index = "amd-rocm-windows", extra = "rocm" }]
+rocm-sdk-libraries = [{ index = "amd-rocm-windows", extra = "rocm" }]
+rocm-sdk-device-gfx1151 = [{ index = "amd-rocm-windows", extra = "rocm" }]
+rocm-bootstrap = [{ index = "amd-rocm-windows", extra = "rocm" }]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
@@ -79,6 +103,33 @@ explicit = true
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
 explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.2"
+explicit = true
+
+[[tool.uv.index]]
+name = "amd-rocm-windows"
+url = "https://stable.repo.amd.com/rocm/whl-next/"
+explicit = true
+
+# AMD's Linux and Windows wheels of this version differ (only Linux requires triton), and uv reads
+# one wheel's metadata for all of them: state the Windows wheel's requirements.
+[[tool.uv.dependency-metadata]]
+name = "torch"
+version = "2.14.0+rocm10.1.0"
+requires-dist = [
+  "filelock",
+  "typing-extensions>=4.10.0",
+  "setuptools>=77.0.3",
+  "sympy>=1.13.3",
+  "networkx>=2.5.1",
+  "jinja2",
+  "fsspec>=0.8.5",
+  "rocm[libraries]~=10.1.0",
+  "rocm-bootstrap",
+]
 
 # ----------------------------------------------------------------- ruff
 [tool.ruff]

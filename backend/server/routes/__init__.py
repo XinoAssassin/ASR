@@ -9,6 +9,7 @@ from server.routes import (
     jobs,
     settings,
     siyuan,
+    system,
     term_sets,
     transcripts,
     uploads,
@@ -24,4 +25,5 @@ ROUTERS: tuple[APIRouter, ...] = (
     term_sets.router,
     settings.router,
     siyuan.router,
+    system.router,
 )

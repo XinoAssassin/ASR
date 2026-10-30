@@ -39,6 +39,8 @@ __all__ = [
     "FsDir",
     "FsDirsOut",
     "FsRoot",
+    "HardwareDeviceOut",
+    "HardwareOut",
     "HealthOut",
     "JobCreate",
     "JobList",
@@ -92,7 +94,25 @@ JOB_STAGES: tuple[str, ...] = (
 )
 
 JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
-Device = Literal["cpu", "cuda"]
+Device = Literal["cpu", "cuda", "rocm"]  # rocm: AMD GPU, runs on torch's HIP-backed cuda device
+
+
+# -------------------------------------------------------------------------------------- hardware
+class HardwareDeviceOut(BaseModel):
+    id: Device
+    available: bool
+    name: str | None = Field(description="CPU model or GPU name; null when unavailable.")
+    detail: str | None = Field(
+        description="Why the device is unavailable (e.g. 'torch ... is a CPU build'), or facts "
+        "about it when available (GPU arch, HIP / CUDA version, core count)."
+    )
+
+
+class HardwareOut(BaseModel):
+    """What the installed torch can run on; probed once per server process, no downloads."""
+
+    devices: list[HardwareDeviceOut] = Field(description="Always cpu, cuda, rocm in that order.")
+    default: Device = Field(description="The available GPU (cuda or rocm), else cpu.")
 
 
 # ---------------------------------------------------------------------------------------- health

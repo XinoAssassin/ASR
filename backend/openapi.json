@@ -542,6 +542,84 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "HardwareDeviceOut": {
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the device is unavailable (e.g. 'torch ... is a CPU build'), or facts about it when available (GPU arch, HIP / CUDA version, core count).",
+            "title": "Detail"
+          },
+          "id": {
+            "enum": [
+              "cpu",
+              "cuda",
+              "rocm"
+            ],
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "CPU model or GPU name; null when unavailable.",
+            "title": "Name"
+          }
+        },
+        "required": [
+          "id",
+          "available",
+          "name",
+          "detail"
+        ],
+        "title": "HardwareDeviceOut",
+        "type": "object"
+      },
+      "HardwareOut": {
+        "description": "What the installed torch can run on; probed once per server process, no downloads.",
+        "properties": {
+          "default": {
+            "description": "The available GPU (cuda or rocm), else cpu.",
+            "enum": [
+              "cpu",
+              "cuda",
+              "rocm"
+            ],
+            "title": "Default",
+            "type": "string"
+          },
+          "devices": {
+            "description": "Always cpu, cuda, rocm in that order.",
+            "items": {
+              "$ref": "#/components/schemas/HardwareDeviceOut"
+            },
+            "title": "Devices",
+            "type": "array"
+          }
+        },
+        "required": [
+          "devices",
+          "default"
+        ],
+        "title": "HardwareOut",
+        "type": "object"
+      },
       "HealthOut": {
         "properties": {
           "api_key_required": {
@@ -1051,7 +1129,8 @@
               {
                 "enum": [
                   "cpu",
-                  "cuda"
+                  "cuda",
+                  "rocm"
                 ],
                 "type": "string"
               },
@@ -1092,7 +1171,8 @@
           "device": {
             "enum": [
               "cpu",
-              "cuda"
+              "cuda",
+              "rocm"
             ],
             "title": "Device",
             "type": "string"
@@ -1141,7 +1221,8 @@
               {
                 "enum": [
                   "cpu",
-                  "cuda"
+                  "cuda",
+                  "rocm"
                 ],
                 "type": "string"
               },
@@ -3334,6 +3415,28 @@
         "summary": "Test Siyuan",
         "tags": [
           "siyuan"
+        ]
+      }
+    },
+    "/api/system/hardware": {
+      "get": {
+        "description": "cpu is always available; cuda needs a CUDA build of torch with a visible NVIDIA GPU, rocm\na ROCm (HIP) build with a visible AMD GPU. Probed once per server process; no downloads.",
+        "operationId": "hardware_api_system_hardware_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HardwareOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Hardware",
+        "tags": [
+          "system"
         ]
       }
     },

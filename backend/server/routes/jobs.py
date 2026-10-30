@@ -16,6 +16,7 @@ from sse_starlette import EventSourceResponse
 
 from asr.providers.base import JobOptions, LocalOptions, ProviderName, Term
 from asr.providers.local import models as local_models
+from asr.providers.local.device import DeviceStatus
 from asr.providers.local.pipeline import default_asr_model
 from asr.terms import merge_terms
 from server import storage
@@ -23,6 +24,7 @@ from server.config import EffectiveSettings, EnvSettings, load_effective_setting
 from server.db import Database, utcnow
 from server.deps import DbDep, EnvDep, JobManagerDep
 from server.jobs import MISSING_KEY, TERMINAL_STATUSES, JobManager
+from server.routes.system import hardware_cache
 from server.schemas import JobCreate, JobList, JobOut, JobStatus
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -48,7 +50,9 @@ def _check_file_url(url: str) -> None:
         raise HTTPException(_422, "file_url must not contain whitespace")
 
 
-def _resolve_local(body: JobCreate, settings: EffectiveSettings) -> LocalOptions:
+def _resolve_local(
+    body: JobCreate, settings: EffectiveSettings, device_status: DeviceStatus | None
+) -> LocalOptions:
     """Validate a local job and pin its ASR model / device into the stored options."""
     if body.file_url is not None:
         raise HTTPException(_422, "the local provider needs an uploaded file, not file_url (D3)")
@@ -57,6 +61,8 @@ def _resolve_local(body: JobCreate, settings: EffectiveSettings) -> LocalOptions
             _422, "the local model stack is not installed (uv sync --extra cpu --extra local)"
         )
     device = body.options.local.device or settings.local_device
+    if device_status is not None and not device_status.available:
+        raise HTTPException(_422, f"device {device!r} is not available: {device_status.detail}")
     asr_model = (
         body.options.local.asr_model or settings.local_asr_model or default_asr_model(device)
     )
@@ -111,12 +117,17 @@ async def _get_or_404(db: Database, job_id: str) -> JobOut:
 
 
 @router.post("", response_model=JobOut, status_code=status.HTTP_201_CREATED)
-async def create_job(body: JobCreate, db: DbDep, env: EnvDep, manager: JobManagerDep) -> JobOut:
+async def create_job(
+    body: JobCreate, db: DbDep, env: EnvDep, manager: JobManagerDep, request: Request
+) -> JobOut:
     settings = await load_effective_settings(env, db)
     provider = _effective_provider(body, settings.provider_default)
     options_update: dict[str, Any] = {}
     if provider == "local":
-        options_update["local"] = _resolve_local(body, settings)
+        device = body.options.local.device or settings.local_device
+        # cpu is always available; a GPU is checked against the startup hardware probe.
+        status_ = None if device == "cpu" else await hardware_cache(request).status(device)
+        options_update["local"] = _resolve_local(body, settings, status_)
     else:
         if body.file_url is not None:
             _check_file_url(body.file_url)

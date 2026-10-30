@@ -8,7 +8,7 @@ are cached per process; jobs run one at a time on the local worker.
 
 from __future__ import annotations
 
-import os
+import logging
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -31,13 +31,22 @@ from asr.providers.base import (
     speaker_id,
 )
 from asr.providers.languages import normalize_hints
-from asr.providers.local.device import resolve_dtype
+from asr.providers.local.device import (
+    DeviceError,
+    cpu_threads,
+    disable_broken_rocm_kernels,
+    resolve_dtype,
+    torch_device,
+    whisper_device,
+)
 from asr.providers.local.merge import ChunkResult, SpeakerTurn, Token, build_segments
 from asr.providers.local.models import ModelNotDownloaded, engine_installed, spec
 from asr.providers.local.vad import SAMPLE_RATE, cut, merge_segments
 
 MAX_CHUNK_S = 25.0
 CLIPPING_WARN_RATIO = 1e-3
+
+log = logging.getLogger(__name__)
 
 
 # ------------------------------------------------------------------------------- engine protocols
@@ -75,7 +84,10 @@ class LocalEngines:
 
 
 def default_asr_model(device: str = "cpu") -> str:
-    """M4 decision (docs/M4_BAKEOFF.md): 1.7B where bf16 is native, 0.6B otherwise."""
+    """M4 decision (docs/M4_BAKEOFF.md): 1.7B where bf16 is native, 0.6B otherwise.
+
+    ``device`` is the configured one (``cpu`` | ``cuda`` | ``rocm``); GPUs use torch.cuda's answer.
+    """
     return (
         "qwen3-asr-1.7b" if resolve_dtype(None, device=device) == "bfloat16" else "qwen3-asr-0.6b"
     )
@@ -85,8 +97,7 @@ def configure_threads() -> int:
     """CPU inference threads: ``ASR_TORCH_THREADS``, default min(16, CPU count) (M4 setting)."""
     import torch
 
-    raw = os.environ.get("ASR_TORCH_THREADS", "").strip()
-    threads = int(raw) if raw.isdigit() and int(raw) > 0 else min(16, os.cpu_count() or 4)
+    threads = cpu_threads()
     torch.set_num_threads(threads)
     return threads
 
@@ -96,13 +107,30 @@ _ENGINE_LOCK = threading.Lock()
 
 
 def load_engines(cache_dir: Path, asr_model: str, *, device: str, dtype: str) -> LocalEngines:
-    """Load (or reuse) the models for one ASR choice. Never downloads (AGENTS rule 6)."""
+    """Load (or reuse) the models for one ASR choice. Never downloads (AGENTS rule 6).
+
+    ``device`` is the configured one; ``rocm`` runs on torch's ``cuda`` device (``torch_device``).
+    """
     key = (str(cache_dir), asr_model, device, dtype)
     with _ENGINE_LOCK:
         if key in _ENGINE_CACHE:
             return _ENGINE_CACHE[key]
-        if device == "cpu":
+        try:
+            run_on = torch_device(device)
+        except DeviceError as exc:
+            raise ProviderError(str(exc)) from None
+        if run_on == "cpu":
             configure_threads()
+        else:
+            import torch
+
+            log.info("local models on %s: %s", device, torch.cuda.get_device_name(0))
+            disabled = disable_broken_rocm_kernels()
+            if disabled:
+                log.warning(
+                    "%s do not run on this GPU; using torch's generic kernels instead",
+                    ", ".join(disabled),
+                )
         try:
             s = spec(asr_model)
         except KeyError as exc:
@@ -119,7 +147,7 @@ def load_engines(cache_dir: Path, asr_model: str, *, device: str, dtype: str) ->
             if s.engine == "funasr":
                 from asr.providers.local.asr_paraformer import ParaformerAsr
 
-                asr: Any = ParaformerAsr(cache_dir, device=device)
+                asr: Any = ParaformerAsr(cache_dir, device=run_on)
                 aligner: Aligner | None = None
             elif s.engine == "faster_whisper":
                 if not engine_installed(asr_model):
@@ -129,19 +157,22 @@ def load_engines(cache_dir: Path, asr_model: str, *, device: str, dtype: str) ->
                     )
                 from asr.providers.local.asr_whisper import WhisperAsr
 
-                asr = WhisperAsr(cache_dir, asr_model, device=device, dtype=dtype)
+                whisper_on, fallback = whisper_device(device)
+                if fallback:
+                    log.warning("%s", fallback)
+                asr = WhisperAsr(cache_dir, asr_model, device=whisper_on, dtype=dtype)
                 aligner = None
             else:
                 from asr.providers.local.align import ForcedAligner
                 from asr.providers.local.asr_transformers import TransformersAsr
 
-                asr = TransformersAsr(cache_dir, asr_model, device=device, dtype=dtype)
-                aligner = ForcedAligner(cache_dir, device=device, dtype=dtype)
+                asr = TransformersAsr(cache_dir, asr_model, device=run_on, dtype=dtype)
+                aligner = ForcedAligner(cache_dir, device=run_on, dtype=dtype)
             engines = LocalEngines(
-                vad=FsmnVad(cache_dir, device=device),
+                vad=FsmnVad(cache_dir, device=run_on),
                 asr=asr,
                 aligner=aligner,
-                diarizer=CamPlusDiarizer(cache_dir, device=device),
+                diarizer=CamPlusDiarizer(cache_dir, device=run_on),
             )
         except ModelNotDownloaded as exc:
             raise ProviderError(str(exc)) from None
@@ -196,6 +227,10 @@ class LocalPipelineProvider:
         )
         terms = [t.term for t in options.terms]
         language = _language(options.language_hints)
+        if _is_whisper(self.asr_model) and self.device != "cpu":
+            _, fallback = whisper_device(self.device)
+            if fallback:
+                warnings.append(fallback)
         if _is_whisper(self.asr_model) and language != "en":
             warnings.append(
                 f"{self.asr_model} is the English-only route; set language_hints to ['en'] "

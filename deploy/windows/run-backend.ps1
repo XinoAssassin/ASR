@@ -6,7 +6,7 @@
   One-time setup (PowerShell, in the repository's backend folder):
     winget install --id=astral-sh.uv -e        # or: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
     cd D:\ASR\app\backend                 # repository checked out to D:\ASR\app; state goes to D:\ASR\data etc.
-    uv sync --frozen --no-dev --extra cpu --extra local    # NVIDIA: --extra cuda instead of --extra cpu
+    uv sync --frozen --no-dev --extra cpu --extra local    # NVIDIA: --extra cuda, AMD: --extra rocm instead of --extra cpu
 
   Models (explicit, once; same cache dir as below):
     $env:ASR_MODEL_CACHE_DIR = 'D:\ASR\models'
@@ -41,7 +41,7 @@ param(
     [string]$ApiKeyFile = '',
     # Browser origins of the SPA, comma-separated. The desktop app needs http://tauri.localhost.
     [string]$CorsOrigins = 'http://localhost:8080,http://127.0.0.1:8080,http://tauri.localhost',
-    [ValidateSet('cpu', 'cuda')][string]$Device = 'cpu',
+    [ValidateSet('cpu', 'cuda', 'rocm')][string]$Device = 'cpu',
     [ValidateSet('text', 'json')][string]$LogFormat = 'text',
     [string]$LogFile = 'D:\ASR\logs\asr.log'
 )

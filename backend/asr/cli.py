@@ -129,7 +129,9 @@ def transcribe(
         str | None,
         typer.Option(help="Local ASR model key (default: M4 choice for this hardware)."),
     ] = None,
-    device: Annotated[str, typer.Option(help="Local inference device: cpu or cuda.")] = "cpu",
+    device: Annotated[
+        str, typer.Option(help="Local inference device: cpu, cuda or rocm (AMD GPU).")
+    ] = "cpu",
 ) -> None:
     """Transcribe FILE and print (or write) the transcript."""
     from asr import writers
@@ -298,7 +300,9 @@ def batch(
     context: Annotated[str | None, typer.Option(help="Background text (≤ 2000 chars).")] = None,
     channels: Annotated[Channels, typer.Option(help="Channel handling.")] = Channels.auto,
     asr_model: Annotated[str | None, typer.Option(help="Local ASR model key.")] = None,
-    device: Annotated[str, typer.Option(help="Local inference device: cpu or cuda.")] = "cpu",
+    device: Annotated[
+        str, typer.Option(help="Local inference device: cpu, cuda or rocm (AMD GPU).")
+    ] = "cpu",
 ) -> None:
     """Transcribe many files with one loaded model; failures are reported, not fatal."""
     from asr import writers
@@ -413,8 +417,8 @@ def _local_builder(
     if is_url:
         err.print("[red]error:[/red] the local provider needs a file, not a URL")
         raise typer.Exit(2)
-    if device not in ("cpu", "cuda"):
-        err.print("[red]error:[/red] --device must be cpu or cuda")
+    if device not in ("cpu", "cuda", "rocm"):
+        err.print("[red]error:[/red] --device must be cpu, cuda or rocm")
         raise typer.Exit(2)
     if not models.local_stack_installed():
         err.print(
@@ -422,6 +426,14 @@ def _local_builder(
             "(uv sync --extra cpu --extra local)"
         )
         raise typer.Exit(2)
+    if device != "cpu":
+        from asr.providers.local.device import DeviceError, torch_device
+
+        try:
+            torch_device(device)
+        except DeviceError as exc:
+            err.print(f"[red]error:[/red] {exc}")
+            raise typer.Exit(2) from None
     from asr.providers.local.pipeline import default_asr_model
 
     cache = _model_cache_dir()

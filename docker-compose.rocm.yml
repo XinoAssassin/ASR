@@ -1,0 +1,41 @@
+# AMD GPU (ROCm) override for the backend, Linux hosts only. Needs the amdgpu kernel driver on the
+# host (the in-tree driver of a recent kernel is enough; Strix Halo needs >= 6.18.4). No ROCm install
+# on the host is required: the torch wheel in the image bundles the ROCm user-space libraries.
+# Check the host first: `ls -l /dev/kfd /dev/dri/renderD*` must list the devices.
+#
+#   echo "ASR_RENDER_GID=$(getent group render | cut -d: -f3)" >> .env
+#   docker compose -f docker-compose.yml -f docker-compose.rocm.yml up -d --build backend
+#   docker compose -f docker-compose.yml -f docker-compose.rocm.yml run --rm backend \
+#     asr models download fsmn-vad campplus qwen3-forced-aligner qwen3-asr-1.7b --mirror
+#
+# The image uses the rocm7.2 torch wheels (pyproject extra "rocm"); ROCm GPUs are driven through
+# torch's cuda device, in bfloat16 with Qwen3-ASR-1.7B by default. GET /api/system/hardware shows
+# whether the container sees the GPU. Supported GPUs and the HSA_OVERRIDE_GFX_VERSION escape hatch:
+# docs/DEPLOYMENT.md §8.
+services:
+  backend:
+    image: asr-backend:rocm
+    build:
+      target: backend-rocm
+    environment:
+      ASR_DEVICE: rocm
+      # Consumer GPU outside the ROCm support list: pretend to be the nearest supported ISA, e.g.
+      # 10.3.0 for RX 6700 XT / 6600 (gfx1031 / gfx1032), 11.0.0 for the Radeon 780M / 760M iGPU
+      # (gfx1103). Not needed for gfx1030, gfx1100-1102, gfx1150, gfx1151, gfx1200, gfx1201 or the
+      # Instinct cards: their kernels are in the wheel.
+      # HSA_OVERRIDE_GFX_VERSION: "11.0.0"
+      # Several GPUs: pick one (or set it via `devices:` below with a single render node).
+      # HIP_VISIBLE_DEVICES: "0"
+    devices:
+      - /dev/kfd # ROCm compute interface, shared by all GPUs
+      - /dev/dri # every GPU; for a single one list /dev/dri/renderD128 (etc.) instead
+    # The container user (uid 1000) needs the groups that own the device nodes on the HOST. Group
+    # names resolve inside the image, which has no `render` group, so pass the host's numeric gid:
+    # `getent group render | cut -d: -f3` (and `video`, usually 44, for older distributions).
+    group_add:
+      - video
+      - "${ASR_RENDER_GID:?set ASR_RENDER_GID to the host render group id: getent group render | cut -d: -f3}"
+    # Only if HIP fails with permission errors on memory-mapping syscalls (AMD lists it as optional
+    # for ROCm containers); it disables Docker's syscall filter for this container.
+    # security_opt:
+    #   - seccomp=unconfined

@@ -6,7 +6,7 @@ are in `PLAN.md`; security decisions referenced as `Dnn` are in `docs/EXECUTION_
 
 Contents: [1 Topology](#1-topology) · [2 Backend](#2-backend) · [3 Frontend](#3-frontend) ·
 [4 Configuration reference](#4-configuration-reference) · [5 Access control](#5-access-control-api-key-cors-hosts) ·
-[6 HTTPS and reverse proxy](#6-https-and-reverse-proxy) · [7 Models](#7-models) · [8 CPU vs CUDA](#8-cpu-vs-cuda) ·
+[6 HTTPS and reverse proxy](#6-https-and-reverse-proxy) · [7 Models](#7-models) · [8 CPU, CUDA and ROCm](#8-cpu-cuda-and-rocm) ·
 [9 Batch CLI](#9-batch-cli) · [10 Logs](#10-logs) · [11 Backup and upgrade](#11-backup-and-upgrade) ·
 [12 Checklist](#12-two-host-checklist) · [13 Verification status](#13-verification-status)
 
@@ -20,7 +20,7 @@ Contents: [1 Topology](#1-topology) · [2 Backend](#2-backend) · [3 Frontend](#
  Backend host ──▶ asr serve (FastAPI, one process)                   :8000, often behind nginx :443
     │               ├─ SQLite  ASR_DATA_DIR/asr.db
     │               ├─ uploads ASR_UPLOAD_ROOTS
-    │               ├─ local provider: models in ASR_MODEL_CACHE_DIR (CPU or CUDA)
+    │               ├─ local provider: models in ASR_MODEL_CACHE_DIR (CPU, CUDA or ROCm)
     │               └─ cloud provider: DashScope (key stays on this host)
  Desktop app (Tauri, origin http://tauri.localhost) ──▶ same backend API
 ```
@@ -77,6 +77,7 @@ Images (multi-stage `Dockerfile`):
 |---|---|---|
 | `backend-cpu` | `python:3.12-slim-bookworm` | backend + local model stack, CPU torch |
 | `backend-cuda` | `nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04` | same, cu126 torch wheels |
+| `backend-rocm` | `python:3.12-slim-bookworm` | same, rocm7.2 torch wheel (bundles the ROCm runtime; ~15 GB image) |
 | `frontend` | `nginx:1.30-alpine` | built SPA + runtime `config.js` |
 
 No OS ffmpeg is installed; decoding uses the FFmpeg bundled in PyAV wheels, with imageio-ffmpeg
@@ -86,6 +87,7 @@ as fallback (AGENTS rule 1). Model weights are not in the image.
 cp .env.example .env            # then edit: ASR_API_KEY, ASR_CORS_ORIGINS, ASR_BIND_ADDR, ...
 docker compose up -d --build backend                  # CPU backend
 docker compose -f docker-compose.yml -f docker-compose.cuda.yml up -d --build backend   # NVIDIA
+docker compose -f docker-compose.yml -f docker-compose.rocm.yml up -d --build backend   # AMD (ROCm)
 docker compose up -d --build frontend                 # static host (needs ASR_BACKEND_URL)
 docker compose up -d --build                          # both on one host
 ```
@@ -105,6 +107,11 @@ docker compose up -d --build                          # both on one host
 - CUDA needs the NVIDIA driver and NVIDIA Container Toolkit on the host;
   `docker-compose.cuda.yml` switches the build target to `backend-cuda`, sets `ASR_DEVICE=cuda` and
   reserves the GPUs.
+- ROCm needs only the amdgpu kernel driver on the host (no host ROCm install);
+  `docker-compose.rocm.yml` switches to `backend-rocm`, sets `ASR_DEVICE=rocm`, passes `/dev/kfd`
+  and `/dev/dri` and adds the `video` group plus the host's `render` gid, which it reads from
+  `ASR_RENDER_GID` (`getent group render | cut -d: -f3`; the image has no `render` group of its own).
+  See [§8](#8-cpu-cuda-and-rocm) for supported GPUs.
 - Behind a reverse proxy, override `command:` with `--forwarded-allow-ips` (commented in
   `docker-compose.yml`).
 - Download models into the volume before the first local job ([§7](#7-models)).
@@ -115,7 +122,7 @@ docker compose up -d --build                          # both on one host
 sudo useradd --system --create-home --home-dir /var/lib/asr asr
 sudo -u asr git clone <repo-url> /opt/asr        # needs /opt/asr owned by asr, or clone then chown
 cd /opt/asr/backend
-sudo -u asr uv sync --frozen --no-dev --extra cpu --extra local      # NVIDIA: --extra cuda
+sudo -u asr uv sync --frozen --no-dev --extra cpu --extra local      # NVIDIA: --extra cuda, AMD: --extra rocm
 sudo install -d -m 750 -o root -g asr /etc/asr
 sudo install -m 640 -o root -g asr /dev/null /etc/asr/asr.env
 sudoedit /etc/asr/asr.env      # ASR_API_KEY=..., ASR_CORS_ORIGINS=..., ASR_PROVIDER_DEFAULT=local, ...
@@ -155,6 +162,47 @@ never appears on a command line, and starts `asr serve`. Open the port in Window
 logon, register a scheduled task that starts the script with `powershell.exe -WindowStyle Hidden`.
 Upload roots on Windows are `;`-separated (`D:\ASR\uploads;\\nas\audio`).
 
+### 2.4 Windows native backend with an AMD GPU (ROCm)
+
+The main desktop setup: website, desktop app and a local backend on the same Windows PC (e.g. a
+Ryzen AI Max / Strix Halo with Radeon 8060S). ROCm runs natively on Windows; WSL is not needed.
+
+```powershell
+# AMD Adrenalin driver with ROCm support installed; Python 3.12 (py -3.12) and uv on PATH
+cd D:\ASR\app\backend
+uv sync --frozen --no-dev --extra rocm --extra local     # torch 2.14.0+rocm10.1.0 from AMD's index, ~5 GB venv
+.\.venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+$env:ASR_MODEL_CACHE_DIR = 'D:\ASR\models'
+.\.venv\Scripts\asr.exe models download fsmn-vad campplus qwen3-forced-aligner qwen3-asr-1.7b --mirror
+powershell -ExecutionPolicy Bypass -File ..\deploy\windows\run-backend.ps1 -Device rocm
+```
+
+- The `rocm` extra is platform-specific (§8.1): on Windows it installs AMD's torch build for
+  gfx1151 only; other AMD GPUs need the target changed in `pyproject.toml` first.
+- Desktop app sidecar: set its `command` to `D:\ASR\app\backend\.venv\Scripts\asr.exe`, `args`
+  `serve --port 8000`, and put `ASR_DEVICE=rocm` (and `ASR_MODEL_CACHE_DIR`) into the app's
+  environment or `backend\.env`; or leave the device on `cpu` and pick ROCm per job / in Settings.
+  The Settings page lists what the backend can use (`GET /api/system/hardware`).
+- `asr transcribe file.m4a --provider local --device rocm` works the same from the CLI.
+- Measured 2026-10-30 on a Ryzen AI MAX+ 392 / Radeon 8060S (gfx1151, 64 GB, Adrenalin driver),
+  60 s of the 4-speaker test clip, full pipeline (VAD, ASR, alignment, CAM++ diarization), second
+  run (the first is ~10 % slower):
+
+  | Device | Model | RTF | Load | GPU memory |
+  |---|---|---|---|---|
+  | rocm (Windows) | Qwen3-ASR-1.7B bf16 | 0.17–0.18 | 20 s | 6.0 GB |
+  | rocm (Windows) | Qwen3-ASR-0.6B bf16 | 0.13 | 18 s | 3.7 GB |
+  | cpu (Windows, same venv, 16 threads) | Qwen3-ASR-1.7B bf16 | 0.55 | 11 s | – |
+  | cpu (WSL2, CPU torch 2.14.1, 16 threads) | Qwen3-ASR-1.7B bf16 | 0.44 | 6 s | – |
+
+  The CPU and ROCm transcripts match (same 25 segments and 4 speakers, 98 % identical text).
+- AMD's Windows build has two broken kernel libraries on gfx1151, and the backend works around
+  both when it loads the models (one warning in the log): the fused flash / memory-efficient
+  attention kernels have no code object for the GPU ("device kernel image is invalid"), so
+  attention uses torch's math kernel; MIOpen cannot compile its batch-norm kernels at run time
+  ("'type_traits' file not found"; MIOpen prints this once into the log), so convolution and
+  batch norm use torch's native HIP kernels.
+
 ### 2.1 Prebuilt images (GitHub Container Registry)
 
 `.github/workflows/docker.yml` builds the images on every push to `main` (and on `v*` tags) and
@@ -164,6 +212,7 @@ publishes them to `ghcr.io/xinoassassin/` (linux/amd64):
 |---|---|---|
 | `asr-backend` | `cpu`, `sha-<commit>-cpu`, `<version>-cpu` | API + local models on CPU |
 | `asr-backend` | `cuda`, `sha-<commit>-cuda`, `<version>-cuda` | API on an NVIDIA GPU (driver + NVIDIA Container Toolkit on the host) |
+| `asr-backend` | `rocm`, `sha-<commit>-rocm`, `<version>-rocm` | API on an AMD GPU (amdgpu kernel driver on the host; `devices:` / `group_add:` block in the compose file, [§8](#8-cpu-cuda-and-rocm)) |
 | `asr-frontend` | `latest`, `sha-<commit>`, `<version>` | SPA on nginx |
 
 On a NAS (or any Docker host) use `deploy/ghcr/docker-compose.yml`: put it in a folder with a `.env`
@@ -224,10 +273,10 @@ in the shell that runs them.
 | `ASR_UPLOAD_ROOTS` | `<data>/uploads` | Directories uploads may be written to / registered from, `os.pathsep`-separated (`:` Linux, `;` Windows). Must not contain `ASR_DATA_DIR` (startup error). |
 | `ASR_MODEL_CACHE_DIR` | `./models` | Local model weights, layout `<hub>/<repo>`. |
 | `ASR_PROVIDER_DEFAULT` | `cloud` | Default provider for new jobs (`cloud`/`local`); Settings can override. |
-| `ASR_DEVICE` | `cpu` | Local inference device (`cpu`/`cuda`); Settings can override. |
+| `ASR_DEVICE` | `cpu` | Local inference device (`cpu`/`cuda`/`rocm`); Settings can override. `GET /api/system/hardware` lists what this server can actually use. |
 | `ASR_DECODER` | `pyav` | `pyav` or `imageio` (bundled ffmpeg either way). |
 | `ASR_TORCH_THREADS` | min(16, CPUs) | *env only.* CPU inference threads. |
-| `ASR_LOCAL_DTYPE` | `auto` | *env only.* `auto`/`float32`/`bfloat16`/`float16` ([§8](#8-cpu-vs-cuda)). |
+| `ASR_LOCAL_DTYPE` | `auto` | *env only.* `auto`/`float32`/`bfloat16`/`float16` ([§8](#8-cpu-cuda-and-rocm)). |
 | `ASR_LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`. |
 | `ASR_LOG_FORMAT` | `text` | `text` or `json` (one object per line). |
 | `ASR_LOG_FILE` | empty | Optional log file, rotated at 10 MB, 5 backups; stdout/stderr logging continues. |
@@ -364,7 +413,12 @@ The set a job needs is `fsmn-vad` + the ASR model + `qwen3-forced-aligner` (exce
 Copying a populated `ASR_MODEL_CACHE_DIR` to an offline host works: "downloaded" means the weights
 file is present and no partial files remain.
 
-## 8. CPU vs CUDA
+## 8. CPU, CUDA and ROCm
+
+`GET /api/system/hardware` reports, for `cpu`, `cuda` and `rocm`, whether this server can use it
+(with the CPU / GPU name, or why not, e.g. "torch 2.14.1+cpu is a CPU build"); `default` is the
+usable GPU, else `cpu`. It is probed once per server process (torch import, no downloads), and a
+local job whose device is unavailable is rejected with 422 and that reason.
 
 - `ASR_DEVICE=cpu` works everywhere. Default ASR model: Qwen3-ASR-1.7B in bfloat16 on CPUs with
   native BF16 (AVX512_BF16 / AMX; RTF ≈ 0.43 in the M4 bake-off), otherwise Qwen3-ASR-0.6B in
@@ -372,10 +426,63 @@ file is present and no partial files remain.
   process on small hosts.
 - `ASR_DEVICE=cuda` (CUDA image or `uv sync --extra cuda`): bfloat16 and Qwen3-ASR-1.7B when the
   GPU supports bf16 (Ampere and newer), otherwise float16 and Qwen3-ASR-0.6B.
+- `ASR_DEVICE=rocm` (ROCm image, or `uv sync --extra rocm --extra local`): AMD GPUs. ROCm builds of
+  torch drive HIP GPUs through torch's `cuda` device, so `rocm` runs there after checking that the
+  installed torch is a ROCm build (`torch.version.hip`); a clear error names the fix otherwise.
+  torch reports bf16 on every HIP GPU, so the default is bfloat16 and Qwen3-ASR-1.7B; on RDNA2
+  (gfx1030), which has no bf16 matrix units, try `ASR_LOCAL_DTYPE=float16`. faster-whisper
+  (CTranslate2) has no ROCm build: on `rocm` the Whisper model runs on the CPU (VAD and
+  diarization stay on the GPU) and the job carries a warning.
 - SeACo-Paraformer always runs in float32 (its CIF predictor breaks in bf16; D31). Force a dtype
   with `ASR_LOCAL_DTYPE` only for experiments.
 - Local jobs run one at a time; cloud jobs run concurrently.
 - The CUDA path has not yet been verified on an NVIDIA host (PLAN M6).
+
+### 8.1 ROCm builds
+
+| Platform | torch build | Index (pyproject `[tool.uv.index]`) | GPU kernels |
+|---|---|---|---|
+| Linux (image `backend-rocm`, `uv sync --extra rocm`) | `2.14.1+rocm7.2` | `https://download.pytorch.org/whl/rocm7.2` (`pytorch-rocm`) | one 6 GB wheel with the ROCm 7.2.1 libraries; torch built for gfx900/906/908/90a/942/950, gfx1030, gfx1100–1103, gfx1150/1151, gfx1200/1201 |
+| Windows (native, `uv sync --extra rocm`) | `2.14.0+rocm10.1.0` | `https://stable.repo.amd.com/rocm/whl-next/` (`amd-rocm-windows`) | AMD's TheRock wheels: torch + `rocm-sdk-*` (~1.2 GB), kernels for gfx1151 only (`amd-torch-device-gfx1151`, `rocm-sdk-device-gfx1151`) |
+
+- download.pytorch.org has no Windows ROCm wheels; AMD publishes them, and for Windows the newest
+  torch is 2.14.0 (not 2.14.1, the pin of every other flavour). The Windows wheel set is tied to
+  one GPU target: for another AMD GPU replace `gfx1151` in the `amd-torch-device-gfx1151` and
+  `rocm-sdk-device-gfx1151` entries of `backend/pyproject.toml` (extra and sources) with its
+  target, e.g. `gfx1100` for RX 7900, `gfx1201` for RX 9070, and run `uv lock`.
+- PyTorch 2.14 also publishes `rocm7.14` wheels (TheRock packaging: torch 1.4 GB plus
+  `rocm[device-all]`, which pulls every GPU family's kernels, several GB more). The Linux image
+  stays on the self-contained `rocm7.2` wheel.
+- Supported GPUs (Linux, ROCm 7.2 matrix): Instinct MI100/MI200/MI300/MI350 (gfx908/90a/942/950),
+  Radeon PRO W6800/V620 (gfx1030), RX 7900/7800/7700 and PRO W7900/W7800/W7700 (gfx1100/1101),
+  RX 9070/9060 and AI PRO R9700 (gfx1200/1201). ROCm 7.14 / 10.x add RX 7600 (gfx1102) and the
+  Ryzen APUs: Ryzen AI Max (Strix Halo, Radeon 8060S/8050S, gfx1151), Ryzen AI 300 (Radeon 890M/880M,
+  gfx1150), Radeon 780M/760M (gfx1103)
+  ([7.2 matrix](https://rocm.docs.amd.com/en/docs-7.2.0/compatibility/compatibility-matrix.html),
+  [7.14 matrix](https://rocm.docs.amd.com/en/docs-7.14.0/compatibility/compatibility-matrix.html)).
+  The `rocm7.2` wheel still ships rocBLAS / hipBLASLt kernels for gfx1150/1151 (checked in its file
+  list), and AMD lists ROCm 7.2.0 on Strix Halo as supported on Ubuntu 24.04 OEM, Ubuntu 26.04 and
+  any distribution with kernel ≥ 6.18.4; older kernels lack the KFD fixes and compute may fail to
+  start ([Strix Halo guide](https://rocm.docs.amd.com/en/docs-7.2.0/how-to/system-optimization/strixhalo.html)).
+  On Strix Halo keep the BIOS VRAM carve-out small and raise the GTT limit instead
+  (`amd-ttm --set <GB>`, same guide): PyTorch allocates from GTT.
+- GPUs outside the list: `HSA_OVERRIDE_GFX_VERSION` makes the runtime treat the GPU as the nearest
+  supported ISA (Linux only), e.g. `10.3.0` for RX 6700 XT / 6600 (gfx1031/1032), `11.0.0` for
+  the 780M (gfx1103). Unsupported by AMD; wrong values crash or compute garbage.
+- Kernel probe: when local models load on a ROCm GPU, the backend runs flash attention,
+  memory-efficient attention and MIOpen batch norm / conv once on tiny inputs and switches off
+  whatever fails (found on Windows, §2.4), so a missing GPU kernel degrades speed instead of
+  failing every job.
+- Docker: pass `/dev/kfd` and `/dev/dri` (or single `/dev/dri/renderD*` nodes), add `video` and
+  the host's numeric `render` gid (`ASR_RENDER_GID`); `--security-opt seccomp=unconfined` is
+  optional per AMD's container guide. MIOpen keeps its compiled-kernel databases in
+  `/models/.cache/miopen` so restarts do not recompile them.
+- WSL2: ROCm inside WSL is a technical preview and needs AMD's WSL driver stack; this project's
+  development WSL has no `/dev/kfd`, so the AMD GPU is used from the Windows side (§2.4).
+- Strix Halo: running the NPU (FastFlowLM / Lemonade) and ROCm on the iGPU at the same time causes
+  NPU timeouts and, in one report, a machine-check hang
+  ([xdna-driver #1605](https://github.com/amd/xdna-driver/issues/1605), open as of 2026-10);
+  see `docs/research/amd-npu.md`.
 
 ## 9. Batch CLI
 
@@ -483,6 +590,13 @@ Verified 2026-10-29 (M8 acceptance, simulated two hosts on one PC):
   `Access-Control-Allow-Origin`; auth-off mode via the LAN address → 403 (Host), cross-site POST →
   403; `--forwarded-allow-ips` puts the `X-Forwarded-For` address in the access log; JSON log lines
   carry `job_id`; `asr batch` on two clips wrote txt/srt/json and skipped them on the rerun.
+
+ROCm, 2026-10-30: the Windows native backend (`uv sync --extra rocm --extra local`, torch
+2.14.0+rocm10.1.0) ran on the Radeon 8060S: `GET /api/system/hardware` reported rocm, and the
+full local pipeline ran on the GPU ([§2.4](#24-windows-native-backend-with-an-amd-gpu-rocm) has the
+numbers). The Linux `rocm` extra and the `backend-rocm` image were only resolved (`uv lock`) and
+checked for the gfx1151 kernels in the wheel's file list: no Linux host with `/dev/kfd` was
+available, so the image was neither built nor run.
 
 Not verified: building and running the Docker images (no Docker daemon on the development machine;
 the compose files were validated against the compose-spec schema only), the nginx examples (no
