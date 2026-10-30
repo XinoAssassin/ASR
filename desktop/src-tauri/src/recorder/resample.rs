@@ -141,7 +141,17 @@ impl Resampler {
             let drop = (keep_from - self.buf_start) as usize;
             self.buf.drain(..drop);
             self.buf_start = keep_from;
+            // A long silence fill grew the buffer; give the memory back.
+            if self.buf.capacity() > (1 << 18) && self.buf.capacity() > 4 * self.buf.len() {
+                self.buf.shrink_to((self.buf.len() * 2).max(16384));
+            }
         }
+    }
+
+    /// Allocated input buffer (samples), for memory-bound tests.
+    #[cfg(test)]
+    pub fn capacity(&self) -> usize {
+        self.buf.capacity()
     }
 
     /// Kernel half width in input samples (look-ahead needed before an output is produced).

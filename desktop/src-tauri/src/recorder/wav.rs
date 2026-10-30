@@ -2,7 +2,7 @@
 //! playable file, plus repair / streaming read for recovery and FLAC conversion.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 pub const HEADER_LEN: u64 = 44;
@@ -26,69 +26,178 @@ fn header(channels: u16, rate: u32, data_len: u32) -> [u8; 44] {
     h
 }
 
-pub struct WavWriter {
-    file: BufWriter<File>,
-    channels: u16,
-    rate: u32,
-    data_len: u64,
-    patched_len: u64,
+/// Where a [`WavWriter`] puts its bytes (a `File`; tests inject failing storage).
+pub trait Storage: Write + Seek + Send {
+    fn sync_data(&mut self) -> io::Result<()>;
 }
 
-impl WavWriter {
+impl Storage for File {
+    fn sync_data(&mut self) -> io::Result<()> {
+        File::sync_data(self)
+    }
+}
+
+impl<S: Storage + ?Sized> Storage for Box<S> {
+    fn sync_data(&mut self) -> io::Result<()> {
+        (**self).sync_data()
+    }
+}
+
+/// Flush to the file once this much is buffered.
+const FLUSH_AT: usize = 256 * 1024;
+
+/// Appends interleaved PCM. Bytes are buffered here and leave the buffer only once the OS has
+/// accepted them, so a failed / short write (disk full, network share gone) loses nothing: the
+/// unwritten tail stays buffered and the next `write` / `checkpoint` retries it exactly where
+/// the file ends. The header is only ever patched to the length actually on disk.
+pub struct WavWriter<F: Storage = File> {
+    file: F,
+    channels: u16,
+    rate: u32,
+    buf: Vec<u8>,
+    /// PCM bytes the OS has accepted (the file is `HEADER_LEN + flushed` long).
+    flushed: u64,
+    patched_len: u64,
+    /// The file position is not known to be at the end of the data (after a header patch or
+    /// an error): seek before the next data write.
+    reseek: bool,
+}
+
+impl WavWriter<File> {
     pub fn create(path: &Path, channels: u16, rate: u32) -> io::Result<Self> {
-        let mut f = OpenOptions::new().write(true).create_new(true).open(path)?;
-        f.write_all(&header(channels, rate, 0))?;
-        f.sync_all()?;
+        let f = OpenOptions::new().write(true).create_new(true).open(path)?;
+        let w = Self::with_storage(f, channels, rate)?;
+        w.file.sync_all()?;
+        Ok(w)
+    }
+}
+
+impl<F: Storage> WavWriter<F> {
+    /// Write the initial header to `file` (positioned at 0).
+    pub fn with_storage(mut file: F, channels: u16, rate: u32) -> io::Result<Self> {
+        file.write_all(&header(channels, rate, 0))?;
         Ok(Self {
-            file: BufWriter::with_capacity(256 * 1024, f),
+            file,
             channels,
             rate,
-            data_len: 0,
+            buf: Vec::with_capacity(FLUSH_AT),
+            flushed: 0,
             patched_len: 0,
+            reseek: false,
         })
     }
 
-    /// Append interleaved samples.
+    /// Append interleaved samples. They are always accepted (buffered); an error only means
+    /// the buffered data could not be flushed yet, it is retried by the next call.
     pub fn write(&mut self, samples: &[i16]) -> io::Result<()> {
         debug_assert_eq!(samples.len() % self.channels as usize, 0);
-        let mut bytes = Vec::with_capacity(samples.len() * 2);
+        self.buf.reserve(samples.len() * 2);
         for s in samples {
-            bytes.extend_from_slice(&s.to_le_bytes());
+            self.buf.extend_from_slice(&s.to_le_bytes());
         }
-        self.file.write_all(&bytes)?;
-        self.data_len += bytes.len() as u64;
+        if self.buf.len() >= FLUSH_AT {
+            self.flush_data()?;
+        }
         Ok(())
     }
 
+    /// Hand buffered bytes to the OS; on error the unwritten rest stays buffered.
+    fn flush_data(&mut self) -> io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        if self.reseek {
+            self.file.seek(SeekFrom::Start(HEADER_LEN + self.flushed))?;
+            self.reseek = false;
+        }
+        let mut done = 0;
+        let res = loop {
+            if done == self.buf.len() {
+                break Ok(());
+            }
+            match self.file.write(&self.buf[done..]) {
+                Ok(0) => {
+                    break Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "recording file accepts no more data",
+                    ))
+                }
+                Ok(n) => done += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => break Err(e),
+            }
+        };
+        self.buf.drain(..done);
+        self.flushed += done as u64;
+        if res.is_err() {
+            self.reseek = true;
+        }
+        if self.buf.is_empty() && self.buf.capacity() > 4 * FLUSH_AT {
+            // A long outage grew the buffer; give the memory back.
+            self.buf.shrink_to(FLUSH_AT);
+        }
+        res
+    }
+
+    /// Frames on disk (accepted by the OS).
     pub fn frames(&self) -> u64 {
-        self.data_len / (self.channels as u64 * 2)
+        self.flushed / (self.channels as u64 * 2)
+    }
+
+    /// Frames accepted by `write` but not yet on disk.
+    pub fn pending_frames(&self) -> u64 {
+        self.buf.len() as u64 / (self.channels as u64 * 2)
     }
 
     /// Flush buffered data and patch the RIFF/data sizes. `sync` also forces it to disk.
     pub fn checkpoint(&mut self, sync: bool) -> io::Result<()> {
-        self.file.flush()?;
-        if self.data_len != self.patched_len {
-            let f = self.file.get_mut();
-            let h = header(self.channels, self.rate, clamp_u32(self.data_len));
-            f.seek(SeekFrom::Start(0))?;
-            f.write_all(&h)?;
-            f.seek(SeekFrom::End(0))?;
-            self.patched_len = self.data_len;
+        self.flush_data()?;
+        if self.flushed != self.patched_len {
+            let h = header(self.channels, self.rate, clamp_u32(self.flushed));
+            self.reseek = true;
+            self.file.seek(SeekFrom::Start(0))?;
+            self.file.write_all(&h)?;
+            self.file.seek(SeekFrom::Start(HEADER_LEN + self.flushed))?;
+            self.reseek = false;
+            self.patched_len = self.flushed;
         }
         if sync {
-            self.file.get_ref().sync_data()?;
+            self.file.sync_data()?;
         }
         Ok(())
     }
 
+    /// Final checkpoint; returns the frames on disk. On error the data that reached the disk
+    /// is still a valid (repairable) WAV.
     pub fn finish(mut self) -> io::Result<u64> {
         self.checkpoint(true)?;
         Ok(self.frames())
     }
 }
 
+impl<F: Storage> Drop for WavWriter<F> {
+    /// Best effort (an unwinding recorder thread): whatever is buffered goes to the file. The
+    /// header may then lag behind; [`repair`] re-derives it from the file length.
+    fn drop(&mut self) {
+        let _ = self.flush_data();
+    }
+}
+
+/// Largest data size a RIFF header can state; [`WavWriter`] saturates here past ~4 GiB.
+const SATURATED: u32 = u32::MAX - 36;
+
 fn clamp_u32(v: u64) -> u32 {
-    v.min(u32::MAX as u64 - 36) as u32
+    v.min(SATURATED as u64) as u32
+}
+
+/// PCM payload length: the header's value, or (header saturated: > 4 GiB) the file length.
+fn data_len(header_len: u32, file_len: u64, block: u64) -> u64 {
+    let from_file = (file_len.saturating_sub(HEADER_LEN) / block) * block;
+    if header_len >= SATURATED {
+        from_file
+    } else {
+        ((header_len as u64 / block) * block).min(from_file)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,8 +261,15 @@ impl WavReader {
         }
         let channels = u16::from_le_bytes([h[22], h[23]]);
         let rate = u32::from_le_bytes([h[24], h[25], h[26], h[27]]);
-        let data = u32::from_le_bytes([h[40], h[41], h[42], h[43]]) as u64;
+        if channels == 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "0 channels"));
+        }
         let block = channels as u64 * 2;
+        let data = data_len(
+            u32::from_le_bytes([h[40], h[41], h[42], h[43]]),
+            f.metadata()?.len(),
+            block,
+        );
         Ok(Self {
             file: io::BufReader::with_capacity(256 * 1024, f),
             info: WavInfo {
@@ -161,7 +277,7 @@ impl WavReader {
                 rate,
                 frames: data / block,
             },
-            remaining: (data / block) * block,
+            remaining: data,
         })
     }
 
@@ -191,7 +307,7 @@ mod tests {
         assert_eq!(r.info.frames, 2);
         // More data written after the last checkpoint, then a "crash" (no finish) with a torn frame.
         w.write(&[3, -3, 4, -4]).unwrap();
-        w.file.flush().unwrap();
+        w.flush_data().unwrap();
         drop(w);
         {
             let mut f = OpenOptions::new().append(true).open(&p).unwrap();
@@ -221,5 +337,125 @@ mod tests {
         std::fs::write(&p, b"keep").unwrap();
         assert!(WavWriter::create(&p, 1, 16000).is_err());
         assert_eq!(std::fs::read(&p).unwrap(), b"keep");
+    }
+
+    /// In-memory storage that fails or accepts only part of a write on demand.
+    struct Flaky {
+        data: io::Cursor<Vec<u8>>,
+        fail: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl Write for Flaky {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            use std::sync::atomic::Ordering;
+            match self.fail.load(Ordering::SeqCst) {
+                0 => self.data.write(b),
+                n => {
+                    self.fail.store(n - 1, Ordering::SeqCst);
+                    if n % 2 == 0 && b.len() > 3 {
+                        // short write of an odd byte count (splits a sample)
+                        self.data.write(&b[..3])
+                    } else {
+                        Err(io::Error::other("disk full"))
+                    }
+                }
+            }
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Seek for Flaky {
+        fn seek(&mut self, p: SeekFrom) -> io::Result<u64> {
+            self.data.seek(p)
+        }
+    }
+
+    impl Storage for Flaky {
+        fn sync_data(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn failed_and_short_writes_lose_and_duplicate_nothing() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let fail = std::sync::Arc::new(AtomicU32::new(0));
+        let st = Flaky {
+            data: io::Cursor::new(Vec::new()),
+            fail: fail.clone(),
+        };
+        let mut w = WavWriter::with_storage(st, 2, 16000).unwrap();
+        let mut expect: Vec<i16> = Vec::new();
+        let mut k = 0i16;
+        let mut errors = 0;
+        for round in 0..40 {
+            if round % 7 == 3 {
+                fail.store(5, Ordering::SeqCst);
+            }
+            let chunk: Vec<i16> = (0..2 * 1000)
+                .map(|_| {
+                    k = k.wrapping_add(1);
+                    k
+                })
+                .collect();
+            expect.extend_from_slice(&chunk);
+            if w.write(&chunk).is_err() {
+                errors += 1;
+            }
+            if w.checkpoint(round % 5 == 0).is_err() {
+                errors += 1;
+            }
+        }
+        assert!(errors > 0);
+        fail.store(0, Ordering::SeqCst);
+        w.checkpoint(true).unwrap();
+        assert_eq!(w.pending_frames(), 0);
+        assert_eq!(w.frames(), expect.len() as u64 / 2);
+        let bytes = w.file.data.get_ref().clone();
+        assert_eq!(bytes.len() as u64, HEADER_LEN + expect.len() as u64 * 2);
+        assert_eq!(
+            u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize,
+            expect.len() * 2
+        );
+        let got: Vec<i16> = bytes[44..]
+            .chunks(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert!(got == expect, "payload differs");
+    }
+
+    #[test]
+    fn data_len_uses_file_length_when_header_saturated() {
+        assert_eq!(data_len(SATURATED, 5_000_000_000, 4), 4_999_999_956);
+        assert_eq!(data_len(u32::MAX, 5_000_000_000, 4), 4_999_999_956);
+        assert_eq!(data_len(400, 10_000, 4), 400);
+        assert_eq!(data_len(400, 44 + 100, 4), 100); // truncated file
+    }
+
+    /// A > 4 GiB (sparse) recording: repair and the reader both see every frame.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn over_4gib_wav_is_read_in_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("big.partial.wav");
+        let w = WavWriter::create(&p, 2, 16000).unwrap();
+        drop(w);
+        let len = 5_000_000_000u64;
+        OpenOptions::new()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_len(len)
+            .unwrap();
+        let frames = (len - HEADER_LEN) / 4;
+        let info = repair(&p).unwrap();
+        assert_eq!(info.frames, frames);
+        let mut r = WavReader::open(&p).unwrap();
+        assert_eq!(r.info.frames, frames);
+        assert_eq!(r.remaining, frames * 4);
+        let mut buf = Vec::new();
+        assert_eq!(r.read_bytes(10, &mut buf).unwrap(), 10);
     }
 }

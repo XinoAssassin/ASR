@@ -251,7 +251,8 @@ pub fn open(
                     return Err("microphone capture needs macOS 15 (ScreenCaptureKit)".into());
                 }
                 config.setCaptureMicrophone(true);
-                if let Some(id) = device {
+                // The listed "default" entry is not an SCK device id.
+                if let Some(id) = super::capture::explicit_device(device) {
                     config.setMicrophoneCaptureDeviceID(Some(&NSString::from_str(id)));
                 }
                 SCStreamOutputType::Microphone
@@ -325,7 +326,7 @@ pub fn devices() -> Result<DeviceList, String> {
             is_default: true,
         }],
         inputs: vec![Device {
-            id: "default".into(),
+            id: super::capture::DEFAULT_DEVICE.into(),
             name: "Default microphone".into(),
             is_default: true,
         }],

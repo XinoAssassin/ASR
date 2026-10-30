@@ -26,6 +26,49 @@ pub trait CaptureSource: Send {
     }
 }
 
+/// Device id meaning "the system default" (listed by backends without real ids, e.g. macOS).
+pub const DEFAULT_DEVICE: &str = "default";
+
+/// `device` as an explicit device id; None means the default device (also when the caller
+/// passes the listed [`DEFAULT_DEVICE`] entry or an empty string).
+pub fn explicit_device(device: Option<&str>) -> Option<&str> {
+    device.filter(|d| !d.is_empty() && *d != DEFAULT_DEVICE)
+}
+
+/// Fallback packet timestamps for devices that sometimes report none (WASAPI
+/// `timestamp == 0` / `timestamp_error`). Packets read back to back in one poll are stamped
+/// consecutively, ending at the clock reading taken after the last one, so a backlog that
+/// built up during a stall keeps its real spacing (stamping each `now - len` would pile it onto
+/// one end time and the timeline would drop all but the last packet). Across polls the stamps
+/// continue from the previous end and re-anchor to the clock only when they are off by more
+/// than about two packet periods (a real gap, e.g. idle loopback).
+#[derive(Debug, Default)]
+pub struct BatchStamper {
+    prev_end: Option<f64>,
+}
+
+impl BatchStamper {
+    /// `packets[i]` = (frames, device timestamp if valid) in read order; `now` was read after
+    /// the last packet. Returns the start time of each packet.
+    pub fn stamp(&mut self, now: f64, rate: f64, packets: &[(usize, Option<f64>)]) -> Vec<f64> {
+        let mut after: usize = packets.iter().map(|p| p.0).sum();
+        let mut out = Vec::with_capacity(packets.len());
+        for &(frames, device_t) in packets {
+            let len_s = frames as f64 / rate;
+            let est = now - after as f64 / rate;
+            after -= frames;
+            let t = match (device_t, self.prev_end) {
+                (Some(t), _) => t,
+                (None, Some(p)) if (est - p).abs() <= 2.0 * len_s.max(0.01) => p,
+                (None, _) => est,
+            };
+            self.prev_end = Some(t + len_s);
+            out.push(t);
+        }
+        out
+    }
+}
+
 /// Monotonic clock shared with the capture timestamps (QPC on Windows), in seconds.
 #[cfg(windows)]
 pub fn now() -> f64 {
@@ -164,5 +207,59 @@ pub fn process_exists(pid: u32) -> bool {
     {
         let _ = pid;
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const R: f64 = 48000.0;
+
+    #[test]
+    fn backlog_keeps_spacing_and_stamps_continue() {
+        let mut st = BatchStamper::default();
+        // steady state: one 10 ms packet per poll, read ~2 ms after it completed
+        let mut now = 1.0;
+        let t = st.stamp(now, R, &[(480, None)]);
+        assert!((t[0] - 0.99).abs() < 1e-9);
+        for _ in 0..5 {
+            now += 0.01 + 0.002; // jitter: the next one is consecutive anyway
+            let t = st.stamp(now, R, &[(480, None)]);
+            assert!(t[0] < now - 0.01 + 1e-9);
+        }
+        let end = st.prev_end.unwrap();
+        // 120 ms stall: 12 packets read in one go must stay 10 ms apart, continuing the stream
+        now = end + 0.12 + 0.001;
+        let pk = vec![(480usize, None); 12];
+        let t = st.stamp(now, R, &pk);
+        assert!((t[0] - end).abs() < 1e-9, "{} vs {end}", t[0]);
+        for w in t.windows(2) {
+            assert!((w[1] - w[0] - 0.01).abs() < 1e-9);
+        }
+        // idle loopback for 1 s: the next packet re-anchors to the clock (gap preserved)
+        let end = st.prev_end.unwrap();
+        now = end + 1.0;
+        let t = st.stamp(now, R, &[(480, None)]);
+        assert!((t[0] - (now - 0.01)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn device_timestamps_win_and_feed_continuity() {
+        let mut st = BatchStamper::default();
+        let t = st.stamp(5.0, R, &[(480, Some(4.0)), (480, None)]);
+        assert_eq!(t[0], 4.0);
+        // the fallback packet estimates 4.99, far from 4.01: re-anchored to the clock
+        assert!((t[1] - 4.99).abs() < 1e-9);
+        let t = st.stamp(5.012, R, &[(480, None)]);
+        assert!((t[0] - 5.0).abs() < 1e-9, "{}", t[0]);
+    }
+
+    #[test]
+    fn default_device_alias_maps_to_none() {
+        assert_eq!(explicit_device(Some("default")), None);
+        assert_eq!(explicit_device(Some("")), None);
+        assert_eq!(explicit_device(None), None);
+        assert_eq!(explicit_device(Some("mic-1")), Some("mic-1"));
     }
 }

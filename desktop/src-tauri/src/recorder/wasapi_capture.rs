@@ -9,7 +9,7 @@ use wasapi::{
 };
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
-use super::capture::{CaptureSource, Packet, SourceKind};
+use super::capture::{BatchStamper, CaptureSource, Packet, SourceKind};
 use crate::ipc::{AudioProcess, Device, DeviceList};
 
 /// QPC in seconds; the same clock (in 100 ns units) as WASAPI's `u64QPCPosition`.
@@ -46,11 +46,14 @@ pub struct WasapiSource {
     block: usize,
     raw: Vec<u8>,
     device_id: Option<String>,
+    stamper: BatchStamper,
     /// Event handle of event-mode clients (process loopback); kept alive, never waited on.
     _event: Option<Handle>,
 }
 
-// SAFETY: the COM objects are created on the recorder thread (MTA) and only used there.
+// SAFETY: the COM objects live in the multithreaded apartment (every thread that opens or
+// polls a source calls `capture::init_thread`); a source is opened on a helper thread and then
+// moved to, and only used from, the recorder thread.
 unsafe impl Send for WasapiSource {}
 
 fn e2s(e: impl std::fmt::Display) -> String {
@@ -105,6 +108,7 @@ impl WasapiSource {
             block: format.get_blockalign() as usize,
             raw: Vec::new(),
             device_id,
+            stamper: BatchStamper::default(),
             _event: None,
         })
     }
@@ -137,6 +141,7 @@ impl WasapiSource {
             block: format.get_blockalign() as usize,
             raw: Vec::new(),
             device_id: None,
+            stamper: BatchStamper::default(),
             _event: Some(event),
         })
     }
@@ -182,32 +187,40 @@ impl CaptureSource for WasapiSource {
     }
 
     fn poll(&mut self, out: &mut Vec<Packet>) -> Result<(), String> {
-        loop {
-            let next = self
-                .capture
-                .get_next_packet_size()
-                .map_err(e2s)?
-                .unwrap_or(0) as usize;
+        // Read everything ready first: fallback timestamps are assigned per batch.
+        let mut batch: Vec<(usize, Option<f64>)> = Vec::new();
+        let mut samples: Vec<Vec<f32>> = Vec::new();
+        let res = loop {
+            let next = match self.capture.get_next_packet_size() {
+                Ok(n) => n.unwrap_or(0) as usize,
+                Err(e) => break Err(e2s(e)),
+            };
             if next == 0 {
-                return Ok(());
+                break Ok(());
             }
             let need = next * self.block;
             if self.raw.len() < need {
                 self.raw.resize(need, 0);
             }
-            let (frames, info) = self.capture.read_from_device(&mut self.raw).map_err(e2s)?;
+            let (frames, info) = match self.capture.read_from_device(&mut self.raw) {
+                Ok(r) => r,
+                Err(e) => break Err(e2s(e)),
+            };
             let frames = frames as usize;
             if frames == 0 {
-                return Ok(());
+                break Ok(());
             }
-            let t = if info.timestamp == 0 || info.flags.timestamp_error {
-                qpc_now() - frames as f64 / self.rate
-            } else {
-                info.timestamp as f64 * 1e-7
-            };
-            let samples = self.downmix(frames, info.flags.silent);
+            let device_t = (info.timestamp != 0 && !info.flags.timestamp_error)
+                .then_some(info.timestamp as f64 * 1e-7);
+            batch.push((frames, device_t));
+            samples.push(self.downmix(frames, info.flags.silent));
+        };
+        // Packets read before a device error are still delivered.
+        let stamps = self.stamper.stamp(qpc_now(), self.rate, &batch);
+        for (t, samples) in stamps.into_iter().zip(samples) {
             out.push(Packet { t, samples });
         }
+        res
     }
 }
 

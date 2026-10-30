@@ -10,6 +10,10 @@
 //! * WASAPI loopback delivers nothing while the render device is idle. [`Timeline::tick`] keeps
 //!   every track advancing in real time by inserting silence up to `map(now) - FILL_MARGIN`; when
 //!   data resumes it is placed at `map(timestamp)`, so the idle gap has its real duration.
+//! * A stretch longer than [`DISCONTINUITY_S`] that **no** track has audio for (the recorder
+//!   loop did not run: system sleep, a frozen process) is cut out of the timeline instead of
+//!   being silence-filled, so CPU and memory never grow with the length of a gap. Cuts are kept
+//!   as a translation of the monotonic clock, applied to every timestamp on entry.
 
 use super::resample::Resampler;
 
@@ -30,6 +34,13 @@ const KI: f64 = 0.0625;
 const ERR_TAU_S: f64 = 0.1;
 const MAX_ADJ: f64 = 0.01;
 const MAX_INTEG: f64 = 0.005;
+/// A gap no track has audio for that is longer than this is cut (see the module docs).
+pub const DISCONTINUITY_S: f64 = 10.0;
+/// When a stalled loop resumes, the last `KEEP_S` before "now" stay real time: devices may
+/// still deliver audio they buffered from just before the loop woke up.
+const KEEP_S: f64 = 1.0;
+/// Buffers whose capacity exceeds this many samples (and 4x their length) are shrunk.
+const SHRINK_ABOVE: usize = 1 << 18;
 /// Below ~ -66 dBFS counts as silence for the "silent for N s" warnings.
 pub const SILENCE_THRESHOLD: f32 = 0.0005;
 
@@ -101,6 +112,11 @@ impl ClockMap {
 
     pub fn pos_at(&self, t: f64) -> f64 {
         self.anchor_pos + (t - self.anchor_t) * self.rate * OUT_RATE
+    }
+
+    /// Inverse of [`pos_at`](Self::pos_at).
+    pub fn time_at(&self, pos: f64) -> f64 {
+        self.anchor_t + (pos - self.anchor_pos) / (self.rate * OUT_RATE)
     }
 
     /// Reference device clock / monotonic clock, as estimated so far.
@@ -329,6 +345,9 @@ pub struct Timeline {
     tracks: Vec<Track>,
     written: u64,
     start_t: f64,
+    /// Cut gaps as (raw start, length) on the monotonic clock, in order.
+    cuts: Vec<(f64, f64)>,
+    skipped_s: f64,
 }
 
 impl Timeline {
@@ -352,7 +371,48 @@ impl Timeline {
             tracks,
             written: 0,
             start_t,
+            cuts: Vec::new(),
+            skipped_s: 0.0,
         }
+    }
+
+    /// Monotonic time -> timeline time (cut gaps removed; a time inside a cut collapses onto it).
+    fn tr(&self, t: f64) -> f64 {
+        t - self
+            .cuts
+            .iter()
+            .map(|&(start, len)| (t - start).clamp(0.0, len))
+            .sum::<f64>()
+    }
+
+    /// Output position up to which some track already has audio or silence.
+    fn frontier(&self) -> f64 {
+        self.tracks
+            .iter()
+            .map(Track::landing_next)
+            .fold(f64::MIN, f64::max)
+    }
+
+    /// If timeline time `t` lies more than [`DISCONTINUITY_S`] past every track, cut the gap so
+    /// that `t - keep` lands on the frontier. `raw_t` is `t` on the monotonic clock.
+    fn cut_gap(&mut self, raw_t: f64, t: f64, keep: f64) {
+        let front = self.frontier();
+        if self.map.pos_at(t) - front <= DISCONTINUITY_S * OUT_RATE {
+            return;
+        }
+        let len = (t - keep) - self.map.time_at(front);
+        if len <= 0.0 {
+            return;
+        }
+        let raw_start = raw_t - keep - len;
+        log::warn!("timeline: no audio for {len:.1} s (recorder stalled?), gap cut");
+        self.cuts.push((raw_start, len));
+        self.skipped_s += len;
+    }
+
+    /// Seconds cut out of the timeline so far (gaps no track had audio for).
+    pub fn skipped_s(&self) -> f64 {
+        self.skipped_s
     }
 
     pub fn channels(&self) -> usize {
@@ -365,6 +425,8 @@ impl Timeline {
 
     /// Feed one mono packet whose first sample was captured at monotonic time `t`.
     pub fn feed(&mut self, track: usize, t: f64, samples: &[f32]) {
+        self.cut_gap(t, self.tr(t), 0.0);
+        let t = self.tr(t);
         let (map, tracks) = (&mut self.map, &mut self.tracks);
         tracks[track].feed(map, t, samples);
     }
@@ -376,6 +438,9 @@ impl Timeline {
 
     /// Advance idle tracks to real time (silence fill).
     pub fn tick(&mut self, now: f64) {
+        let fill_raw = now - FILL_MARGIN_S;
+        self.cut_gap(fill_raw, self.tr(fill_raw), KEEP_S - FILL_MARGIN_S);
+        let now = self.tr(now);
         for tr in &mut self.tracks {
             tr.tick(&self.map, now);
         }
@@ -395,6 +460,9 @@ impl Timeline {
         }
         for tr in &mut self.tracks {
             tr.out.drain(..n);
+            if tr.out.capacity() > SHRINK_ABOVE && tr.out.capacity() > 4 * tr.out.len() {
+                tr.out.shrink_to(tr.out.len() * 2);
+            }
         }
         self.written += n as u64;
         n
@@ -407,6 +475,7 @@ impl Timeline {
 
     /// Close the timeline at monotonic time `t_stop`: every track gets exactly the same length.
     pub fn finish(&mut self, t_stop: f64) {
+        let t_stop = self.tr(t_stop);
         let end = (self.map.pos_at(t_stop).round().max(0.0) as u64).max(self.written);
         for tr in &mut self.tracks {
             tr.finish(end);
@@ -419,7 +488,7 @@ impl Timeline {
 
     /// Seconds since track `i` last carried sound (or since start).
     pub fn silent_for(&self, i: usize, now: f64) -> f64 {
-        (now - self.tracks[i].last_sound_t).max(0.0)
+        (self.tr(now) - self.tracks[i].last_sound_t).max(0.0)
     }
 
     /// Residual follower-vs-reference misalignment (ms) after resampling, if measurable.
@@ -435,6 +504,15 @@ impl Timeline {
         self.tracks
             .get(1)
             .map(|t| (t.step / t.nominal_step - 1.0) * 1e6)
+    }
+
+    /// Allocated samples across the tracks' buffers (memory-bound tests).
+    #[cfg(test)]
+    fn allocated(&self) -> usize {
+        self.tracks
+            .iter()
+            .map(|t| t.rs.capacity() + t.out.capacity())
+            .sum()
     }
 
     pub fn stats(&self) -> Vec<TrackStats> {
@@ -671,5 +749,113 @@ mod tests {
         assert_eq!(to_i16(2.0), 32767);
         assert_eq!(to_i16(-2.0), -32768);
         assert_eq!(to_i16(0.0), 0);
+    }
+
+    /// The loop "sleeps" for an hour with no audio on any device: the gap is cut, not
+    /// silence-filled, and CPU / memory stay bounded. Alignment survives the cut.
+    #[test]
+    fn hour_long_stall_is_cut_with_bounded_time_and_memory() {
+        let t0 = 100.0;
+        let gap = (t0 + 5.0, t0 + 3605.0);
+        let imps = vec![t0 + 2.0, t0 + 3607.0];
+        let mut sys = SimDev::new(48000.0, 0.0, imps.clone());
+        let mut mic = SimDev::new(44100.0, 0.0, imps.clone());
+        sys.idle.push(gap);
+        mic.idle.push(gap);
+        let mut devs = [sys, mic];
+        let mut tl = Timeline::new(t0, &[48000.0, 44100.0]);
+        let mut frames = Vec::new();
+        let started = std::time::Instant::now();
+        let mut now = t0;
+        let mut max_alloc = 0;
+        while now < t0 + 3610.0 {
+            now = if (gap.0..gap.1).contains(&now) {
+                gap.1 // the loop did not run during the gap
+            } else {
+                now + 0.01
+            };
+            for (i, d) in devs.iter_mut().enumerate() {
+                for (t, buf) in d.poll(now, t0) {
+                    tl.feed(i, t, &buf);
+                }
+            }
+            tl.tick(now);
+            tl.take_frames(&mut frames);
+            max_alloc = max_alloc.max(tl.allocated());
+        }
+        tl.finish(now);
+        tl.take_frames(&mut frames);
+        let secs = frames.len() as f64 / 2.0 / OUT_RATE;
+        assert!((10.0..11.5).contains(&secs), "output {secs} s");
+        assert!(
+            (tl.skipped_s() - 3599.0).abs() < 0.5,
+            "skipped {}",
+            tl.skipped_s()
+        );
+        assert!(max_alloc < 400_000, "allocated {max_alloc} samples");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        // The impulse after the gap is at the same place in both channels.
+        let ch: Vec<Vec<f32>> = (0..2)
+            .map(|c| {
+                frames
+                    .iter()
+                    .skip(c)
+                    .step_by(2)
+                    .map(|&v| v as f32 / 32767.0)
+                    .collect()
+            })
+            .collect();
+        let after = 5.0 + 1.0 + 2.0; // 5 s, KEEP_S of real time, then 2 s into the resumed audio
+        let p0 = peaks(&ch[0], &[2.0, after]);
+        let p1 = peaks(&ch[1], &[2.0, after]);
+        for (a, b) in p0.iter().zip(&p1) {
+            assert!((a - b).abs() < 0.002, "sys {a} mic {b}");
+        }
+        assert!((p0[1] - after).abs() < 0.05, "{p0:?}");
+    }
+
+    /// A stalled loop whose devices buffered audio throughout (one keeps the first second,
+    /// the other has everything): nothing is cut and no buffered audio is dropped.
+    #[test]
+    fn stall_with_buffered_audio_is_not_cut() {
+        let t0 = 0.0;
+        let mut tl = Timeline::new(t0, &[16000.0, 16000.0]);
+        let mut frames = Vec::new();
+        let mut now = 0.0;
+        let pkt = vec![0.5f32; 160];
+        let mut next = [0.0f64; 2];
+        let step = |tl: &mut Timeline, now: f64, next: &mut [f64; 2], skip: Option<(f64, f64)>| {
+            for (i, n) in next.iter_mut().enumerate() {
+                while *n + 0.01 <= now {
+                    let in_skip = i == 1 && skip.is_some_and(|(a, b)| *n >= a && *n < b);
+                    if !in_skip {
+                        tl.feed(i, *n, &pkt);
+                    }
+                    *n += 0.01;
+                }
+            }
+            tl.tick(now);
+        };
+        while now < 2.0 {
+            now += 0.01;
+            step(&mut tl, now, &mut next, None);
+            tl.take_frames(&mut frames);
+        }
+        // 30 s stall; track 1 lost everything but the first second of it.
+        now = 32.0;
+        step(&mut tl, now, &mut next, Some((3.0, 31.99)));
+        while now < 34.0 {
+            now += 0.01;
+            step(&mut tl, now, &mut next, None);
+            tl.take_frames(&mut frames);
+        }
+        assert_eq!(tl.skipped_s(), 0.0);
+        let st = tl.stats();
+        assert!(st[0].dropped_s < 0.001 && st[1].dropped_s < 0.001, "{st:?}");
+        assert!(st[0].silence_inserted_s < 0.05, "{:?}", st[0]);
     }
 }
