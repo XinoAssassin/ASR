@@ -9,9 +9,6 @@ import {
   NDescriptionsItem,
   NForm,
   NFormItem,
-  NInput,
-  NRadio,
-  NRadioGroup,
   NSelect,
   NSpace,
   NTag,
@@ -23,16 +20,11 @@ import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
 
-import {
-  type DeviceId,
-  type FileTransfer,
-  type LocalModelOut,
-  type ProviderName,
-  type SettingsUpdate,
-} from '@/api'
+import { type DeviceId, type LocalModelOut } from '@/api'
 import BackendProfilesCard from '@/components/BackendProfilesCard.vue'
 import EnvironmentCard from '@/components/EnvironmentCard.vue'
 import EnvTag from '@/components/EnvTag.vue'
+import OnlineServicesCard from '@/components/OnlineServicesCard.vue'
 import DesktopSettingsCard from '@/components/recorder/DesktopSettingsCard.vue'
 import SidecarCard from '@/components/recorder/SidecarCard.vue'
 import SiyuanSettingsCard from '@/components/SiyuanSettingsCard.vue'
@@ -59,95 +51,6 @@ const route = useRoute()
 /** Environment variable behind a settings field (`env_only`), for the "env" markers. */
 function envOf(field: string): string | null {
   return envVariable(settings.server?.env_only, field)
-}
-
-// --- server-side settings ---------------------------------------------------------------------
-
-const ENDPOINTS = ['https://dashscope.aliyuncs.com', 'https://cn-beijing.maas.qianwenaiapi.com']
-const WORKSPACE_RE = /^https:\/\/([a-z0-9][a-z0-9-]{0,62})\.cn-beijing\.maas\.aliyuncs\.com\/?$/i
-const DEFAULT_MODEL = 'qwen-audio-3.1-asr-flash-filetrans'
-
-const form = reactive({
-  provider: 'cloud' as ProviderName,
-  endpointChoice: ENDPOINTS[0]!,
-  workspace: '',
-  model: '',
-  fileTransfer: 'temp_upload' as FileTransfer,
-  newKey: '',
-})
-
-const endpointOptions = computed(() => [
-  ...ENDPOINTS.map((url) => ({ label: url, value: url })),
-  { label: t('settings.cloud.endpointCustom'), value: 'custom' },
-])
-
-const workspaceValid = computed(() => /^[a-z0-9][a-z0-9-]{0,62}$/i.test(form.workspace.trim()))
-
-const resolvedEndpoint = computed(() =>
-  form.endpointChoice === 'custom'
-    ? `https://${form.workspace.trim()}.cn-beijing.maas.aliyuncs.com`
-    : form.endpointChoice,
-)
-
-function fillForm(): boolean {
-  const s = settings.server
-  if (!s) return false
-  form.provider = s.provider_default
-  form.model = s.cloud.model
-  form.fileTransfer = s.cloud.file_transfer
-  form.newKey = ''
-  const match = WORKSPACE_RE.exec(s.cloud.endpoint)
-  if (match) {
-    form.endpointChoice = 'custom'
-    form.workspace = match[1]!
-  } else {
-    form.endpointChoice = ENDPOINTS.includes(s.cloud.endpoint) ? s.cloud.endpoint : ENDPOINTS[0]!
-  }
-  return true
-}
-
-// Each card re-fills only from its own save (or while untouched), so saving one card never
-// discards what was typed into the other.
-const serverSync = createFormSync(form, fillForm)
-
-async function saveServer(): Promise<void> {
-  if (form.endpointChoice === 'custom' && !workspaceValid.value) {
-    message.error(t('settings.cloud.workspaceInvalid'))
-    return
-  }
-  const update: SettingsUpdate = {
-    provider_default: form.provider,
-    cloud: {
-      endpoint: resolvedEndpoint.value,
-      model: form.model.trim() || DEFAULT_MODEL,
-      file_transfer: form.fileTransfer,
-    },
-  }
-  if (form.newKey.trim()) update.cloud!.api_key = form.newKey.trim()
-  try {
-    await settings.save(update)
-    serverSync.refill()
-    message.success(t('settings.saved'))
-  } catch (e) {
-    notify(e, t('settings.saveFailed'))
-  }
-}
-
-async function clearKey(): Promise<void> {
-  try {
-    await settings.save({ cloud: { api_key: '' } })
-    message.success(t('settings.cloud.keyCleared'))
-  } catch (e) {
-    notify(e, t('settings.saveFailed'))
-  }
-}
-
-async function runCloudTest(): Promise<void> {
-  try {
-    await settings.testCloud()
-  } catch (e) {
-    notify(e, t('settings.cloud.testFailed'))
-  }
 }
 
 // --- local models (status only; management in Settings arrives with M6) ----------------------
@@ -202,10 +105,7 @@ const localSync = createFormSync(localForm, fillLocalForm)
 
 watch(
   () => settings.server,
-  () => {
-    serverSync.sync()
-    localSync.sync()
-  },
+  () => localSync.sync(),
   { immediate: true },
 )
 
@@ -336,141 +236,8 @@ onMounted(() => {
     <DesktopSettingsCard v-if="desktop" />
     <SidecarCard v-if="desktop" />
 
-    <!-- Server-side settings -->
-    <NCard :title="t('settings.server.title')">
-      <NAlert v-if="settings.error" type="error" style="margin-bottom: 16px">
-        {{ describe(settings.error) }}
-      </NAlert>
-      <NAlert type="warning" :title="t('settings.cloud.privacyTitle')" style="margin-bottom: 16px">
-        {{ t('settings.cloud.privacy') }}
-      </NAlert>
-      <NForm label-placement="left" label-width="140" :disabled="!settings.server">
-        <NFormItem :label="t('settings.server.defaultProvider')">
-          <NRadioGroup v-model:value="form.provider" data-testid="default-provider">
-            <NRadio value="cloud">{{ t('provider.cloud') }}</NRadio>
-            <NRadio value="local">{{ t('provider.local') }}</NRadio>
-          </NRadioGroup>
-        </NFormItem>
-        <NFormItem :label="t('settings.cloud.endpoint')">
-          <NSpace vertical style="width: 100%">
-            <NSelect
-              v-model:value="form.endpointChoice"
-              :options="endpointOptions"
-              data-testid="cloud-endpoint"
-              style="max-width: 420px"
-            />
-            <NInput
-              v-if="form.endpointChoice === 'custom'"
-              v-model:value="form.workspace"
-              data-testid="cloud-workspace"
-              :status="form.workspace && !workspaceValid ? 'error' : undefined"
-              :placeholder="t('settings.cloud.workspacePlaceholder')"
-              style="max-width: 420px"
-            >
-              <template #prefix>https://</template>
-              <template #suffix>.cn-beijing.maas.aliyuncs.com</template>
-            </NInput>
-          </NSpace>
-        </NFormItem>
-        <NFormItem :label="t('settings.cloud.model')">
-          <NInput
-            v-model:value="form.model"
-            data-testid="cloud-model"
-            :placeholder="DEFAULT_MODEL"
-            style="max-width: 420px"
-          />
-        </NFormItem>
-        <NFormItem :label="t('settings.cloud.apiKey')">
-          <NSpace vertical style="width: 100%">
-            <NSpace align="center">
-              <NTag v-if="settings.server?.cloud.api_key_set" type="success" size="small">
-                {{ t('settings.cloud.keySet') }}
-                <template v-if="settings.server.cloud.api_key_masked">
-                  · {{ settings.server.cloud.api_key_masked }}
-                </template>
-              </NTag>
-              <NTag v-else type="warning" size="small">{{ t('settings.cloud.keyNotSet') }}</NTag>
-              <NText
-                v-if="settings.server?.cloud.api_key_source"
-                depth="3"
-                class="small"
-                data-testid="cloud-key-source"
-              >
-                {{
-                  settings.server.cloud.api_key_source === 'env'
-                    ? t('envFacts.keySourceEnv')
-                    : t('envFacts.keySourceSettings')
-                }}
-              </NText>
-              <NButton
-                v-if="settings.server?.cloud.api_key_set"
-                size="small"
-                quaternary
-                type="error"
-                data-testid="cloud-key-clear"
-                @click="clearKey"
-              >
-                {{ t('settings.cloud.clearKey') }}
-              </NButton>
-            </NSpace>
-            <NInput
-              v-model:value="form.newKey"
-              data-testid="cloud-key-input"
-              type="password"
-              show-password-on="click"
-              :placeholder="t('settings.cloud.keyPlaceholder')"
-              :input-props="{ autocomplete: 'new-password' }"
-              style="max-width: 420px"
-            />
-            <NText depth="3">{{ t('settings.cloud.keyHint') }}</NText>
-          </NSpace>
-        </NFormItem>
-        <NFormItem :label="t('settings.cloud.fileTransfer')">
-          <NSpace vertical>
-            <NRadioGroup v-model:value="form.fileTransfer" data-testid="cloud-file-transfer">
-              <NRadio value="temp_upload">{{ t('settings.cloud.tempUpload') }}</NRadio>
-              <NRadio value="public_url">{{ t('settings.cloud.publicUrl') }}</NRadio>
-            </NRadioGroup>
-            <NText v-if="form.fileTransfer === 'temp_upload'" depth="3">
-              {{ t('settings.cloud.tempUploadCaveat') }}
-            </NText>
-            <NText v-else depth="3">{{ t('settings.cloud.publicUrlHint') }}</NText>
-          </NSpace>
-        </NFormItem>
-        <NFormItem label=" ">
-          <NSpace>
-            <NButton
-              type="primary"
-              :loading="settings.saving"
-              data-testid="settings-save"
-              @click="saveServer"
-            >
-              {{ t('common.save') }}
-            </NButton>
-            <NButton
-              :loading="settings.testing"
-              data-testid="cloud-test"
-              @click="runCloudTest"
-            >
-              {{ t('settings.cloud.test') }}
-            </NButton>
-            <NText depth="3">{{ t('settings.cloud.testHint') }}</NText>
-          </NSpace>
-        </NFormItem>
-      </NForm>
-      <NAlert
-        v-if="settings.cloudTest"
-        :type="settings.cloudTest.ok ? 'success' : 'error'"
-        data-testid="cloud-test-result"
-        :title="settings.cloudTest.ok ? t('settings.cloud.testOk') : t('settings.cloud.testFailed')"
-      >
-        {{ settings.cloudTest.message }}
-        <template v-if="settings.cloudTest.max_file_size_mb">
-          <br />
-          {{ t('settings.cloud.maxFileSize', { mb: settings.cloudTest.max_file_size_mb }) }}
-        </template>
-      </NAlert>
-    </NCard>
+    <!-- Server-side: default provider, cloud recognition, LLM -->
+    <OnlineServicesCard />
 
     <!-- Local models: download state; downloads go through `asr models download` (rule 6) -->
     <NCard :title="t('settings.local.title')">

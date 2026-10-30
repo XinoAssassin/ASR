@@ -46,6 +46,24 @@ export type Term = Schemas['Term']
 export type TermSetOut = Schemas['TermSetOut']
 export type SettingsOut = Schemas['SettingsOut']
 export type SettingsUpdate = Schemas['SettingsUpdate']
+export type LlmSettingsOut = Schemas['LlmSettingsOut']
+export type LlmSettingsUpdate = Schemas['LlmSettingsUpdate']
+/** Provider of the LLM pass (summary, L3 suggestions): DashScope or any OpenAI-compatible server. */
+export type LlmProviderName = LlmSettingsOut['provider']
+/** Where an effective value comes from; precedence settings (UI) > config > env > default. */
+export type SettingSource = SettingsOut['sources'][string]
+/** Keys of `SettingsOut.sources` (the backend types it as a plain string map). */
+export type SettingSourceKey =
+  | 'cloud.endpoint'
+  | 'cloud.model'
+  | 'cloud.file_transfer'
+  | 'cloud.api_key'
+  | 'llm.provider'
+  | 'llm.endpoint'
+  | 'llm.model'
+  | 'llm.api_key'
+export type ConfigFileStatus = Schemas['ConfigFileOut']
+export type LlmTestResult = Schemas['LlmTestOut']
 export type ConnectionTestResult = Schemas['ConnectionTestResult']
 export type LocalModelOut = Schemas['LocalModelOut']
 export type ChannelsOption = Schemas['PreprocessOptions']['channels']
@@ -350,6 +368,9 @@ export const getSettings = (): Promise<SettingsOut> => unwrap(api.GET('/api/sett
 
 export const updateSettings = (body: SettingsUpdate): Promise<SettingsOut> =>
   unwrap(api.PUT('/api/settings', { body }))
+
+/** Check the saved LLM settings (always 200; `ok` says whether the server answered). */
+export const testLlm = (): Promise<LlmTestResult> => unwrap(api.POST('/api/settings/test-llm'))
 
 export const testCloud = (): Promise<ConnectionTestResult> =>
   unwrap(api.POST('/api/settings/test-cloud'))

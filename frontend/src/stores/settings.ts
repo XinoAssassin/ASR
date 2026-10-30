@@ -1,7 +1,8 @@
 /**
  * Two kinds of settings: browser-local (the active backend profile's URL + X-API-Key —
  * localStorage, see `useProfilesStore` for the profiles themselves) and
- * server-side (`GET/PUT /api/settings`; the DashScope key is write-only and comes back masked),
+ * server-side (`GET/PUT /api/settings`; the DashScope and LLM keys are write-only and come back
+ * masked),
  * plus the local model list shown on the Settings page (downloads only on explicit request, rule 6).
  */
 import { defineStore } from 'pinia'
@@ -18,11 +19,13 @@ import {
   setApiKey as persistApiKey,
   setBackendUrl as persistBackendUrl,
   testCloud as testCloudConnection,
+  testLlm as testLlmConnection,
   toApiError,
   updateSettings,
   writeStorage,
   type ApiError,
   type ConnectionTestResult,
+  type LlmTestResult,
   type LocalModelOut,
   type ProviderName,
   type SettingsOut,
@@ -53,6 +56,9 @@ export const useSettingsStore = defineStore('settings', () => {
   const cloudTest = ref<ConnectionTestResult | null>(null)
   const testing = ref(false)
   const lastMaxMb = ref<number | null>(storedMaxMb())
+
+  const llmTest = ref<LlmTestResult | null>(null)
+  const testingLlm = ref(false)
 
   const localModels = ref<LocalModelOut[]>([])
   const localModelsError = ref<ApiError | null>(null)
@@ -106,6 +112,7 @@ export const useSettingsStore = defineStore('settings', () => {
     loading.value = false
     error.value = null
     cloudTest.value = null
+    llmTest.value = null
     localModels.value = []
     localModelsError.value = null
   }
@@ -140,6 +147,19 @@ export const useSettingsStore = defineStore('settings', () => {
       return result
     } finally {
       testing.value = false
+    }
+  }
+
+  /** Check the saved LLM settings (summary / L3 suggestions); throws ApiError. */
+  async function testLlm(): Promise<LlmTestResult> {
+    const mine = epoch
+    testingLlm.value = true
+    try {
+      const result = await testLlmConnection()
+      if (mine === epoch) llmTest.value = result
+      return result
+    } finally {
+      testingLlm.value = false
     }
   }
 
@@ -190,6 +210,8 @@ export const useSettingsStore = defineStore('settings', () => {
     error,
     cloudTest,
     testing,
+    llmTest,
+    testingLlm,
     defaultProvider,
     cloudMaxFileSizeMb,
     localModels,
@@ -202,6 +224,7 @@ export const useSettingsStore = defineStore('settings', () => {
     downloadLocalModel,
     save,
     testCloud,
+    testLlm,
     keyAtRisk,
     setBackendUrl,
     setApiKey,

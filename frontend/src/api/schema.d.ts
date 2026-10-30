@@ -182,8 +182,13 @@ export interface paths {
         get: operations["get_settings_api_settings_get"];
         /**
          * Update Settings
-         * @description Partial update; omitted fields keep their value. ``cloud.api_key`` is write-only:
-         *     non-empty sets the override, ``""`` clears it (the env value applies again).
+         * @description Partial update of the settings-table layer. For every field: omitted = unchanged; ``""``
+         *     = clear the override, so the config file / env / default value applies again. Keys are
+         *     write-only.
+         *
+         *     The LLM key is bound to its host: when the effective LLM becomes an ``openai`` server with a
+         *     different endpoint (or the provider switches to ``openai``) and the request carries no
+         *     ``llm.api_key``, the stored LLM key is cleared.
          */
         put: operations["update_settings_api_settings_put"];
         post?: never;
@@ -247,6 +252,28 @@ export interface paths {
          * @description Check the effective DashScope key against the effective endpoint.
          */
         post: operations["test_cloud_api_settings_test_cloud_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/test-llm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test Llm
+         * @description A tiny chat completion (``max_tokens`` 16) against the effective LLM config. Always 200;
+         *     the message is redacted and never contains the key. Sends a few tokens to the configured
+         *     server (DashScope: billed).
+         */
+        post: operations["test_llm_api_settings_test_llm_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -446,9 +473,10 @@ export interface paths {
         put?: never;
         /**
          * Llm Suggestions
-         * @description [5b] L3: ask the DashScope LLM for corrections of mis-heard words. Opt-in, costs money
-         *     and sends the segment text to the cloud; results are ``suggested`` corrections for review,
-         *     never applied automatically.
+         * @description [5b] L3: ask the configured LLM (DashScope or an OpenAI-compatible server, see
+         *     ``GET /api/settings`` ``llm``) for corrections of mis-heard words. Opt-in: DashScope costs
+         *     money, and the segment text is sent to that server; results are ``suggested`` corrections
+         *     for review, never applied automatically.
          */
         post: operations["llm_suggestions_api_transcripts__transcript_id__llm_suggestions_post"];
         delete?: never;
@@ -535,9 +563,9 @@ export interface paths {
         put?: never;
         /**
          * Create Summary
-         * @description M11: summarise the current segments with the DashScope LLM (overview, key points,
-         *     decisions, action items) and store the result, replacing an earlier one. Opt-in: it costs
-         *     money and sends the transcript text and speaker names to the cloud.
+         * @description M11: summarise the current segments with the configured LLM (overview, key points,
+         *     decisions, action items) and store the result, replacing an earlier one. Opt-in: DashScope
+         *     costs money, and the transcript text and speaker names are sent to that server.
          */
         post: operations["create_summary_api_transcripts__transcript_id__summary_post"];
         /** Delete Summary */
@@ -713,9 +741,9 @@ export interface components {
             api_key_set: boolean;
             /**
              * Api Key Source
-             * @description Where the effective DashScope key comes from: `settings` (the override set via PUT), `env` (DASHSCOPE_API_KEY; clearing the override falls back to it), or null.
+             * @description Where the effective DashScope key comes from: `settings` (the override set via PUT), `config` (the config file), `env` (DASHSCOPE_API_KEY), or null (none). Same as `sources['cloud.api_key']`, kept for compatibility.
              */
-            api_key_source?: ("env" | "settings") | null;
+            api_key_source?: ("env" | "config" | "settings") | null;
             /** Endpoint */
             endpoint: string;
             /**
@@ -726,7 +754,11 @@ export interface components {
             /** Model */
             model: string;
         };
-        /** CloudSettingsUpdate */
+        /**
+         * CloudSettingsUpdate
+         * @description Omitted = unchanged; ``""`` = clear the Settings override (config file / env / default
+         *     apply again).
+         */
         CloudSettingsUpdate: {
             /**
              * Api Key
@@ -739,9 +771,35 @@ export interface components {
              */
             endpoint?: string | null;
             /** File Transfer */
-            file_transfer?: ("temp_upload" | "public_url") | null;
+            file_transfer?: ("temp_upload" | "public_url") | "" | null;
             /** Model */
             model?: string | null;
+        };
+        /**
+         * ConfigFileOut
+         * @description The TOML config file (``ASR_CONFIG_FILE`` / ``<data_dir>/config.toml``). No values.
+         */
+        ConfigFileOut: {
+            /**
+             * Error
+             * @description Why the file, or some of its values, was ignored. Never contains values.
+             */
+            error: string | null;
+            /**
+             * Loaded
+             * @description The file was read and parsed.
+             */
+            loaded: boolean;
+            /**
+             * Path
+             * @description File in use; null when none is configured or found.
+             */
+            path: string | null;
+            /**
+             * Warnings
+             * @description Unknown keys, loose file permissions, and layered values that do not apply (e.g. a key that is not sent to an endpoint set at a higher layer).
+             */
+            warnings: string[];
         };
         /**
          * ConnectionTestResult
@@ -1106,6 +1164,61 @@ export interface components {
             /** Warnings */
             warnings?: string[];
         };
+        /**
+         * LlmSettingsOut
+         * @description The chat model used for summaries and L3 correction suggestions.
+         */
+        LlmSettingsOut: {
+            /**
+             * Api Key Masked
+             * @description E.g. 'sk-****abcd'; never the full key.
+             */
+            api_key_masked: string | null;
+            /**
+             * Api Key Set
+             * @description A key will be sent. dashscope: the LLM key, else the cloud key. openai: only an LLM key set at the same or a higher layer than the endpoint.
+             */
+            api_key_set: boolean;
+            /**
+             * Endpoint
+             * @description Effective base URL: for dashscope the resolved DashScope endpoint (llm endpoint, else cloud endpoint); for openai the server base URL incl. /v1, '' when unset.
+             */
+            endpoint: string;
+            /** Model */
+            model: string;
+            /**
+             * Provider
+             * @description `dashscope` (DashScope compatible mode) or `openai` (any OpenAI-compatible server: llama.cpp, vLLM, Ollama, Lemonade, ...).
+             * @enum {string}
+             */
+            provider: "dashscope" | "openai";
+        };
+        /**
+         * LlmSettingsUpdate
+         * @description Omitted = unchanged; ``""`` = clear the Settings override (config file / env / default
+         *     apply again).
+         *
+         *     Trust: with provider ``openai`` the transcript text (and the LLM key, if set) is sent to
+         *     whatever base URL is configured here, so only point it at a server you control. Changing the
+         *     effective endpoint or provider to an ``openai`` endpoint without sending ``api_key`` in the
+         *     same request clears the stored LLM key, so a key is never re-used for a new host.
+         */
+        LlmSettingsUpdate: {
+            /**
+             * Api Key
+             * @description Write-only. Non-empty sets the override, '' clears it, omitted leaves it. dashscope: empty = the cloud key; openai: optional.
+             */
+            api_key?: string | null;
+            /**
+             * Endpoint
+             * @description dashscope: an allowed DashScope endpoint ('' = the cloud endpoint). openai: the server's http(s) base URL incl. /v1, e.g. http://192.168.2.10:8080/v1; no credentials, query or fragment.
+             */
+            endpoint?: string | null;
+            /** Model */
+            model?: string | null;
+            /** Provider */
+            provider?: ("dashscope" | "openai") | "" | null;
+        };
         /** LlmSuggestionsIn */
         LlmSuggestionsIn: {
             /**
@@ -1127,6 +1240,21 @@ export interface components {
              */
             discarded: number;
             transcript: components["schemas"]["TranscriptOut"];
+        };
+        /** LlmTestOut */
+        LlmTestOut: {
+            /**
+             * Message
+             * @description Redacted; never contains the key.
+             */
+            message: string;
+            /**
+             * Model
+             * @description Model the server reports (else the configured one); null when no request was made.
+             */
+            model: string | null;
+            /** Ok */
+            ok: boolean;
         };
         /** LocalModelOut */
         LocalModelOut: {
@@ -1380,6 +1508,7 @@ export interface components {
             /** Api Key Required */
             api_key_required: boolean;
             cloud: components["schemas"]["CloudSettingsOut"];
+            config_file: components["schemas"]["ConfigFileOut"];
             /**
              * Env Only
              * @description Fields of this response that only the environment sets (dotted path -> variable name), for a 'set via environment' hint in the UI.
@@ -1388,12 +1517,20 @@ export interface components {
                 [key: string]: string;
             };
             environment: components["schemas"]["EnvironmentOut"];
+            llm: components["schemas"]["LlmSettingsOut"];
             local: components["schemas"]["LocalSettingsOut"];
             /**
              * Provider Default
              * @enum {string}
              */
             provider_default: "local" | "cloud";
+            /**
+             * Sources
+             * @description Layer each online setting comes from (`cloud.endpoint`, `cloud.model`, `cloud.file_transfer`, `cloud.api_key`, `llm.provider`, `llm.endpoint`, `llm.model`, `llm.api_key`): settings > config > env > default. For dashscope, `default` for `llm.endpoint` / `llm.api_key` means the cloud value is inherited.
+             */
+            sources: {
+                [key: string]: "default" | "env" | "config" | "settings";
+            };
             /** Upload Roots */
             upload_roots: string[];
         };
@@ -1403,6 +1540,7 @@ export interface components {
          */
         SettingsUpdate: {
             cloud?: components["schemas"]["CloudSettingsUpdate"] | null;
+            llm?: components["schemas"]["LlmSettingsUpdate"] | null;
             local?: components["schemas"]["LocalSettingsUpdate"] | null;
             /** Provider Default */
             provider_default?: ("local" | "cloud") | null;
@@ -2310,6 +2448,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ConnectionTestResult"];
+                };
+            };
+        };
+    };
+    test_llm_api_settings_test_llm_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LlmTestOut"];
                 };
             };
         };
