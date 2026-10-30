@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 from asr.audio.types import ProbeInfo
+from asr.correct.llm import LlmProviderName
 from asr.providers.base import (
     ConnectionTestResult,
     Correction,
@@ -31,6 +32,7 @@ __all__ = [
     "MAX_UPLOAD_SIZE",
     "CloudSettingsOut",
     "CloudSettingsUpdate",
+    "ConfigFileOut",
     "ConnectionTestResult",
     "Device",
     "EditTextOp",
@@ -46,6 +48,9 @@ __all__ = [
     "JobList",
     "JobOut",
     "JobStatus",
+    "LlmSettingsOut",
+    "LlmSettingsUpdate",
+    "LlmTestOut",
     "LocalModelOut",
     "LocalSettingsOut",
     "LocalSettingsUpdate",
@@ -406,16 +411,53 @@ class LocalSettingsOut(BaseModel):
     model_cache_dir: str
 
 
+SettingSource = Literal["default", "env", "config", "settings"]
+
+
 class CloudSettingsOut(BaseModel):
     endpoint: str
     model: str
     file_transfer: FileTransferMode
     api_key_set: bool
     api_key_masked: str | None = Field(description="E.g. 'sk-****abcd'; never the full key.")
-    api_key_source: Literal["env", "settings"] | None = Field(
+    api_key_source: Literal["env", "config", "settings"] | None = Field(
         default=None,
         description="Where the effective DashScope key comes from: `settings` (the override set "
-        "via PUT), `env` (DASHSCOPE_API_KEY; clearing the override falls back to it), or null.",
+        "via PUT), `config` (the config file), `env` (DASHSCOPE_API_KEY), or null (none). Same "
+        "as `sources['cloud.api_key']`, kept for compatibility.",
+    )
+
+
+class LlmSettingsOut(BaseModel):
+    """The chat model used for summaries and L3 correction suggestions."""
+
+    provider: LlmProviderName = Field(
+        description="`dashscope` (DashScope compatible mode) or `openai` (any OpenAI-compatible "
+        "server: llama.cpp, vLLM, Ollama, Lemonade, ...)."
+    )
+    endpoint: str = Field(
+        description="Effective base URL: for dashscope the resolved DashScope endpoint (llm "
+        "endpoint, else cloud endpoint); for openai the server base URL incl. /v1, '' when unset."
+    )
+    model: str
+    api_key_set: bool = Field(
+        description="A key will be sent. dashscope: the LLM key, else the cloud key. openai: "
+        "only an LLM key set at the same or a higher layer than the endpoint."
+    )
+    api_key_masked: str | None = Field(description="E.g. 'sk-****abcd'; never the full key.")
+
+
+class ConfigFileOut(BaseModel):
+    """The TOML config file (``ASR_CONFIG_FILE`` / ``<data_dir>/config.toml``). No values."""
+
+    path: str | None = Field(description="File in use; null when none is configured or found.")
+    loaded: bool = Field(description="The file was read and parsed.")
+    error: str | None = Field(
+        description="Why the file, or some of its values, was ignored. Never contains values."
+    )
+    warnings: list[str] = Field(
+        description="Unknown keys, loose file permissions, and layered values that do not apply "
+        "(e.g. a key that is not sent to an endpoint set at a higher layer)."
     )
 
 
@@ -445,6 +487,14 @@ class SettingsOut(BaseModel):
     upload_roots: list[str]
     local: LocalSettingsOut
     cloud: CloudSettingsOut
+    llm: LlmSettingsOut
+    sources: dict[str, SettingSource] = Field(
+        description="Layer each online setting comes from (`cloud.endpoint`, `cloud.model`, "
+        "`cloud.file_transfer`, `cloud.api_key`, `llm.provider`, `llm.endpoint`, `llm.model`, "
+        "`llm.api_key`): settings > config > env > default. For dashscope, `default` for "
+        "`llm.endpoint` / `llm.api_key` means the cloud value is inherited."
+    )
+    config_file: ConfigFileOut
     environment: EnvironmentOut
     env_only: dict[str, str] = Field(
         description="Fields of this response that only the environment sets (dotted path -> "
@@ -459,15 +509,45 @@ class LocalSettingsUpdate(BaseModel):
 
 
 class CloudSettingsUpdate(BaseModel):
+    """Omitted = unchanged; ``""`` = clear the Settings override (config file / env / default
+    apply again)."""
+
     endpoint: str | None = Field(
         default=None, max_length=200, description="Must be an allowed DashScope endpoint (D2)."
     )
-    model: str | None = Field(default=None, min_length=1, max_length=200)
-    file_transfer: FileTransferMode | None = None
+    model: str | None = Field(default=None, max_length=200)
+    file_transfer: FileTransferMode | Literal[""] | None = None
     api_key: SecretStr | None = Field(
         default=None,
         max_length=500,
         description="Write-only. Non-empty sets the override, '' clears it, omitted leaves it.",
+    )
+
+
+class LlmSettingsUpdate(BaseModel):
+    """Omitted = unchanged; ``""`` = clear the Settings override (config file / env / default
+    apply again).
+
+    Trust: with provider ``openai`` the transcript text (and the LLM key, if set) is sent to
+    whatever base URL is configured here, so only point it at a server you control. Changing the
+    effective endpoint or provider to an ``openai`` endpoint without sending ``api_key`` in the
+    same request clears the stored LLM key, so a key is never re-used for a new host.
+    """
+
+    provider: LlmProviderName | Literal[""] | None = None
+    endpoint: str | None = Field(
+        default=None,
+        max_length=500,
+        description="dashscope: an allowed DashScope endpoint ('' = the cloud endpoint). openai: "
+        "the server's http(s) base URL incl. /v1, e.g. http://192.168.2.10:8080/v1; no "
+        "credentials, query or fragment.",
+    )
+    model: str | None = Field(default=None, max_length=200)
+    api_key: SecretStr | None = Field(
+        default=None,
+        max_length=500,
+        description="Write-only. Non-empty sets the override, '' clears it, omitted leaves it. "
+        "dashscope: empty = the cloud key; openai: optional.",
     )
 
 
@@ -477,6 +557,16 @@ class SettingsUpdate(BaseModel):
     provider_default: ProviderName | None = None
     local: LocalSettingsUpdate | None = None
     cloud: CloudSettingsUpdate | None = None
+    llm: LlmSettingsUpdate | None = None
+
+
+class LlmTestOut(BaseModel):
+    ok: bool
+    message: str = Field(description="Redacted; never contains the key.")
+    model: str | None = Field(
+        description="Model the server reports (else the configured one); null when no request "
+        "was made."
+    )
 
 
 class LocalModelOut(BaseModel):

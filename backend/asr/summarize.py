@@ -1,10 +1,11 @@
 """LLM meeting summary (M11): overview, key points, decisions and action items.
 
-Opt-in and paid: the transcript text (speaker display names, segment text, coarse timestamps) is
-sent to the DashScope chat model through the same key and allow-listed endpoint as the [5b] L3
-correction pass (``asr.correct.llm``). Short transcripts take one call. Longer ones are cut into
-chunks of about ``CHUNK_CHARS`` characters at speaker-turn boundaries, each chunk is summarised
-("map") and the partial summaries are merged by one more call ("reduce").
+Opt-in: the transcript text (speaker display names, segment text, coarse timestamps) is sent to
+the configured chat model through the same transport as the [5b] L3 correction pass
+(``asr.correct.llm``): DashScope (paid; key and allow-listed endpoint of the cloud ASR) or an
+OpenAI-compatible server of the operator's choice. Short transcripts take one call. Longer ones
+are cut into chunks of about ``CHUNK_CHARS`` characters at speaker-turn boundaries, each chunk is
+summarised ("map") and the partial summaries are merged by one more call ("reduce").
 
 Action-item owners are filled only when the transcript says who will do it; the model is told to
 use the speaker's display name or the name mentioned in the text, never to guess.
@@ -20,7 +21,14 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field
 
-from asr.correct.llm import DEFAULT_LLM_MODEL, chat_json, chat_url, glossary, llm_client
+from asr.correct.llm import (
+    DEFAULT_LLM_MODEL,
+    LlmProviderName,
+    chat_json_answer,
+    chat_url,
+    glossary,
+    llm_client,
+)
 from asr.providers.base import ProviderError, Segment, Speaker, Term
 
 CHUNK_CHARS = 12_000
@@ -174,18 +182,31 @@ class Summarizer:
         api_key: str,
         endpoint: str,
         model: str = DEFAULT_LLM_MODEL,
+        provider: LlmProviderName = "dashscope",
         http: httpx.Client | None = None,
         chunk_chars: int = CHUNK_CHARS,
     ) -> None:
-        self.url = chat_url(api_key, endpoint)
+        self.url = chat_url(api_key, endpoint, provider)
         self._key = api_key
         self.model = model
+        self.provider: LlmProviderName = provider
+        self._json_mode = True  # off once the server has rejected response_format
         self.chunk_chars = chunk_chars
         self._http = http  # None: a short-lived client per request, closed right after
 
     def _ask(self, system: str, user: str) -> dict[str, Any]:
         with llm_client(self._http, timeout=180) as http:
-            return chat_json(http, self.url, self._key, model=self.model, system=system, user=user)
+            answer, self._json_mode = chat_json_answer(
+                http,
+                self.url,
+                self._key,
+                model=self.model,
+                system=system,
+                user=user,
+                provider=self.provider,
+                json_mode=self._json_mode,
+            )
+            return answer
 
     def summarize(
         self,

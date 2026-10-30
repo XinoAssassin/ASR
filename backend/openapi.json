@@ -83,6 +83,7 @@
               {
                 "enum": [
                   "env",
+                  "config",
                   "settings"
                 ],
                 "type": "string"
@@ -91,7 +92,7 @@
                 "type": "null"
               }
             ],
-            "description": "Where the effective DashScope key comes from: `settings` (the override set via PUT), `env` (DASHSCOPE_API_KEY; clearing the override falls back to it), or null.",
+            "description": "Where the effective DashScope key comes from: `settings` (the override set via PUT), `config` (the config file), `env` (DASHSCOPE_API_KEY), or null (none). Same as `sources['cloud.api_key']`, kept for compatibility.",
             "title": "Api Key Source"
           },
           "endpoint": {
@@ -122,6 +123,7 @@
         "type": "object"
       },
       "CloudSettingsUpdate": {
+        "description": "Omitted = unchanged; ``\"\"`` = clear the Settings override (config file / env / default\napply again).",
         "properties": {
           "api_key": {
             "anyOf": [
@@ -161,6 +163,10 @@
                 "type": "string"
               },
               {
+                "const": "",
+                "type": "string"
+              },
+              {
                 "type": "null"
               }
             ],
@@ -170,7 +176,6 @@
             "anyOf": [
               {
                 "maxLength": 200,
-                "minLength": 1,
                 "type": "string"
               },
               {
@@ -181,6 +186,56 @@
           }
         },
         "title": "CloudSettingsUpdate",
+        "type": "object"
+      },
+      "ConfigFileOut": {
+        "description": "The TOML config file (``ASR_CONFIG_FILE`` / ``<data_dir>/config.toml``). No values.",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the file, or some of its values, was ignored. Never contains values.",
+            "title": "Error"
+          },
+          "loaded": {
+            "description": "The file was read and parsed.",
+            "title": "Loaded",
+            "type": "boolean"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "File in use; null when none is configured or found.",
+            "title": "Path"
+          },
+          "warnings": {
+            "description": "Unknown keys, loose file permissions, and layered values that do not apply (e.g. a key that is not sent to an endpoint set at a higher layer).",
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "path",
+          "loaded",
+          "error",
+          "warnings"
+        ],
+        "title": "ConfigFileOut",
         "type": "object"
       },
       "ConnectionTestResult": {
@@ -990,6 +1045,121 @@
         "title": "JobOut",
         "type": "object"
       },
+      "LlmSettingsOut": {
+        "description": "The chat model used for summaries and L3 correction suggestions.",
+        "properties": {
+          "api_key_masked": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "E.g. 'sk-****abcd'; never the full key.",
+            "title": "Api Key Masked"
+          },
+          "api_key_set": {
+            "description": "A key will be sent. dashscope: the LLM key, else the cloud key. openai: only an LLM key set at the same or a higher layer than the endpoint.",
+            "title": "Api Key Set",
+            "type": "boolean"
+          },
+          "endpoint": {
+            "description": "Effective base URL: for dashscope the resolved DashScope endpoint (llm endpoint, else cloud endpoint); for openai the server base URL incl. /v1, '' when unset.",
+            "title": "Endpoint",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "provider": {
+            "description": "`dashscope` (DashScope compatible mode) or `openai` (any OpenAI-compatible server: llama.cpp, vLLM, Ollama, Lemonade, ...).",
+            "enum": [
+              "dashscope",
+              "openai"
+            ],
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "endpoint",
+          "model",
+          "api_key_set",
+          "api_key_masked"
+        ],
+        "title": "LlmSettingsOut",
+        "type": "object"
+      },
+      "LlmSettingsUpdate": {
+        "description": "Omitted = unchanged; ``\"\"`` = clear the Settings override (config file / env / default\napply again).\n\nTrust: with provider ``openai`` the transcript text (and the LLM key, if set) is sent to\nwhatever base URL is configured here, so only point it at a server you control. Changing the\neffective endpoint or provider to an ``openai`` endpoint without sending ``api_key`` in the\nsame request clears the stored LLM key, so a key is never re-used for a new host.",
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "format": "password",
+                "maxLength": 500,
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Write-only. Non-empty sets the override, '' clears it, omitted leaves it. dashscope: empty = the cloud key; openai: optional.",
+            "title": "Api Key"
+          },
+          "endpoint": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "dashscope: an allowed DashScope endpoint ('' = the cloud endpoint). openai: the server's http(s) base URL incl. /v1, e.g. http://192.168.2.10:8080/v1; no credentials, query or fragment.",
+            "title": "Endpoint"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "enum": [
+                  "dashscope",
+                  "openai"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          }
+        },
+        "title": "LlmSettingsUpdate",
+        "type": "object"
+      },
       "LlmSuggestionsIn": {
         "properties": {
           "segment_ids": {
@@ -1034,6 +1204,38 @@
           "discarded"
         ],
         "title": "LlmSuggestionsOut",
+        "type": "object"
+      },
+      "LlmTestOut": {
+        "properties": {
+          "message": {
+            "description": "Redacted; never contains the key.",
+            "title": "Message",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Model the server reports (else the configured one); null when no request was made.",
+            "title": "Model"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "message",
+          "model"
+        ],
+        "title": "LlmTestOut",
         "type": "object"
       },
       "LocalModelOut": {
@@ -1579,6 +1781,9 @@
           "cloud": {
             "$ref": "#/components/schemas/CloudSettingsOut"
           },
+          "config_file": {
+            "$ref": "#/components/schemas/ConfigFileOut"
+          },
           "env_only": {
             "additionalProperties": {
               "type": "string"
@@ -1590,6 +1795,9 @@
           "environment": {
             "$ref": "#/components/schemas/EnvironmentOut"
           },
+          "llm": {
+            "$ref": "#/components/schemas/LlmSettingsOut"
+          },
           "local": {
             "$ref": "#/components/schemas/LocalSettingsOut"
           },
@@ -1600,6 +1808,20 @@
             ],
             "title": "Provider Default",
             "type": "string"
+          },
+          "sources": {
+            "additionalProperties": {
+              "enum": [
+                "default",
+                "env",
+                "config",
+                "settings"
+              ],
+              "type": "string"
+            },
+            "description": "Layer each online setting comes from (`cloud.endpoint`, `cloud.model`, `cloud.file_transfer`, `cloud.api_key`, `llm.provider`, `llm.endpoint`, `llm.model`, `llm.api_key`): settings > config > env > default. For dashscope, `default` for `llm.endpoint` / `llm.api_key` means the cloud value is inherited.",
+            "title": "Sources",
+            "type": "object"
           },
           "upload_roots": {
             "items": {
@@ -1615,6 +1837,9 @@
           "upload_roots",
           "local",
           "cloud",
+          "llm",
+          "sources",
+          "config_file",
           "environment",
           "env_only"
         ],
@@ -1628,6 +1853,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/CloudSettingsUpdate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "llm": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LlmSettingsUpdate"
               },
               {
                 "type": "null"
@@ -3161,7 +3396,7 @@
         ]
       },
       "put": {
-        "description": "Partial update; omitted fields keep their value. ``cloud.api_key`` is write-only:\nnon-empty sets the override, ``\"\"`` clears it (the env value applies again).",
+        "description": "Partial update of the settings-table layer. For every field: omitted = unchanged; ``\"\"``\n= clear the override, so the config file / env / default value applies again. Keys are\nwrite-only.\n\nThe LLM key is bound to its host: when the effective LLM becomes an ``openai`` server with a\ndifferent endpoint (or the provider switches to ``openai``) and the request carries no\n``llm.api_key``, the stored LLM key is cleared.",
         "operationId": "update_settings_api_settings_put",
         "requestBody": {
           "content": {
@@ -3305,6 +3540,28 @@
           }
         },
         "summary": "Test Cloud",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/settings/test-llm": {
+      "post": {
+        "description": "A tiny chat completion (``max_tokens`` 16) against the effective LLM config. Always 200;\nthe message is redacted and never contains the key. Sends a few tokens to the configured\nserver (DashScope: billed).",
+        "operationId": "test_llm_api_settings_test_llm_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmTestOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Test Llm",
         "tags": [
           "settings"
         ]
@@ -3878,7 +4135,7 @@
     },
     "/api/transcripts/{transcript_id}/llm-suggestions": {
       "post": {
-        "description": "[5b] L3: ask the DashScope LLM for corrections of mis-heard words. Opt-in, costs money\nand sends the segment text to the cloud; results are ``suggested`` corrections for review,\nnever applied automatically.",
+        "description": "[5b] L3: ask the configured LLM (DashScope or an OpenAI-compatible server, see\n``GET /api/settings`` ``llm``) for corrections of mis-heard words. Opt-in: DashScope costs\nmoney, and the segment text is sent to that server; results are ``suggested`` corrections\nfor review, never applied automatically.",
         "operationId": "llm_suggestions_api_transcripts__transcript_id__llm_suggestions_post",
         "parameters": [
           {
@@ -4158,7 +4415,7 @@
         ]
       },
       "post": {
-        "description": "M11: summarise the current segments with the DashScope LLM (overview, key points,\ndecisions, action items) and store the result, replacing an earlier one. Opt-in: it costs\nmoney and sends the transcript text and speaker names to the cloud.",
+        "description": "M11: summarise the current segments with the configured LLM (overview, key points,\ndecisions, action items) and store the result, replacing an earlier one. Opt-in: DashScope\ncosts money, and the transcript text and speaker names are sent to that server.",
         "operationId": "create_summary_api_transcripts__transcript_id__summary_post",
         "parameters": [
           {

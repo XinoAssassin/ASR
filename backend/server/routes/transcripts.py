@@ -152,9 +152,10 @@ MAX_LLM_SEGMENTS = 500
 async def llm_suggestions(
     transcript_id: str, body: LlmSuggestionsIn, db: DbDep, env: EnvDep
 ) -> LlmSuggestionsOut:
-    """[5b] L3: ask the DashScope LLM for corrections of mis-heard words. Opt-in, costs money
-    and sends the segment text to the cloud; results are ``suggested`` corrections for review,
-    never applied automatically."""
+    """[5b] L3: ask the configured LLM (DashScope or an OpenAI-compatible server, see
+    ``GET /api/settings`` ``llm``) for corrections of mis-heard words. Opt-in: DashScope costs
+    money, and the segment text is sent to that server; results are ``suggested`` corrections
+    for review, never applied automatically."""
     current = await _get_or_404(db, transcript_id)
     wanted = set(body.segment_ids) if body.segment_ids is not None else None
     segments = [s for s in current.segments if wanted is None or s.id in wanted]
@@ -169,12 +170,7 @@ async def llm_suggestions(
 
     def run() -> tuple[list[Correction], int]:
         with httpx.Client(timeout=120, follow_redirects=False) as http:
-            corrector = LlmCorrector(
-                api_key=settings.cloud_api_key.get_secret_value(),
-                endpoint=settings.cloud_endpoint,
-                model=env.llm_model,
-                http=http,
-            )
+            corrector = LlmCorrector(**settings.llm_kwargs(), http=http)
             return corrector.suggest(segments, terms, context)
 
     try:
@@ -205,9 +201,9 @@ async def llm_suggestions(
 
 
 def _llm_error(exc: ProviderError) -> HTTPException:
-    """Missing key / unusable input -> 422; upstream failures -> 502."""
+    """Missing key / endpoint, unusable config or input -> 422; upstream failures -> 502."""
     msg = str(exc)
-    client_side = ("not configured", "allow-list", "no text", "too long")
+    client_side = ("not configured", "allow-list", "is invalid", "no text", "too long")
     code = _422 if any(m in msg for m in client_side) else status.HTTP_502_BAD_GATEWAY
     return HTTPException(code, msg)
 
@@ -226,9 +222,9 @@ async def get_summary(transcript_id: str, db: DbDep) -> TranscriptSummary:
 
 @router.post("/{transcript_id}/summary", response_model=TranscriptSummary)
 async def create_summary(transcript_id: str, db: DbDep, env: EnvDep) -> TranscriptSummary:
-    """M11: summarise the current segments with the DashScope LLM (overview, key points,
-    decisions, action items) and store the result, replacing an earlier one. Opt-in: it costs
-    money and sends the transcript text and speaker names to the cloud."""
+    """M11: summarise the current segments with the configured LLM (overview, key points,
+    decisions, action items) and store the result, replacing an earlier one. Opt-in: DashScope
+    costs money, and the transcript text and speaker names are sent to that server."""
     current = await _get_or_404(db, transcript_id)
     settings = await load_effective_settings(env, db)
     job = await db.get_job(current.job_id)
@@ -237,12 +233,7 @@ async def create_summary(transcript_id: str, db: DbDep, env: EnvDep) -> Transcri
 
     def run() -> TranscriptSummary:
         with httpx.Client(timeout=180, follow_redirects=False) as http:
-            summarizer = Summarizer(
-                api_key=settings.cloud_api_key.get_secret_value(),
-                endpoint=settings.cloud_endpoint,
-                model=env.llm_model,
-                http=http,
-            )
+            summarizer = Summarizer(**settings.llm_kwargs(), http=http)
             return summarizer.summarize(current.segments, current.speakers, terms, context)
 
     try:

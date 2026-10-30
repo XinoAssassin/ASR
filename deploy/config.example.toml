@@ -1,0 +1,38 @@
+# ASR backend config file: online (cloud) model settings. docs/DEPLOYMENT.md "Config file".
+#
+# Location: ASR_CONFIG_FILE, else <ASR_DATA_DIR>/config.toml (e.g. /data/config.toml in Docker).
+# It holds API keys: chmod 600, owned by the user the backend runs as (uid 1000 in the images).
+# The backend re-reads it when it changes; no restart needed.
+#
+# Precedence per value: Settings page (UI) > this file > environment variable > built-in default.
+# Clearing a value in the Settings page falls back to this file. An empty string here means
+# "not set" (the environment / default applies). Unknown keys and invalid values are ignored and
+# reported under Settings (config file status); they never stop the server.
+
+[cloud]
+# Alibaba DashScope: cloud ASR provider, and the default credentials for the LLM below.
+# Endpoint must be an allowed DashScope endpoint:
+#   https://dashscope.aliyuncs.com, https://cn-beijing.maas.qianwenaiapi.com,
+#   https://<workspace>.cn-beijing.maas.aliyuncs.com
+# endpoint = "https://dashscope.aliyuncs.com"
+# api_key = "sk-..."
+# model = "qwen-audio-3.1-asr-flash-filetrans"
+# file_transfer = "temp_upload"     # temp_upload | public_url
+
+[llm]
+# Chat model for meeting summaries and LLM correction suggestions.
+#
+# provider = "dashscope" (default): DashScope compatible mode.
+#   endpoint: empty = cloud.endpoint (must be an allowed DashScope endpoint)
+#   api_key:  empty = cloud.api_key
+#
+# provider = "openai": any OpenAI-compatible server (llama.cpp, vLLM, Ollama, Lemonade,
+#   FastFlowLM, ...). endpoint is the base URL including /v1; api_key is optional and only sent
+#   when set (cloud.api_key is never sent there). The transcript text, and the key if set, go to
+#   that server: only use a server you control. Servers without JSON mode (response_format) work
+#   too (the backend retries without it).
+#
+# provider = "dashscope"
+# endpoint = ""                     # e.g. "http://192.168.2.10:8080/v1" with provider = "openai"
+# model = "qwen-plus"               # e.g. "qwen3-8b" on a local server
+# api_key = ""

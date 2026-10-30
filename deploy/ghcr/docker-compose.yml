@@ -3,7 +3,8 @@
 #   1. Copy this file and a .env next to it on the NAS:
 #        NAS_HOST=192.168.1.20            # how browsers reach the NAS (IP or name)
 #        ASR_API_KEY=<long random string> # required: the backend is published on the LAN
-#        DASHSCOPE_API_KEY=               # optional, for the cloud provider / LLM features
+#      Online services (DashScope key, LLM) go into Settings in the web UI, or into a config file in
+#      the data volume (/data/config.toml, chmod 600; see deploy/config.example.toml).
 #   2. docker compose pull && docker compose up -d
 #   3. Download the local models once (they are never fetched implicitly):
 #        docker compose run --rm backend asr models download fsmn-vad campplus qwen3-forced-aligner qwen3-asr-0.6b --mirror
@@ -29,8 +30,8 @@ services:
       ASR_PROVIDER_DEFAULT: ${ASR_PROVIDER_DEFAULT:-local}
       ASR_TORCH_THREADS: ${ASR_TORCH_THREADS:-}
       ASR_LOG_LEVEL: ${ASR_LOG_LEVEL:-INFO}
-      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
-      DASHSCOPE_ENDPOINT: ${DASHSCOPE_ENDPOINT:-https://dashscope.aliyuncs.com}
+      # Online services come from Settings or /data/config.toml (layering: UI > file > env).
+      # ASR_CONFIG_FILE: /config/asr.toml   # if you mount the file elsewhere (read-only is fine)
     volumes:
       # Named volumes by default. To keep the files in NAS folders instead, use host paths and give
       # them to uid 1000 (the image's user): `mkdir -p data models && sudo chown 1000:1000 data models`,

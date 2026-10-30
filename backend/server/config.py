@@ -1,16 +1,20 @@
 """Environment configuration (``.env.example``).
 
 ``EnvSettings`` holds values that come only from the process environment / ``.env`` files.
-Runtime-overridable settings (DashScope key, endpoint, model, file transfer, default provider and
-local model choices; EXECUTION_LOG D7) are layered on top of these from the ``settings`` table:
-``effective_settings(env, overrides)`` / ``load_effective_settings(env, db)``. ``ASR_API_KEY``,
-upload roots and CORS origins stay env-only.
+Runtime-overridable settings (default provider and local model choices; EXECUTION_LOG D7) are
+layered on top of these from the ``settings`` table. The online settings (``cloud.*``: DashScope
+endpoint, key, model, file transfer; ``llm.*``: provider, endpoint, model, key for summaries and
+L3 suggestions) have four layers, highest first: settings table (UI) > config file
+(``server.config_file``) > environment > built-in default. See ``effective_settings(env,
+overrides)`` / ``load_effective_settings(env, db)``. ``ASR_API_KEY``, upload roots and CORS
+origins stay env-only.
 
 Tests: build an app with ``create_app(env)`` and an explicit ``EnvSettings``; or set env vars,
 ``monkeypatch.setattr(config, "ENV_FILES", ())`` and call ``get_env.cache_clear()``
 (``tests/conftest.py`` does both).
 """
 
+import asyncio
 import logging
 import os
 from collections.abc import Mapping
@@ -29,7 +33,9 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from asr.correct.llm import LlmProviderName, normalize_base_url
 from asr.providers.base import FileTransferMode, ProviderName
+from server import config_file as cfgfile
 
 if TYPE_CHECKING:
     from server.db import Database
@@ -101,7 +107,27 @@ class EnvSettings(BaseSettings):
     llm_model: str = Field(
         default="qwen-plus",
         validation_alias="ASR_LLM_MODEL",
-        description="DashScope chat model for [5b] L3 correction suggestions.",
+        description="Chat model for summaries and [5b] L3 correction suggestions.",
+    )
+    llm_provider: Literal["", "dashscope", "openai"] = Field(
+        default="",
+        validation_alias="ASR_LLM_PROVIDER",
+        description="dashscope | openai; empty = dashscope.",
+    )
+    llm_endpoint: str = Field(
+        default="",
+        validation_alias="ASR_LLM_ENDPOINT",
+        description="LLM base URL (openai: incl. /v1); empty = the DashScope endpoint.",
+    )
+    llm_api_key: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias="ASR_LLM_API_KEY",
+        description="LLM key; empty = the DashScope key (dashscope) or none (openai).",
+    )
+    config_file: Path | None = Field(
+        default=None,
+        validation_alias="ASR_CONFIG_FILE",
+        description="TOML config file for the online settings; default <data_dir>/config.toml.",
     )
 
     torch_threads: int | None = Field(
@@ -137,6 +163,11 @@ class EnvSettings(BaseSettings):
     def _empty_threads(cls, v: Any) -> Any:
         return None if isinstance(v, str) and not v.strip() else v
 
+    @field_validator("llm_provider", mode="before")
+    @classmethod
+    def _lower_provider(cls, v: Any) -> Any:
+        return v.strip().lower() if isinstance(v, str) else v
+
     @field_validator("local_dtype", mode="before")
     @classmethod
     def _lower_dtype(cls, v: Any) -> Any:
@@ -147,9 +178,9 @@ class EnvSettings(BaseSettings):
     def _empty_flag(cls, v: Any) -> Any:
         return False if isinstance(v, str) and not v.strip() else v
 
-    @field_validator("log_file", mode="before")
+    @field_validator("log_file", "config_file", mode="before")
     @classmethod
-    def _empty_log_file(cls, v: Any) -> Any:
+    def _empty_path(cls, v: Any) -> Any:
         return None if isinstance(v, str) and not v.strip() else v
 
     @field_validator("cors_origins", mode="before")
@@ -204,6 +235,8 @@ class EnvSettings(BaseSettings):
         object.__setattr__(self, "data_dir", data_dir)
         object.__setattr__(self, "upload_roots", resolved)
         object.__setattr__(self, "model_cache_dir", self.model_cache_dir.expanduser().resolve())
+        if self.config_file is not None:
+            object.__setattr__(self, "config_file", self.config_file.expanduser().resolve())
         return self
 
     @property
@@ -287,32 +320,82 @@ def ensure_dirs(env: EnvSettings) -> None:
 
 
 # ------------------------------------------------------------------------- settings overlay
-# Keys of the ``settings`` table that may override env defaults (D7).
+# Keys of the ``settings`` table that may override lower layers (D7).
 SETTING_PROVIDER_DEFAULT = "provider_default"
 SETTING_CLOUD_ENDPOINT = "cloud.endpoint"
 SETTING_CLOUD_MODEL = "cloud.model"
 SETTING_CLOUD_API_KEY = "cloud.api_key"
 SETTING_CLOUD_FILE_TRANSFER = "cloud.file_transfer"
+SETTING_LLM_PROVIDER = "llm.provider"
+SETTING_LLM_ENDPOINT = "llm.endpoint"
+SETTING_LLM_MODEL = "llm.model"
+SETTING_LLM_API_KEY = "llm.api_key"
 SETTING_LOCAL_ASR_MODEL = "local.asr_model"
 SETTING_LOCAL_DIARIZE_MODEL = "local.diarize_model"
 SETTING_LOCAL_DEVICE = "local.device"
 
+# The online settings: settings table > config file > environment > default.
+ONLINE_SETTINGS: tuple[str, ...] = (
+    SETTING_CLOUD_ENDPOINT,
+    SETTING_CLOUD_MODEL,
+    SETTING_CLOUD_FILE_TRANSFER,
+    SETTING_CLOUD_API_KEY,
+    SETTING_LLM_PROVIDER,
+    SETTING_LLM_ENDPOINT,
+    SETTING_LLM_MODEL,
+    SETTING_LLM_API_KEY,
+)
+
 OVERRIDABLE_SETTINGS: frozenset[str] = frozenset(
     {
         SETTING_PROVIDER_DEFAULT,
-        SETTING_CLOUD_ENDPOINT,
-        SETTING_CLOUD_MODEL,
-        SETTING_CLOUD_API_KEY,
-        SETTING_CLOUD_FILE_TRANSFER,
         SETTING_LOCAL_ASR_MODEL,
         SETTING_LOCAL_DIARIZE_MODEL,
         SETTING_LOCAL_DEVICE,
+        *ONLINE_SETTINGS,
     }
 )
 
+Source = Literal["default", "env", "config", "settings"]
+_RANK: dict[str, int] = {"default": 0, "env": 1, "config": 2, "settings": 3}
+
+# Settings key -> the EnvSettings field of its env layer.
+_ENV_FIELDS: dict[str, str] = {
+    SETTING_CLOUD_ENDPOINT: "dashscope_endpoint",
+    SETTING_CLOUD_MODEL: "cloud_model",
+    SETTING_CLOUD_FILE_TRANSFER: "cloud_file_transfer",
+    SETTING_CLOUD_API_KEY: "dashscope_api_key",
+    SETTING_LLM_PROVIDER: "llm_provider",
+    SETTING_LLM_ENDPOINT: "llm_endpoint",
+    SETTING_LLM_MODEL: "llm_model",
+    SETTING_LLM_API_KEY: "llm_api_key",
+}
+
+
+class ConfigFileStatus(BaseModel):
+    """The config file as ``GET /api/settings`` reports it: no values."""
+
+    model_config = ConfigDict(frozen=True)
+
+    path: str | None = Field(description="File in use; null when none is configured or found.")
+    loaded: bool = Field(description="The file was read and parsed.")
+    error: str | None = Field(
+        description="Why the file (or some of its values) was ignored; never contains values."
+    )
+    warnings: list[str] = Field(
+        description="Unknown keys, loose file permissions, values not applicable as layered."
+    )
+
 
 class EffectiveSettings(BaseModel):
-    """Env defaults overridden by the ``settings`` table. The key is a ``SecretStr``."""
+    """All layers merged. Keys are ``SecretStr``.
+
+    ``llm_endpoint`` is the effective base URL (for ``dashscope`` the resolved DashScope
+    endpoint, else the OpenAI-compatible base URL, ``""`` when not configured); ``llm_api_key``
+    is the key that will be sent (for ``dashscope`` the LLM key or else the cloud key; for
+    ``openai`` only an LLM key set at the same or a higher layer than the endpoint, so a key
+    from the config file or env is never sent to an endpoint someone typed into Settings).
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -321,39 +404,196 @@ class EffectiveSettings(BaseModel):
     cloud_model: str
     cloud_file_transfer: FileTransferMode
     cloud_api_key: SecretStr
+    llm_provider: LlmProviderName = "dashscope"
+    llm_endpoint: str = DEFAULT_CLOUD_ENDPOINT
+    llm_model: str = "qwen-plus"
+    llm_api_key: SecretStr = SecretStr("")
     local_asr_model: str | None
     local_diarize_model: str | None
     local_device: Literal["cpu", "cuda", "rocm"]
     model_cache_dir: Path
+    sources: dict[str, Source] = Field(default_factory=dict)
+    config_file: ConfigFileStatus = ConfigFileStatus(
+        path=None, loaded=False, error=None, warnings=[]
+    )
 
     @property
     def cloud_api_key_set(self) -> bool:
         return bool(self.cloud_api_key.get_secret_value())
 
+    @property
+    def llm_api_key_set(self) -> bool:
+        return bool(self.llm_api_key.get_secret_value())
 
-def effective_settings(env: EnvSettings, overrides: Mapping[str, str]) -> EffectiveSettings:
-    """Overlay ``overrides`` (settings-table rows) on ``env``.
+    def llm_kwargs(self) -> dict[str, Any]:
+        """Keyword arguments for ``LlmCorrector`` / ``Summarizer`` / ``check_llm``."""
+        return {
+            "provider": self.llm_provider,
+            "endpoint": self.llm_endpoint,
+            "model": self.llm_model,
+            "api_key": self.llm_api_key.get_secret_value(),
+        }
+
+
+def _env_value(env: EnvSettings, key: str) -> str | None:
+    """The environment's value for ``key``; ``None`` when not set (or empty)."""
+    name = _ENV_FIELDS[key]
+    if name not in env.model_fields_set:
+        return None
+    value = getattr(env, name)
+    text = value.get_secret_value() if isinstance(value, SecretStr) else str(value)
+    return text.strip() or None
+
+
+def _layers(
+    env: EnvSettings, overrides: Mapping[str, str], file: Mapping[str, str], key: str
+) -> list[tuple[Source, str]]:
+    """Non-empty values for ``key``, highest precedence first."""
+    out: list[tuple[Source, str]] = []
+    for source, raw in (
+        ("settings", overrides.get(key)),
+        ("config", file.get(key)),
+        ("env", _env_value(env, key)),
+    ):
+        if raw is not None and raw.strip():
+            out.append((source, raw))  # type: ignore[arg-type]
+    return out
+
+
+def _pick(
+    layers: list[tuple[Source, str]],
+    validate: Any,
+    key: str,
+    notes: list[str],
+) -> tuple[str, Source] | None:
+    """First layer whose value validates. An invalid stored / env value is skipped with a
+    warning naming the key and layer only (config-file values were validated on load)."""
+    for source, raw in layers:
+        try:
+            return validate(raw), source
+        except ValueError:
+            if source != "config":
+                log.warning("ignoring invalid %s value for %r", source, key)
+            notes.append(f"{key} from {_SOURCE_NAME[source]} is invalid and was ignored")
+    return None
+
+
+_SOURCE_NAME = {"settings": "Settings", "config": "the config file", "env": "the environment"}
+
+
+def _lenient_endpoint(value: str) -> str:
+    """Env / stored cloud endpoints are used as given (the provider checks the allow-list and
+    the connection test reports it), as before the config layer existed."""
+    return value.strip().rstrip("/")
+
+
+def _online(
+    env: EnvSettings, overrides: Mapping[str, str], file: Mapping[str, str]
+) -> tuple[dict[str, Any], dict[str, Source], list[str]]:
+    values: dict[str, Any] = {}
+    sources: dict[str, Source] = {}
+    notes: list[str] = []
+
+    def resolve(key: str, validate: Any, default: str) -> tuple[str, Source]:
+        picked = _pick(_layers(env, overrides, file, key), validate, key, notes)
+        return picked if picked is not None else (default, "default")
+
+    values["cloud_endpoint"], sources[SETTING_CLOUD_ENDPOINT] = resolve(
+        SETTING_CLOUD_ENDPOINT, _lenient_endpoint, DEFAULT_CLOUD_ENDPOINT
+    )
+    values["cloud_model"], sources[SETTING_CLOUD_MODEL] = resolve(
+        SETTING_CLOUD_MODEL, cfgfile.valid_model, DEFAULT_CLOUD_MODEL
+    )
+    values["cloud_file_transfer"], sources[SETTING_CLOUD_FILE_TRANSFER] = resolve(
+        SETTING_CLOUD_FILE_TRANSFER, cfgfile.valid_file_transfer, "temp_upload"
+    )
+    cloud_key, sources[SETTING_CLOUD_API_KEY] = resolve(
+        SETTING_CLOUD_API_KEY, cfgfile.valid_api_key, ""
+    )
+    values["cloud_api_key"] = SecretStr(cloud_key)
+
+    provider, sources[SETTING_LLM_PROVIDER] = resolve(
+        SETTING_LLM_PROVIDER, cfgfile.valid_llm_provider, "dashscope"
+    )
+    values["llm_provider"] = provider
+    values["llm_model"], sources[SETTING_LLM_MODEL] = resolve(
+        SETTING_LLM_MODEL, cfgfile.valid_model, "qwen-plus"
+    )
+
+    # The endpoint must suit the effective provider, whichever layer that came from.
+    def endpoint_for_provider(value: str) -> str:
+        if provider == "dashscope":
+            return cfgfile.valid_cloud_endpoint(value)
+        return normalize_base_url(value)
+
+    endpoint_layers = _layers(env, overrides, file, SETTING_LLM_ENDPOINT)
+    picked = None
+    for source, raw in endpoint_layers:
+        try:
+            picked = (endpoint_for_provider(raw), source)
+            break
+        except ValueError:
+            notes.append(
+                f"llm.endpoint from {_SOURCE_NAME[source]} does not suit provider "
+                f"{provider} and was ignored"
+            )
+    if picked is not None:
+        values["llm_endpoint"], sources[SETTING_LLM_ENDPOINT] = picked
+    else:
+        # dashscope: inherit the cloud endpoint; openai: not configured.
+        values["llm_endpoint"] = values["cloud_endpoint"] if provider == "dashscope" else ""
+        sources[SETTING_LLM_ENDPOINT] = "default"
+
+    key_layers = _layers(env, overrides, file, SETTING_LLM_API_KEY)
+    key_pick = _pick(key_layers, cfgfile.valid_api_key, SETTING_LLM_API_KEY, notes)
+    if provider == "dashscope":
+        if key_pick is not None:
+            values["llm_api_key"] = SecretStr(key_pick[0])
+            sources[SETTING_LLM_API_KEY] = key_pick[1]
+        else:  # inherit the DashScope key
+            values["llm_api_key"] = values["cloud_api_key"]
+            sources[SETTING_LLM_API_KEY] = "default"
+    else:
+        endpoint_rank = _RANK[sources[SETTING_LLM_ENDPOINT]]
+        if key_pick is not None and _RANK[key_pick[1]] >= endpoint_rank:
+            values["llm_api_key"] = SecretStr(key_pick[0])
+            sources[SETTING_LLM_API_KEY] = key_pick[1]
+        else:
+            values["llm_api_key"] = SecretStr("")
+            sources[SETTING_LLM_API_KEY] = "default"
+            if key_pick is not None:
+                notes.append(
+                    f"llm.api_key from {_SOURCE_NAME[key_pick[1]]} is not sent to the "
+                    f"llm.endpoint set in {_SOURCE_NAME[sources[SETTING_LLM_ENDPOINT]]}; "
+                    "set the key there too"
+                )
+    return values, sources, notes
+
+
+def effective_settings(
+    env: EnvSettings,
+    overrides: Mapping[str, str],
+    file: cfgfile.ConfigFileState | None = None,
+) -> EffectiveSettings:
+    """Overlay ``overrides`` (settings-table rows) and the config file (default: read it for
+    ``env``) on ``env``.
 
     An override that no longer validates (e.g. an old provider name) is ignored with a warning
     that names the key only, never the value.
     """
+    if file is None:
+        file = cfgfile.load(env)
     values: dict[str, Any] = {
         "provider_default": env.provider_default,
-        "cloud_endpoint": env.dashscope_endpoint,
-        "cloud_model": env.cloud_model,
-        "cloud_file_transfer": env.cloud_file_transfer,
-        "cloud_api_key": env.dashscope_api_key,
         "local_asr_model": None,
         "local_diarize_model": None,
         "local_device": env.device,
         "model_cache_dir": env.model_cache_dir,
     }
+    online, sources, notes = _online(env, overrides, file.values)
+    values.update(online)
     mapping = {
         SETTING_PROVIDER_DEFAULT: "provider_default",
-        SETTING_CLOUD_ENDPOINT: "cloud_endpoint",
-        SETTING_CLOUD_MODEL: "cloud_model",
-        SETTING_CLOUD_FILE_TRANSFER: "cloud_file_transfer",
-        SETTING_CLOUD_API_KEY: "cloud_api_key",
         SETTING_LOCAL_ASR_MODEL: "local_asr_model",
         SETTING_LOCAL_DIARIZE_MODEL: "local_diarize_model",
         SETTING_LOCAL_DEVICE: "local_device",
@@ -368,11 +608,21 @@ def effective_settings(env: EnvSettings, overrides: Mapping[str, str]) -> Effect
             log.warning("ignoring invalid stored setting %r", key)
             continue
         values[field] = getattr(candidate, field)
+    info = file.info
+    values["sources"] = sources
+    values["config_file"] = ConfigFileStatus(
+        path=info.path,
+        loaded=info.loaded,
+        error=info.error,
+        warnings=[*info.warnings, *dict.fromkeys(notes)],
+    )
     return EffectiveSettings(**values)
 
 
 async def load_effective_settings(env: EnvSettings, db: "Database") -> EffectiveSettings:
-    return effective_settings(env, await db.get_settings())
+    overrides = await db.get_settings()
+    file = await asyncio.to_thread(cfgfile.load, env)
+    return effective_settings(env, overrides, file)
 
 
 def mask_secret(secret: SecretStr | str | None) -> str | None:

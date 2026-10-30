@@ -87,6 +87,27 @@ async def test_get_defaults(client: httpx.AsyncClient, env: EnvSettings) -> None
             "api_key_masked": None,
             "api_key_source": None,
         },
+        "llm": {
+            "provider": "dashscope",
+            "endpoint": "https://dashscope.aliyuncs.com",
+            "model": "qwen-plus",
+            "api_key_set": False,
+            "api_key_masked": None,
+        },
+        "sources": dict.fromkeys(
+            (
+                "cloud.endpoint",
+                "cloud.model",
+                "cloud.file_transfer",
+                "cloud.api_key",
+                "llm.provider",
+                "llm.endpoint",
+                "llm.model",
+                "llm.api_key",
+            ),
+            "default",
+        ),
+        "config_file": {"path": None, "loaded": False, "error": None, "warnings": []},
     }
 
 
@@ -154,8 +175,7 @@ async def test_partial_update(client: httpx.AsyncClient) -> None:
         {"cloud": {"endpoint": "https://evil.example.com"}},
         {"cloud": {"endpoint": "http://dashscope.aliyuncs.com"}},
         {"cloud": {"file_transfer": "oss"}},
-        {"cloud": {"model": ""}},
-        {"cloud": {"model": "   "}},
+        {"cloud": {"model": "x" * 201}},
         {"provider_default": "other"},
         {"local": {"device": "tpu"}},
     ],

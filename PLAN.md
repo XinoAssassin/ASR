@@ -246,7 +246,8 @@ GET    /api/audio/{upload_id}         streamed audio with Range support (browser
 
 CRUD   /api/term-sets                 term sets; POST /api/term-sets/import (txt / paste)
 
-GET    /api/settings                  secrets masked
+GET    /api/settings                  secrets masked; also llm {provider, endpoint, model, api_key_set}, sources (layer per online field), config_file status
+POST   /api/settings/test-llm         check the configured LLM (DashScope or OpenAI-compatible)
 PUT    /api/settings
 POST   /api/settings/test-cloud       verify the DashScope key
 GET    /api/settings/local-models     local model download status; POST .../download
@@ -316,7 +317,7 @@ Timestamps are seconds (float) throughout; the cloud provider converts from mill
 - Hardware: CPU / CUDA / ROCm from `/api/system/hardware` (also selectable per job)
 - Default provider
 - Local: ASR model, diarization model, device (cpu / cuda), model cache dir, download status and one-click download
-- Cloud: endpoint, model name, DashScope key (masked), file transfer method (temp upload / OSS / public URL) and its credentials, "test connection"
+- Online services: cloud ASR (endpoint, model, DashScope key masked, file transfer, test) and the LLM for summaries / suggestions (DashScope or an OpenAI-compatible server: endpoint, model, key, test); each field shows its source (UI / config file / env / default). The same values can come from a TOML config file (`deploy/config.example.toml`); precedence UI > file > env > default
 - Privacy notice for cloud mode
 - SiYuan: endpoint, token (masked, write-only), default notebook, path template; test connection
 - "Set by environment" section: read-only facts (auth, CORS, roots, dirs, logging) and env markers on fields

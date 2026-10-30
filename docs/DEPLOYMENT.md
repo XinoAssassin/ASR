@@ -5,7 +5,7 @@ static frontend on one host, backend — possibly on a GPU server — on another
 are in `PLAN.md`; security decisions referenced as `Dnn` are in `docs/EXECUTION_LOG.md`.
 
 Contents: [1 Topology](#1-topology) · [2 Backend](#2-backend) · [3 Frontend](#3-frontend) ·
-[4 Configuration reference](#4-configuration-reference) · [5 Access control](#5-access-control-api-key-cors-hosts) ·
+[4 Configuration reference](#4-configuration-reference) ([4.1 Config file](#41-config-file)) · [5 Access control](#5-access-control-api-key-cors-hosts) ·
 [6 HTTPS and reverse proxy](#6-https-and-reverse-proxy) · [7 Models](#7-models) · [8 CPU, CUDA and ROCm](#8-cpu-cuda-and-rocm) ·
 [9 Batch CLI](#9-batch-cli) · [10 Logs](#10-logs) · [11 Backup and upgrade](#11-backup-and-upgrade) ·
 [12 Checklist](#12-two-host-checklist) · [13 Verification status](#13-verification-status)
@@ -220,7 +220,8 @@ holding at least `NAS_HOST` (how browsers reach the NAS) and `ASR_API_KEY` (mand
 backend port is published on the LAN), then `docker compose pull && docker compose up -d`, download
 the models once with `docker compose run --rm backend asr models download … --mirror` (§7) and open
 `http://<NAS_HOST>:8080`. Update with `docker compose pull && docker compose up -d`; pin a build
-with `ASR_BACKEND_TAG=sha-<commit>-cpu`. If a pull asks for credentials, the package is still
+with `ASR_BACKEND_TAG=sha-<commit>-cpu`. Cloud / LLM keys go in `/data/config.toml` or the
+Settings page, not in the compose `.env` ([§4.1](#41-config-file)). If a pull asks for credentials, the package is still
 private: make it public in the package settings on GitHub, or `docker login ghcr.io` with a token
 that has `read:packages`.
 
@@ -261,7 +262,8 @@ environment. Relative paths resolve against the working directory. Exceptions ar
 no effect (with Docker the compose file passes them as real variables, so `.env` works there).
 CLI commands other than `asr serve` (`asr models`, `asr batch`, `asr transcribe`) read the process
 environment only — export `ASR_MODEL_CACHE_DIR` (and `DASHSCOPE_API_KEY` for the cloud provider)
-in the shell that runs them.
+in the shell that runs them; they do not read the config file ([§4.1](#41-config-file)), which only
+the server uses.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -280,20 +282,87 @@ in the shell that runs them.
 | `ASR_LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`. |
 | `ASR_LOG_FORMAT` | `text` | `text` or `json` (one object per line). |
 | `ASR_LOG_FILE` | empty | Optional log file, rotated at 10 MB, 5 backups; stdout/stderr logging continues. |
-| `DASHSCOPE_API_KEY` | empty | Cloud provider key; Settings can store one in the database instead. Never sent to browsers. |
-| `DASHSCOPE_ENDPOINT` | `https://dashscope.aliyuncs.com` | DashScope endpoint; Settings can override. |
-| `ASR_CLOUD_MODEL` | `qwen-audio-3.1-asr-flash-filetrans` | Cloud ASR model; Settings can override. |
-| `ASR_CLOUD_FILE_TRANSFER` | `temp_upload` | `temp_upload` or `public_url`. |
-| `ASR_LLM_MODEL` | `qwen-plus` | DashScope chat model for the optional LLM correction suggestions. |
+| `ASR_CONFIG_FILE` | `<data>/config.toml` if it exists | TOML file with the online settings below ([§4.1](#41-config-file)). |
+| `DASHSCOPE_API_KEY` | empty | Cloud provider key (also the default LLM key). Config file `cloud.api_key` and Settings override it. Never sent to browsers. |
+| `DASHSCOPE_ENDPOINT` | `https://dashscope.aliyuncs.com` | DashScope endpoint (allow-listed, D2); config file / Settings override. |
+| `ASR_CLOUD_MODEL` | `qwen-audio-3.1-asr-flash-filetrans` | Cloud ASR model; config file / Settings override. |
+| `ASR_CLOUD_FILE_TRANSFER` | `temp_upload` | `temp_upload` or `public_url`; config file / Settings override. |
+| `ASR_LLM_PROVIDER` | `dashscope` | LLM for summaries and correction suggestions: `dashscope` or `openai` (any OpenAI-compatible server); config file / Settings override. |
+| `ASR_LLM_ENDPOINT` | empty | LLM base URL. `dashscope`: empty = the DashScope endpoint; `openai`: e.g. `http://192.168.2.10:8080/v1`. |
+| `ASR_LLM_MODEL` | `qwen-plus` | Chat model for summaries and correction suggestions; config file / Settings override. |
+| `ASR_LLM_API_KEY` | empty | LLM key. `dashscope`: empty = the DashScope key; `openai`: optional. |
 | `MODELSCOPE_CACHE`, `HF_HOME` | library defaults | Hub-library metadata caches; the images point them at `/models/.cache/...`. |
 | `HTTPS_PROXY`, `NO_PROXY` | — | Honoured by model downloads and cloud calls. |
 
 Docker-only (`docker-compose.yml`): `ASR_BIND_ADDR` (`127.0.0.1`), `ASR_BACKEND_PORT` (8000),
 `ASR_FRONTEND_PORT` (8080), `ASR_BACKEND_URL` (rendered into `config.js`).
 
-Settings saved from the UI (default provider, cloud endpoint/model/key/file transfer, local ASR
-model/device) are stored in `asr.db` and override the env defaults; `ASR_API_KEY`, CORS, hosts and
-paths cannot be changed from the UI by design.
+Settings saved from the UI (default provider, cloud endpoint/model/key/file transfer, LLM
+provider/endpoint/model/key, local ASR model/device) are stored in `asr.db` and override the lower
+layers; `ASR_API_KEY`, CORS, hosts and paths cannot be changed from the UI by design.
+
+### 4.1 Config file
+
+The online settings (DashScope ASR and the LLM) can also come from a TOML file, so a deployment
+needs no `DASHSCOPE_*` variables. Template: `deploy/config.example.toml`.
+
+- Location: `ASR_CONFIG_FILE`, else `<ASR_DATA_DIR>/config.toml` when it exists (Docker:
+  `/data/config.toml`). No file is fine. An `ASR_CONFIG_FILE` that does not exist is reported, not
+  fatal.
+- Precedence, per value: **Settings page > config file > environment > built-in default**. Clearing
+  a value in Settings (`""` in `PUT /api/settings`) falls back to the file. An empty string in the
+  file means "not set".
+- Reloaded automatically when the file changes (checked on every settings read); no restart.
+- Errors never stop the server. Invalid TOML ignores the whole file; an invalid value ignores that
+  value; unknown keys are ignored. `GET /api/settings` → `config_file` (`path`, `loaded`, `error`,
+  `warnings`) and `sources` (which layer each value came from) show what happened, and the backend
+  logs it once per change. Messages name keys and line numbers, never values.
+- It holds API keys: `chmod 600`, owned by the backend user. On POSIX a file readable or writable
+  by group/other gets a warning.
+
+```toml
+[cloud]
+endpoint = "https://dashscope.aliyuncs.com"   # allow-listed DashScope endpoints only (D2)
+api_key = "sk-..."
+model = "qwen-audio-3.1-asr-flash-filetrans"
+file_transfer = "temp_upload"
+
+[llm]                      # summaries + LLM correction suggestions
+provider = "dashscope"     # or "openai"
+endpoint = ""              # dashscope: empty = cloud.endpoint; openai: base URL incl. /v1
+model = "qwen-plus"
+api_key = ""               # dashscope: empty = cloud.api_key; openai: optional
+```
+
+**LLM provider `openai`** points summaries and suggestions at any OpenAI-compatible server
+(llama.cpp `llama-server`, vLLM, Ollama `http://host:11434/v1`, Lemonade, FastFlowLM on the NPU,
+see `docs/research/amd-npu.md`). Trust: the transcript text, speaker names and glossary, and the
+LLM key if one is set, are sent to that URL, which can be any http(s) host. Only configure a
+server you control, and prefer https or a trusted LAN. The DashScope key is never sent to an `openai`
+endpoint. An LLM key is only sent when it is set at the same or a higher-precedence layer than the
+endpoint: a key in the config file or environment is not sent to an endpoint someone typed into
+Settings, and changing the endpoint in Settings without entering a key clears the key stored in
+Settings. A server that rejects
+`response_format` (JSON mode) is retried without it. Settings → "test" (`POST
+/api/settings/test-llm`) sends a 16-token request. Small local models are weaker than `qwen-plus` at
+Chinese correction and summaries.
+
+**NAS / Docker:** put `config.toml` in the data volume (`/data/config.toml`), owned by uid 1000:
+
+```bash
+# bind-mounted data folder (./data:/data)
+cp config.example.toml data/config.toml && nano data/config.toml
+sudo chown 1000:1000 data/config.toml && sudo chmod 600 data/config.toml
+# named volume (asr-data)
+docker compose cp config.toml backend:/data/config.toml
+docker compose exec -u 0 backend sh -c 'chown 1000:1000 /data/config.toml && chmod 600 /data/config.toml'
+```
+
+Then remove `DASHSCOPE_API_KEY` / `DASHSCOPE_ENDPOINT` from the compose `.env` (or leave them
+empty: an empty variable counts as not set). To keep the file outside the data volume, mount it
+read-only and point `ASR_CONFIG_FILE` at it, e.g. `- ./config.toml:/config/config.toml:ro` plus
+`ASR_CONFIG_FILE: /config/config.toml` in the compose `environment:`. A `config.toml` inside
+the data volume is part of its backups, so those backups hold the keys too.
 
 ## 5. Access control (API key, CORS, hosts)
 

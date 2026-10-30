@@ -10,8 +10,16 @@ is no longer than a mis-hearing of that term can be: ``max(2 * len(term), len(te
 ``TERM_SLACK``) is exempt. Each changed span becomes a ``Correction(source="llm",
 status="suggested")``.
 
-Transport: DashScope OpenAI-compatible chat (``{endpoint}/compatible-mode/v1/chat/completions``)
-with the same key and allow-listed endpoint as the cloud ASR provider.
+Transport (``provider``):
+
+- ``dashscope``: DashScope OpenAI-compatible chat
+  (``{endpoint}/compatible-mode/v1/chat/completions``) with a DashScope key, only to an
+  allow-listed endpoint (same as the cloud ASR provider, D2).
+- ``openai``: any OpenAI-compatible server (llama.cpp, vLLM, Ollama, Lemonade, FastFlowLM, ...):
+  ``{base_url}/chat/completions``, ``Authorization: Bearer`` only when a key is configured. The
+  base URL is the operator's choice, so the text (and the key, if any) goes wherever it points.
+  A server that rejects ``response_format`` gets one retry without it, and the JSON is then read
+  from the text (code fences and ``<think>`` blocks stripped).
 """
 
 from __future__ import annotations
@@ -21,7 +29,8 @@ import difflib
 import json
 import re
 from collections.abc import Callable, Iterator, Sequence
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -32,6 +41,10 @@ BATCH_SIZE = 20
 MAX_EDIT_RATIO = 0.15
 TERM_SLACK = 2  # characters an exempt term change may carry besides the term itself
 DEFAULT_LLM_MODEL = "qwen-plus"
+
+LlmProviderName = Literal["dashscope", "openai"]
+LLM_PROVIDERS: tuple[LlmProviderName, ...] = ("dashscope", "openai")
+MAX_BASE_URL_CHARS = 500
 
 SYSTEM_PROMPT = """你是会议转写的校对助手。输入是语音识别结果，按 id 给出若干句子。
 只修正明显的听错（同音字、近音词、英文术语被写成中文谐音、专有名词写法），参考术语表和拼音。
@@ -174,13 +187,188 @@ def diff_corrections(segment_id: str, old: str, new: str) -> list[Correction]:
     return out
 
 
-def chat_url(api_key: str, endpoint: str) -> str:
-    """Validated chat-completions URL for ``endpoint`` (same allow-list as the cloud ASR)."""
+def normalize_base_url(url: str) -> str:
+    """Validated OpenAI-compatible base URL (``http(s)://host[:port][/path]``, e.g.
+    ``http://192.168.2.10:8080/v1``) without a trailing ``/``.
+
+    Rejects other schemes, userinfo (credentials), query strings, fragments, whitespace and
+    control characters; a pasted ``.../chat/completions`` suffix is dropped. The message of the
+    ``ValueError`` never contains the URL.
+    """
+    if not isinstance(url, str):
+        raise ValueError("must be a string")
+    url = url.strip()
+    if not url or len(url) > MAX_BASE_URL_CHARS:
+        raise ValueError(f"must be 1-{MAX_BASE_URL_CHARS} characters")
+    if any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in url):
+        raise ValueError("must not contain whitespace or control characters")
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        raise ValueError("is not a valid URL") from None
+    if parts.scheme not in ("http", "https"):
+        raise ValueError("must be an http:// or https:// URL")
+    if "@" in parts.netloc:
+        raise ValueError("must not contain credentials")
+    if "?" in url or "#" in url:
+        raise ValueError("must not contain a query string or fragment")
+    if not parts.hostname or (port is not None and not 0 < port < 65536):
+        raise ValueError("is not a valid URL")
+    path = parts.path.rstrip("/")
+    if path.endswith("/chat/completions"):
+        path = path[: -len("/chat/completions")]
+    return f"{parts.scheme}://{parts.netloc}{path}"
+
+
+def chat_url(api_key: str, endpoint: str, provider: LlmProviderName = "dashscope") -> str:
+    """Validated chat-completions URL.
+
+    ``dashscope``: the key is required and ``endpoint`` must be allow-listed (same as the cloud
+    ASR). ``openai``: ``endpoint`` is the server's base URL (``normalize_base_url``); a key is
+    optional.
+    """
+    if provider == "openai":
+        if not endpoint:
+            raise ProviderError("LLM endpoint is not configured")
+        try:
+            base = normalize_base_url(endpoint)
+        except ValueError:
+            raise ProviderError("LLM endpoint is invalid (an http(s) base URL is needed)") from None
+        return base + "/chat/completions"
+    if provider != "dashscope":
+        raise ProviderError("LLM provider is invalid")
     if not api_key:
         raise ProviderError("DashScope API key is not configured")
     if not is_allowed_endpoint(endpoint):
         raise ProviderError("DashScope endpoint is not in the allow-list")
     return endpoint.rstrip("/") + "/compatible-mode/v1/chat/completions"
+
+
+_FENCE = re.compile(r"^```[A-Za-z0-9_-]*\s*\n?(.*?)\n?```$", re.DOTALL)
+_THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def parse_json_text(content: str) -> Any:
+    """JSON from a chat answer: plain, in a code fence, or after a ``<think>`` block; as a last
+    resort the outermost ``{...}``. ``ValueError`` when none parses."""
+    text = _THINK.sub("", content).strip()
+    fenced = _FENCE.match(text)
+    if fenced:
+        text = fenced.group(1).strip()
+    try:
+        return json.loads(text)
+    except ValueError:
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        return json.loads(text[start : end + 1])
+
+
+def _rejects_json_mode(r: httpx.Response) -> bool:
+    """A 400 / 422 whose body mentions ``response_format`` (server without JSON mode)."""
+    if r.status_code not in (400, 422):
+        return False
+    try:
+        return "response_format" in r.text[:4000].lower()
+    except Exception:  # undecodable body
+        return False
+
+
+class ChatAnswer:
+    """One chat completion: the message text, the model the server reports, and whether JSON
+    mode (``response_format``) was used."""
+
+    def __init__(self, content: str, model: str | None, json_mode: bool) -> None:
+        self.content = content
+        self.model = model
+        self.json_mode = json_mode
+
+
+def chat_completion(
+    http: httpx.Client,
+    url: str,
+    api_key: str,
+    *,
+    model: str,
+    messages: list[dict[str, str]],
+    provider: LlmProviderName = "dashscope",
+    temperature: float = 0,
+    max_tokens: int | None = None,
+    json_mode: bool = True,
+) -> ChatAnswer:
+    """One chat completion; errors are ``ProviderError`` without secrets or response bodies.
+
+    With ``json_mode`` the request carries ``response_format={"type": "json_object"}``; an
+    ``openai`` server that rejects it (400 / 422 naming ``response_format``) is asked once more
+    without it.
+    """
+    body: dict[str, Any] = {"model": model, "temperature": temperature, "messages": messages}
+    if max_tokens is not None:
+        body["max_tokens"] = max_tokens
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    label = "DashScope" if provider == "dashscope" else "The LLM server"
+
+    def post(with_json: bool) -> httpx.Response:
+        payload = {**body, "response_format": {"type": "json_object"}} if with_json else body
+        try:
+            return http.post(url, json=payload, headers=headers)
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"LLM request failed: {type(exc).__name__}") from None
+
+    r = post(json_mode)
+    if json_mode and provider == "openai" and _rejects_json_mode(r):
+        json_mode = False
+        r = post(False)
+    if r.status_code in (401, 403):
+        raise ProviderError(f"{label} rejected the API key for the LLM")
+    if r.status_code != 200:
+        raise ProviderError(f"LLM request failed (HTTP {r.status_code})")
+    try:
+        data = r.json()
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError, ValueError):
+        raise ProviderError("LLM returned an unreadable answer") from None
+    if not isinstance(content, str):
+        raise ProviderError("LLM returned an unreadable answer")
+    reported = data.get("model") if isinstance(data, dict) else None
+    return ChatAnswer(content, reported if isinstance(reported, str) else None, json_mode)
+
+
+def chat_json_answer(
+    http: httpx.Client,
+    url: str,
+    api_key: str,
+    *,
+    model: str,
+    system: str,
+    user: str,
+    temperature: float = 0,
+    provider: LlmProviderName = "dashscope",
+    json_mode: bool = True,
+) -> tuple[dict[str, Any], bool]:
+    """``chat_json`` plus whether JSON mode was used (callers keep it off for later calls once a
+    server has rejected it)."""
+    answer = chat_completion(
+        http,
+        url,
+        api_key,
+        model=model,
+        provider=provider,
+        temperature=temperature,
+        json_mode=json_mode,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    )
+    try:
+        parsed = parse_json_text(answer.content)
+    except ValueError:
+        raise ProviderError("LLM returned an unreadable answer") from None
+    if not isinstance(parsed, dict):
+        raise ProviderError("LLM returned an unreadable answer")
+    return parsed, answer.json_mode
 
 
 def chat_json(
@@ -192,32 +380,56 @@ def chat_json(
     system: str,
     user: str,
     temperature: float = 0,
+    provider: LlmProviderName = "dashscope",
 ) -> dict[str, Any]:
-    """One JSON-mode chat completion; errors are ``ProviderError`` without secrets."""
-    body = {
-        "model": model,
-        "temperature": temperature,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    }
+    """One JSON-mode chat completion parsed to an object; errors are ``ProviderError`` without
+    secrets."""
+    parsed, _ = chat_json_answer(
+        http,
+        url,
+        api_key,
+        model=model,
+        system=system,
+        user=user,
+        temperature=temperature,
+        provider=provider,
+    )
+    return parsed
+
+
+def check_llm(
+    *,
+    provider: LlmProviderName,
+    api_key: str,
+    endpoint: str,
+    model: str,
+    http: httpx.Client | None = None,
+) -> tuple[bool, str, str | None]:
+    """A tiny chat completion against the given LLM. Never raises; returns ``(ok, message,
+    model)`` where ``model`` is the name the server reports (else the configured one). The
+    message never contains the key, the request or the response body."""
     try:
-        r = http.post(url, json=body, headers={"Authorization": f"Bearer {api_key}"})
-    except httpx.HTTPError as exc:
-        raise ProviderError(f"LLM request failed: {type(exc).__name__}") from None
-    if r.status_code in (401, 403):
-        raise ProviderError("DashScope rejected the API key for the LLM")
-    if r.status_code != 200:
-        raise ProviderError(f"LLM request failed (HTTP {r.status_code})")
+        url = chat_url(api_key, endpoint, provider)
+    except ProviderError as exc:
+        return False, str(exc), None
     try:
-        answer = json.loads(r.json()["choices"][0]["message"]["content"])
-    except (KeyError, IndexError, TypeError, ValueError):
-        raise ProviderError("LLM returned an unreadable answer") from None
-    if not isinstance(answer, dict):
-        raise ProviderError("LLM returned an unreadable answer")
-    return answer
+        with llm_client(http, timeout=30) as client:
+            answer = chat_completion(
+                client,
+                url,
+                api_key,
+                model=model,
+                provider=provider,
+                max_tokens=16,
+                messages=[
+                    {"role": "system", "content": 'Answer with the JSON object {"ok": true}.'},
+                    {"role": "user", "content": "ping"},
+                ],
+            )
+    except ProviderError as exc:
+        return False, str(exc), model
+    note = "" if answer.json_mode else " (no JSON mode; answers are parsed from plain text)"
+    return True, f"The LLM answered{note}", answer.model or model
 
 
 @contextlib.contextmanager
@@ -237,11 +449,14 @@ class LlmCorrector:
         api_key: str,
         endpoint: str,
         model: str = DEFAULT_LLM_MODEL,
+        provider: LlmProviderName = "dashscope",
         http: httpx.Client | None = None,
     ) -> None:
-        self.url = chat_url(api_key, endpoint)
+        self.url = chat_url(api_key, endpoint, provider)
         self._key = api_key
         self.model = model
+        self.provider: LlmProviderName = provider
+        self._json_mode = True  # off once the server has rejected response_format
         self._http = http  # None: a short-lived client per request, closed right after
 
     def _ask(
@@ -254,13 +469,15 @@ class LlmCorrector:
             user.append("背景：" + context)
         user.append("句子：\n" + json.dumps({"segments": payload}, ensure_ascii=False))
         with llm_client(self._http, timeout=120) as http:
-            answer = chat_json(
+            answer, self._json_mode = chat_json_answer(
                 http,
                 self.url,
                 self._key,
                 model=self.model,
                 system=SYSTEM_PROMPT,
                 user="\n\n".join(user),
+                provider=self.provider,
+                json_mode=self._json_mode,
             )
         items = answer.get("segments", [])
         if not isinstance(items, list):
