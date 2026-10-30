@@ -5,6 +5,7 @@ Core types (``JobOptions``, ``Term``, ``Speaker``, ``Segment``, ``ProbeInfo``,
 is generated from the OpenAPI document built from these models.
 """
 
+import unicodedata
 from datetime import datetime
 from typing import Annotated, Literal, Self
 from urllib.parse import urlsplit
@@ -271,6 +272,7 @@ class ReplaceOp(BaseModel):
     op: Literal["replace"]
     find: str = Field(min_length=1, max_length=200)
     replace: str = Field(max_length=200)
+    ignore_case: bool = Field(default=False, description="Match `find` case-insensitively.")
 
 
 class MergeSpeakersOp(BaseModel):
@@ -309,8 +311,20 @@ class LlmSuggestionsOut(BaseModel):
     discarded: int = Field(description="Segment rewrites dropped by the edit-ratio guard.")
 
 
+_EXPECTED_UPDATED_AT_DOC = (
+    "The transcript's `updated_at` as loaded. If it changed since, the request is refused with "
+    "409 and nothing is written. Omit to apply on top of the current version."
+)
+
+
 class TranscriptPatch(BaseModel):
     ops: list[TranscriptOp] = Field(min_length=1, max_length=1000)
+    expected_updated_at: datetime | None = Field(default=None, description=_EXPECTED_UPDATED_AT_DOC)
+
+
+# Control characters, line / paragraph separators and bidi overrides: a speaker name is one line
+# of plain text in the UI and in every export format.
+_BIDI_CONTROLS = frozenset("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 
 
 class SpeakerUpdate(BaseModel):
@@ -318,9 +332,18 @@ class SpeakerUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
 
+    @field_validator("name")
+    @classmethod
+    def _single_line(cls, v: str) -> str:
+        for ch in v:
+            if unicodedata.category(ch) in ("Cc", "Zl", "Zp") or ch in _BIDI_CONTROLS:
+                raise ValueError("name must not contain control characters or line breaks")
+        return v
+
 
 class SpeakersUpdate(BaseModel):
     speakers: list[SpeakerUpdate] = Field(max_length=100)
+    expected_updated_at: datetime | None = Field(default=None, description=_EXPECTED_UPDATED_AT_DOC)
 
 
 # ------------------------------------------------------------------------------------- term sets

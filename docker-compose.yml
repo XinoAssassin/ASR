@@ -32,6 +32,11 @@ services:
       # are accepted. Set a key before publishing the port beyond 127.0.0.1.
       ASR_API_KEY: ${ASR_API_KEY:-}
       ASR_ALLOWED_HOSTS: ${ASR_ALLOWED_HOSTS:-}
+      # Without a key the server only accepts loopback peers and `asr serve --host 0.0.0.0`
+      # refuses to start. Inside the container every request arrives from the Docker bridge, so
+      # compose opts in: safe ONLY while `ports:` below publishes on 127.0.0.1. With
+      # ASR_BIND_ADDR=0.0.0.0 (LAN), set ASR_API_KEY (and optionally this to 0).
+      ASR_ALLOW_UNAUTHENTICATED_NETWORK: ${ASR_ALLOW_UNAUTHENTICATED_NETWORK:-1}
       # Every browser origin that serves the SPA (scheme://host[:port], no path, no '*').
       # Add http://tauri.localhost for the Windows desktop app.
       ASR_CORS_ORIGINS: ${ASR_CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
@@ -54,6 +59,7 @@ services:
       - asr-models:/models  # model weights (re-downloadable)
     ports:
       # Loopback by default; set ASR_BIND_ADDR=0.0.0.0 (with ASR_API_KEY) for LAN access.
+      # ASR_ALLOW_UNAUTHENTICATED_NETWORK above relies on this loopback-only publish.
       - "${ASR_BIND_ADDR:-127.0.0.1}:${ASR_BACKEND_PORT:-8000}:8000"
     restart: unless-stopped
     # asr serve drains for up to 30 s. A job still running at shutdown is marked failed

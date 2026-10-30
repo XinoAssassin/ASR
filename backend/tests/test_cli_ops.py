@@ -20,13 +20,16 @@ LAN = "0.0.0.0"  # noqa: S104 - the bind address under test
 
 
 class BatchProvider(FakeProvider):
-    """Fails for files named ``bad*``; records the options of each call."""
+    """Fails for files named ``bad*`` (``crash*``: an unexpected error); records each call."""
 
     def transcribe(self, source: AudioSource, options: JobOptions, progress):  # type: ignore[override]
         assert source.path is not None
         if source.path.name.startswith("bad"):
             self.calls.append((source, options))
             raise ProviderError("cannot decode")
+        if source.path.name.startswith("crash"):
+            self.calls.append((source, options))
+            raise RuntimeError("model exploded")
         return super().transcribe(source, options, progress)
 
 
@@ -82,14 +85,8 @@ def test_batch_transcribes_dirs_skips_existing_and_reports_failures(batch_provid
         ],
     )
     assert result.exit_code == 1, result.output  # one failure
-    assert sorted(p.name for p in out.iterdir()) == [
-        "a.srt",
-        "a.txt",
-        "b.srt",
-        "b.txt",
-        "c.srt",
-        "c.txt",
-    ]
+    assert sorted(p.name for p in out.iterdir()) == ["a.srt", "a.txt", "b.srt", "b.txt", "sub"]
+    assert sorted(p.name for p in (out / "sub").iterdir()) == ["c.srt", "c.txt"]  # mirrored
     assert (out / "a.txt").read_text(encoding="utf-8").strip()
     assert "3 transcribed, 0 skipped, 1 failed" in result.output
     assert "bad.mp3: cannot decode" in result.output
@@ -111,6 +108,47 @@ def test_batch_defaults_write_next_to_input(batch_provider, tmp_path):
     data = json.loads((tmp_path / "m.json").read_text(encoding="utf-8"))
     assert len(data["segments"]) == len(sample_transcript().segments)
     assert (tmp_path / "m.txt").is_file()
+
+
+def test_batch_names_same_stem_siblings_and_mirrors_subdirs(batch_provider, tmp_path):
+    src = tmp_path / "in"
+    _audio(src, "talk.wav", "talk.mp4", "solo.wav")
+    _audio(src / "a", "x.wav")
+    _audio(src / "b", "x.wav")
+    out = tmp_path / "out"
+    result = runner.invoke(
+        server_cli.app, ["batch", str(src), "-r", "--out-dir", str(out), "-f", "txt"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "5 transcribed" in result.output
+    written = sorted(p.relative_to(out).as_posix() for p in out.rglob("*.txt"))
+    assert written == ["a/x.txt", "b/x.txt", "solo.txt", "talk.mp4.txt", "talk.wav.txt"]
+
+    # next to the inputs (no --out-dir): the same sibling rule
+    result = runner.invoke(server_cli.app, ["batch", str(src), "-f", "txt"])
+    assert result.exit_code == 0, result.output
+    assert sorted(p.name for p in src.glob("*.txt")) == ["solo.txt", "talk.mp4.txt", "talk.wav.txt"]
+
+
+def test_batch_refuses_colliding_outputs_up_front(batch_provider, tmp_path):
+    _audio(tmp_path / "a", "x.wav")
+    _audio(tmp_path / "b", "x.wav")
+    out = tmp_path / "out"
+    args = ["batch", str(tmp_path / "a"), str(tmp_path / "b"), "--out-dir", str(out)]
+    result = runner.invoke(server_cli.app, args)
+    assert result.exit_code == 2 and "collision" in result.output
+    assert batch_provider.calls == [] and not out.exists()
+
+
+def test_batch_survives_unexpected_errors_and_unknown_duration(batch_provider, tmp_path):
+    _audio(tmp_path, "crash.wav", "ok.wav")
+    batch_provider.result = batch_provider.result.model_copy(update={"duration": None})
+    result = runner.invoke(server_cli.app, ["batch", str(tmp_path), "-f", "txt"])
+    assert result.exit_code == 1, result.output
+    assert "1 transcribed, 0 skipped, 1 failed" in result.output
+    assert "RuntimeError: model exploded" in result.output
+    assert "? s audio" in result.output
+    assert (tmp_path / "ok.txt").is_file()
 
 
 def test_batch_rejects_bad_terms_file_and_empty_input(batch_provider, tmp_path):
@@ -136,10 +174,12 @@ def test_serve_runs_one_uvicorn_worker_with_our_logging(
     from server.config import get_env
 
     get_env.cache_clear()
-    result = runner.invoke(
-        server_cli.app,
-        ["serve", "--host", LAN, "--port", "8123", "--forwarded-allow-ips", "10.0.0.1"],
-    )
+    args = ["serve", "--host", LAN, "--port", "8123", "--forwarded-allow-ips", "10.0.0.1"]
+    refused = runner.invoke(server_cli.app, args)  # LAN bind without a key: refused
+    assert refused.exit_code == 2 and "refusing to listen" in refused.output and not calls
+    monkeypatch.setenv("ASR_ALLOW_UNAUTHENTICATED_NETWORK", "1")
+    get_env.cache_clear()
+    result = runner.invoke(server_cli.app, args)
     assert result.exit_code == 0, result.output
     (call,) = calls
     assert call["app"] == "server.app:app"

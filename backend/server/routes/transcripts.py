@@ -5,8 +5,10 @@ Edits only ever touch ``segments`` / ``speakers``; ``original`` is immutable (ru
 
 import re
 import unicodedata
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import quote, unquote, urlsplit
 
 import httpx
@@ -55,11 +57,46 @@ async def get_transcript(transcript_id: str, db: DbDep) -> TranscriptOut:
     return await _get_or_404(db, transcript_id)
 
 
-@router.patch("/{transcript_id}", response_model=TranscriptOut)
-async def patch_transcript(transcript_id: str, body: TranscriptPatch, db: DbDep) -> TranscriptOut:
-    """Apply ops in order to ``segments`` / ``speakers`` / ``corrections``; ``original`` is
-    immutable (rule 9). All ops are validated before anything is written (all-or-nothing)."""
-    current = await _get_or_404(db, transcript_id)
+CONFLICT_DETAIL = "transcript changed since it was loaded"
+MAX_WRITE_ATTEMPTS = 5
+_TOLERANCE = timedelta(milliseconds=1)  # clients may round-trip updated_at through a JS Date
+
+Compute = Callable[[TranscriptOut], dict[str, Any]]
+
+
+def _same_version(expected: datetime, stored: datetime) -> bool:
+    """``expected_updated_at`` matches the stored ``updated_at``. Sub-millisecond differences
+    are ignored (successive writes are always >= 2 ms apart, see ``Database``)."""
+    if expected.tzinfo is None:
+        expected = expected.replace(tzinfo=UTC)
+    return abs(stored - expected) < _TOLERANCE
+
+
+async def _write(
+    db: Database, transcript_id: str, expected: datetime | None, compute: Compute
+) -> TranscriptOut:
+    """Read, compute, write-if-unchanged (optimistic concurrency).
+
+    ``compute(current)`` returns the ``update_transcript`` fields (or raises ``HTTPException``).
+    With ``expected`` (the client's ``updated_at``) a change since the client loaded the
+    transcript is a 409. Without it (CLI / desktop clients) a write that raced another one is
+    recomputed on the fresh row, so the other write is never lost.
+    """
+    for _ in range(MAX_WRITE_ATTEMPTS):
+        current = await _get_or_404(db, transcript_id)
+        if expected is not None and not _same_version(expected, current.updated_at):
+            raise HTTPException(status.HTTP_409_CONFLICT, CONFLICT_DETAIL)
+        fields = compute(current)
+        updated = await db.update_transcript(
+            transcript_id, **fields, if_updated_at=current.updated_at
+        )
+        if updated is not None:
+            return updated
+        # Missing (404 on the next read) or changed meanwhile (409 / recompute).
+    raise HTTPException(status.HTTP_409_CONFLICT, CONFLICT_DETAIL)
+
+
+def _apply_ops(current: TranscriptOut, body: TranscriptPatch) -> dict[str, Any]:
     state = EditState(
         segments=list(current.segments),
         speakers=list(current.speakers),
@@ -78,22 +115,32 @@ async def patch_transcript(transcript_id: str, body: TranscriptPatch, db: DbDep)
                 case MergeOp():
                     state.merge(op.segment_id)
                 case ReplaceOp():
-                    state.replace(op.find, op.replace)
+                    state.replace(op.find, op.replace, ignore_case=op.ignore_case)
                 case MergeSpeakersOp():
                     state.merge_speakers(op.from_id, op.into_id)
                 case ReviewCorrectionOp():
                     state.review_correction(op.correction_id, op.decision)
         except EditError as exc:
             raise HTTPException(_422, f"ops[{n}]: {exc}") from None
-    updated = await db.update_transcript(
-        transcript_id,
-        segments=state.segments,
-        speakers=state.speakers,
-        corrections=state.corrections,
+    return {
+        "segments": state.segments,
+        "speakers": state.speakers,
+        "corrections": state.corrections,
+    }
+
+
+@router.patch(
+    "/{transcript_id}",
+    response_model=TranscriptOut,
+    responses={409: {"description": "`expected_updated_at` no longer matches."}},
+)
+async def patch_transcript(transcript_id: str, body: TranscriptPatch, db: DbDep) -> TranscriptOut:
+    """Apply ops in order to ``segments`` / ``speakers`` / ``corrections``; ``original`` is
+    immutable (rule 9). All ops are validated before anything is written (all-or-nothing).
+    With ``expected_updated_at`` the patch is refused (409) if the transcript changed since."""
+    return await _write(
+        db, transcript_id, body.expected_updated_at, lambda cur: _apply_ops(cur, body)
     )
-    if updated is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "transcript not found")
-    return updated
 
 
 MAX_LLM_SEGMENTS = 500
@@ -133,16 +180,27 @@ async def llm_suggestions(
     except ProviderError as exc:
         status_code = _422 if "not configured" in str(exc) else status.HTTP_502_BAD_GATEWAY
         raise HTTPException(status_code, str(exc)) from None
-    checked = {s.id for s in segments}
-    kept = [
-        c
-        for c in current.corrections
-        if not (c.source == "llm" and c.status == "suggested" and c.segment_id in checked)
-    ]
-    updated = await db.update_transcript(transcript_id, corrections=[*kept, *found])
-    if updated is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "transcript not found")
-    return LlmSuggestionsOut(transcript=updated, added=len(found), discarded=discarded)
+    # The call took up to two minutes: merge into the row as it is *now*. Corrections added or
+    # reviewed meanwhile are kept; segments edited meanwhile keep what they have and get none of
+    # the (now misplaced) new suggestions.
+    checked_text = {s.id: s.text for s in segments}
+    added = 0
+
+    def merge(fresh: TranscriptOut) -> dict[str, Any]:
+        nonlocal added
+        fresh_text = {s.id: s.text for s in fresh.segments}
+        same = {sid for sid, text in checked_text.items() if fresh_text.get(sid) == text}
+        new = [c for c in found if c.segment_id in same]
+        kept = [
+            c
+            for c in fresh.corrections
+            if not (c.source == "llm" and c.status == "suggested" and c.segment_id in same)
+        ]
+        added = len(new)
+        return {"corrections": [*kept, *new]}
+
+    updated = await _write(db, transcript_id, None, merge)
+    return LlmSuggestionsOut(transcript=updated, added=added, discarded=discarded)
 
 
 def _llm_error(exc: ProviderError) -> HTTPException:
@@ -190,6 +248,11 @@ async def create_summary(transcript_id: str, db: DbDep, env: EnvDep) -> Transcri
         summary = await run_in_threadpool(run)
     except ProviderError as exc:
         raise _llm_error(exc) from None
+    fresh = await _get_or_404(db, transcript_id)
+    if fresh.updated_at != current.updated_at or summary.created_at < current.updated_at:
+        # Edited while the LLM was working: the summary describes the text as it was loaded,
+        # so date it to that version and it shows up as stale (D50).
+        summary = summary.model_copy(update={"created_at": current.updated_at})
     if await db.set_summary(transcript_id, summary) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "transcript not found")
     return summary
@@ -202,11 +265,7 @@ async def delete_summary(transcript_id: str, db: DbDep) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.put("/{transcript_id}/speakers", response_model=TranscriptOut)
-async def update_speakers(transcript_id: str, body: SpeakersUpdate, db: DbDep) -> TranscriptOut:
-    """Rename / recolour speakers; an id not in the transcript yet adds a new speaker (for a
-    voice diarization missed). Speakers not listed are unchanged."""
-    current = await _get_or_404(db, transcript_id)
+def _apply_speakers(current: TranscriptOut, body: SpeakersUpdate) -> dict[str, Any]:
     by_id = {s.id: s for s in current.speakers}
     seen: set[str] = set()
     order = [s.id for s in current.speakers]
@@ -222,18 +281,24 @@ async def update_speakers(transcript_id: str, body: SpeakersUpdate, db: DbDep) -
             raise HTTPException(_422, f"speakers[{n}]: name must not be blank")
         prev = by_id[upd.id]
         by_id[upd.id] = Speaker(id=prev.id, name=name, color=upd.color or prev.color)
-    speakers = [by_id[sid] for sid in order]
-    updated = await db.update_transcript(transcript_id, speakers=speakers)
-    if updated is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "transcript not found")
-    return updated
+    return {"speakers": [by_id[sid] for sid in order]}
 
 
-@router.post("/{transcript_id}/revert", response_model=TranscriptOut)
-async def revert_transcript(transcript_id: str, db: DbDep) -> TranscriptOut:
-    """``segments <- original``. Speaker names/colours are kept; any speaker id used by the
-    original but missing from the list is added back."""
-    current = await _get_or_404(db, transcript_id)
+@router.put(
+    "/{transcript_id}/speakers",
+    response_model=TranscriptOut,
+    responses={409: {"description": "`expected_updated_at` no longer matches."}},
+)
+async def update_speakers(transcript_id: str, body: SpeakersUpdate, db: DbDep) -> TranscriptOut:
+    """Rename / recolour speakers; an id not in the transcript yet adds a new speaker (for a
+    voice diarization missed). Speakers not listed are unchanged. With ``expected_updated_at``
+    the update is refused (409) if the transcript changed since."""
+    return await _write(
+        db, transcript_id, body.expected_updated_at, lambda cur: _apply_speakers(cur, body)
+    )
+
+
+def _revert(current: TranscriptOut) -> dict[str, Any]:
     known = {s.id for s in current.speakers}
     speakers = list(current.speakers)
     for seg in current.original:
@@ -241,12 +306,15 @@ async def revert_transcript(transcript_id: str, db: DbDep) -> TranscriptOut:
             known.add(seg.speaker_id)
             color = SPEAKER_COLORS[len(speakers) % len(SPEAKER_COLORS)]
             speakers.append(Speaker(id=seg.speaker_id, name=seg.speaker_id, color=color))
-    if len(speakers) != len(current.speakers):
-        await db.update_transcript(transcript_id, speakers=speakers)
-    reverted = await db.revert_transcript(transcript_id)
-    if reverted is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "transcript not found")
-    return reverted
+    # The automatic corrections no longer apply to the raw text, so they go too.
+    return {"segments": current.original, "speakers": speakers, "corrections": []}
+
+
+@router.post("/{transcript_id}/revert", response_model=TranscriptOut)
+async def revert_transcript(transcript_id: str, db: DbDep) -> TranscriptOut:
+    """``segments <- original``. Speaker names/colours are kept; any speaker id used by the
+    original but missing from the list is added back."""
+    return await _write(db, transcript_id, None, _revert)
 
 
 # --------------------------------------------------------------------------------------- export

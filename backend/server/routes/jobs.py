@@ -249,8 +249,10 @@ def _remove_audio_files(
     env: EnvSettings, upload_id: str, stored_path: str, *, registered: bool
 ) -> None:
     """Blocking file removal (run in a thread). Registered files belong to the user and stay."""
-    cached = env.data_dir / "cache" / "audio" / f"{upload_id}.mp3"
-    cached.unlink(missing_ok=True)
+    cache_dir = env.data_dir / "cache" / "audio"
+    (cache_dir / f"{upload_id}.mp3").unlink(missing_ok=True)
+    for cached in cache_dir.glob(f"{upload_id}.s*.mp3"):  # other audio streams
+        cached.unlink(missing_ok=True)
     path = Path(stored_path)
     if registered:
         return

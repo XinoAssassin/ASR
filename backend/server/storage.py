@@ -268,20 +268,38 @@ def move_into(src: Path, directory: Path, filename: str) -> Path:
     """Move a finished temp file into ``directory`` under a unique, sanitised ``filename``."""
     dst, placeholder = create_unique_file(directory, safe_filename(filename))
     try:
+        placeholder_st = os.fstat(placeholder.fileno())
         try:
             placeholder.close()
             os.replace(src, dst)  # we own ``dst``; replacing it is race-free
         except OSError as exc:
             if exc.errno != errno.EXDEV:
                 raise
-            with open(src, "rb") as fin, open(dst, "wb") as fout:
-                shutil.copyfileobj(fin, fout, _COPY_CHUNK)
+            _copy_into_placeholder(src, dst, placeholder_st)
             src.unlink()
     except BaseException:
         with contextlib.suppress(OSError):
             dst.unlink()
         raise
     return dst
+
+
+def _copy_into_placeholder(src: Path, dst: Path, placeholder: os.stat_result) -> None:
+    """Cross-device fallback of ``move_into``: copy into the file we created, never into
+    whatever ``dst`` names now. ``O_NOFOLLOW`` refuses a symlink swapped in at ``dst``, and the
+    inode check refuses any other replacement (e.g. a hard link to a file outside the roots)."""
+    flags = os.O_WRONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(dst, flags)
+    except OSError as exc:
+        raise PathNotAllowedError("upload destination changed while storing the file") from exc
+    with os.fdopen(fd, "wb") as fout:
+        st = os.fstat(fout.fileno())
+        if (st.st_dev, st.st_ino) != (placeholder.st_dev, placeholder.st_ino):
+            raise PathNotAllowedError("upload destination changed while storing the file")
+        fout.truncate(0)
+        with open(src, "rb") as fin:
+            shutil.copyfileobj(fin, fout, _COPY_CHUNK)
 
 
 def new_temp_file(data_dir: Path) -> tuple[Path, BinaryIO]:
@@ -441,7 +459,7 @@ def complete_session(data_dir: Path, roots: Sequence[Path], session_id: str) -> 
     try:
         lock_fd = os.open(directory / COMPLETE_LOCK, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
     except FileExistsError as exc:
-        raise ConflictError("upload session is already being completed") from exc
+        raise ConflictError("upload session is already being completed; retry in a moment") from exc
     os.close(lock_fd)
     done = False
     try:

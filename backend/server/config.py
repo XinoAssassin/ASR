@@ -70,6 +70,13 @@ class EnvSettings(BaseSettings):
         description="Comma-separated extra Host names accepted while auth is disabled "
         "(loopback names are always accepted; '*' accepts any host).",
     )
+    allow_unauthenticated_network: bool = Field(
+        default=False,
+        validation_alias="ASR_ALLOW_UNAUTHENTICATED_NETWORK",
+        description="With an empty ASR_API_KEY, accept non-loopback peers and let `asr serve` "
+        "bind a non-loopback address. Only safe when the port is published on loopback only "
+        "(docker-compose's 127.0.0.1:8000:8000).",
+    )
     upload_roots: Annotated[list[Path], NoDecode] = Field(
         default_factory=list,
         validation_alias="ASR_UPLOAD_ROOTS",
@@ -134,6 +141,11 @@ class EnvSettings(BaseSettings):
     @classmethod
     def _lower_dtype(cls, v: Any) -> Any:
         return (v.strip().lower() or "auto") if isinstance(v, str) else v
+
+    @field_validator("allow_unauthenticated_network", mode="before")
+    @classmethod
+    def _empty_flag(cls, v: Any) -> Any:
+        return False if isinstance(v, str) and not v.strip() else v
 
     @field_validator("log_file", mode="before")
     @classmethod

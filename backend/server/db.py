@@ -14,7 +14,7 @@ import json
 import logging
 import sqlite3
 from collections.abc import Iterable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Self
 
@@ -29,6 +29,10 @@ from server.schemas import JobOut, JobStatus, TermSetOut, TranscriptOut, UploadO
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 4
+
+# Conditional transcript writes move ``updated_at`` by at least this much, so a version a client
+# round-tripped through a millisecond-precision clock (JS ``Date``) still identifies one write.
+MIN_VERSION_STEP = timedelta(milliseconds=2)
 
 _SEGMENTS = TypeAdapter(list[Segment])
 _SPEAKERS = TypeAdapter(list[Speaker])
@@ -214,28 +218,7 @@ class Database:
         await conn.execute("PRAGMA foreign_keys = ON")
         await _enable_wal(conn)
         await conn.executescript(SCHEMA)
-        async with conn.execute("SELECT MAX(version) FROM schema_version") as cur:
-            row = await cur.fetchone()
-        current = row[0] if row is not None else None
-        if current is not None and current < 2:
-            # v2: uploads.registered (files registered in place must never be deleted).
-            await conn.execute(
-                "ALTER TABLE uploads ADD COLUMN registered INTEGER NOT NULL DEFAULT 0"
-            )
-        if current is not None and current < 3:
-            # v3: transcripts.corrections_json ([5b] post-correction records).
-            await conn.execute(
-                "ALTER TABLE transcripts ADD COLUMN corrections_json TEXT NOT NULL DEFAULT '[]'"
-            )
-        if current is not None and current < 4:
-            # v4: transcripts.summary_json (M11 LLM summary, NULL until requested).
-            await conn.execute("ALTER TABLE transcripts ADD COLUMN summary_json TEXT")
-        if current is None or current < SCHEMA_VERSION:
-            await conn.execute(
-                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                (SCHEMA_VERSION, _ts(utcnow())),
-            )
-        await conn.commit()
+        await _migrate(conn)
         return cls(conn)
 
     async def schema_version(self) -> int:
@@ -394,6 +377,15 @@ class Database:
         await self.conn.commit()
         return cur.rowcount > 0
 
+    async def latest_job_for_upload(self, upload_id: str) -> JobOut | None:
+        """Newest job that uses ``upload_id`` (None if there is none)."""
+        async with self.conn.execute(
+            "SELECT * FROM jobs WHERE upload_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+            (upload_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return None if row is None else _job_from_row(row)
+
     async def count_jobs_for_upload(
         self, upload_id: str, *, exclude_job_id: str | None = None
     ) -> int:
@@ -463,10 +455,19 @@ class Database:
         segments: Sequence[Segment] | None = None,
         speakers: Sequence[Speaker] | None = None,
         corrections: Sequence[Correction] | None = None,
+        if_updated_at: datetime | None = None,
     ) -> TranscriptOut | None:
-        """Update the editable columns. ``original`` has no setter (rule 9)."""
+        """Update the editable columns. ``original`` has no setter (rule 9).
+
+        With ``if_updated_at`` the write only happens while the row still has that
+        ``updated_at`` (optimistic concurrency: read, compute, write-if-unchanged). Returns None
+        when the row is missing *or* changed meanwhile; callers tell the two apart.
+        """
+        now = utcnow()
+        if if_updated_at is not None and now < if_updated_at + MIN_VERSION_STEP:
+            now = if_updated_at + MIN_VERSION_STEP
         sets = ["updated_at = ?"]
-        params: list[Any] = [_ts(utcnow())]
+        params: list[Any] = [_ts(now)]
         if segments is not None:
             sets.append("segments_json = ?")
             params.append(_dump_segments(segments))
@@ -476,9 +477,14 @@ class Database:
         if corrections is not None:
             sets.append("corrections_json = ?")
             params.append(_CORRECTIONS.dump_json(list(corrections)).decode("utf-8"))
+        where = "id = ?"
+        params.append(transcript_id)
+        if if_updated_at is not None:
+            where += " AND updated_at = ?"
+            params.append(_ts(if_updated_at))
         cur = await self.conn.execute(
-            f"UPDATE transcripts SET {', '.join(sets)} WHERE id = ?",  # noqa: S608
-            (*params, transcript_id),
+            f"UPDATE transcripts SET {', '.join(sets)} WHERE {where}",  # noqa: S608
+            params,
         )
         await self.conn.commit()
         if cur.rowcount == 0:
@@ -573,6 +579,49 @@ class Database:
         cur = await self.conn.execute("DELETE FROM settings WHERE key = ?", (key,))
         await self.conn.commit()
         return cur.rowcount > 0
+
+
+# (version, table, column, column definition): columns added after v1. ``SCHEMA`` already has them,
+# so a fresh database only records the version.
+MIGRATIONS: tuple[tuple[int, str, str, str], ...] = (
+    # v2: files registered in place must never be deleted.
+    (2, "uploads", "registered", "INTEGER NOT NULL DEFAULT 0"),
+    # v3: [5b] post-correction records.
+    (3, "transcripts", "corrections_json", "TEXT NOT NULL DEFAULT '[]'"),
+    # v4: M11 LLM summary, NULL until requested.
+    (4, "transcripts", "summary_json", "TEXT"),
+)
+
+
+async def _columns(conn: aiosqlite.Connection, table: str) -> set[str]:
+    async with conn.execute(f"PRAGMA table_info({table})") as cur:
+        return {row[1] for row in await cur.fetchall()}
+
+
+async def _migrate(conn: aiosqlite.Connection) -> None:
+    """Bring an older database up to ``SCHEMA_VERSION`` in one transaction.
+
+    SQLite DDL is transactional, so a crash mid-migration leaves the database as it was. Each
+    step is also keyed on ``PRAGMA table_info`` rather than on the recorded version, so a
+    database an older release left half-migrated (column added, version not recorded) opens.
+    """
+    await conn.execute("BEGIN IMMEDIATE")
+    try:
+        async with conn.execute("SELECT MAX(version) FROM schema_version") as cur:
+            row = await cur.fetchone()
+        current = row[0] if row is not None else None
+        for _version, table, column, definition in MIGRATIONS:
+            if column not in await _columns(conn, table):
+                await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        if current is None or current < SCHEMA_VERSION:
+            await conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (SCHEMA_VERSION, _ts(utcnow())),
+            )
+        await conn.commit()
+    except BaseException:
+        await conn.rollback()
+        raise
 
 
 async def _enable_wal(conn: aiosqlite.Connection) -> None:

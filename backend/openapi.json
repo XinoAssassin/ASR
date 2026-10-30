@@ -1226,6 +1226,12 @@
             "title": "Find",
             "type": "string"
           },
+          "ignore_case": {
+            "default": false,
+            "description": "Match `find` case-insensitively.",
+            "title": "Ignore Case",
+            "type": "boolean"
+          },
           "op": {
             "const": "replace",
             "title": "Op",
@@ -1491,6 +1497,19 @@
       },
       "SpeakersUpdate": {
         "properties": {
+          "expected_updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The transcript's `updated_at` as loaded. If it changed since, the request is refused with 409 and nothing is written. Omit to apply on top of the current version.",
+            "title": "Expected Updated At"
+          },
           "speakers": {
             "items": {
               "$ref": "#/components/schemas/SpeakerUpdate"
@@ -1781,6 +1800,19 @@
       },
       "TranscriptPatch": {
         "properties": {
+          "expected_updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The transcript's `updated_at` as loaded. If it changed since, the request is refused with 409 and nothing is written. Omit to apply on top of the current version.",
+            "title": "Expected Updated At"
+          },
           "ops": {
             "items": {
               "discriminator": {
@@ -2124,6 +2156,26 @@
             "schema": {
               "title": "Upload Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Audio stream to play; default: the newest job's `options.preprocess.stream_index` for this upload, else 0.",
+            "in": "query",
+            "name": "stream_index",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Audio stream to play; default: the newest job's `options.preprocess.stream_index` for this upload, else 0.",
+              "title": "Stream Index"
             }
           }
         ],
@@ -3032,7 +3084,7 @@
         ]
       },
       "patch": {
-        "description": "Apply ops in order to ``segments`` / ``speakers`` / ``corrections``; ``original`` is\nimmutable (rule 9). All ops are validated before anything is written (all-or-nothing).",
+        "description": "Apply ops in order to ``segments`` / ``speakers`` / ``corrections``; ``original`` is\nimmutable (rule 9). All ops are validated before anything is written (all-or-nothing).\nWith ``expected_updated_at`` the patch is refused (409) if the transcript changed since.",
         "operationId": "patch_transcript_api_transcripts__transcript_id__patch",
         "parameters": [
           {
@@ -3065,6 +3117,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "409": {
+            "description": "`expected_updated_at` no longer matches."
           },
           "422": {
             "content": {
@@ -3275,7 +3330,7 @@
     },
     "/api/transcripts/{transcript_id}/speakers": {
       "put": {
-        "description": "Rename / recolour speakers; an id not in the transcript yet adds a new speaker (for a\nvoice diarization missed). Speakers not listed are unchanged.",
+        "description": "Rename / recolour speakers; an id not in the transcript yet adds a new speaker (for a\nvoice diarization missed). Speakers not listed are unchanged. With ``expected_updated_at``\nthe update is refused (409) if the transcript changed since.",
         "operationId": "update_speakers_api_transcripts__transcript_id__speakers_put",
         "parameters": [
           {
@@ -3308,6 +3363,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "409": {
+            "description": "`expected_updated_at` no longer matches."
           },
           "422": {
             "content": {
@@ -3582,7 +3640,7 @@
     },
     "/api/uploads/{session_id}/complete": {
       "post": {
-        "description": "Assemble the parts in order into ``target_dir`` and probe the result.",
+        "description": "Assemble the parts in order into ``target_dir`` and probe the result.\n\nIdempotent for an hour: repeating ``complete`` for a session that already completed returns\nthe same upload with 200 (a concurrent repeat waits for the first call).",
         "operationId": "complete_upload_api_uploads__session_id__complete_post",
         "parameters": [
           {
@@ -3596,6 +3654,16 @@
           }
         ],
         "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadOut"
+                }
+              }
+            },
+            "description": "Already completed (repeated call)."
+          },
           "201": {
             "content": {
               "application/json": {

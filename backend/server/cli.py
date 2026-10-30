@@ -6,7 +6,6 @@ rule 5); this module extends the core Typer app instead.
 
 from __future__ import annotations
 
-import ipaddress
 from typing import Annotated
 
 import typer
@@ -29,18 +28,11 @@ if load_dotenv_files not in STARTUP_HOOKS:
     STARTUP_HOOKS.append(load_dotenv_files)
 
 
-def _is_loopback(host: str) -> bool:
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
 @app.command()
 def serve(
-    host: Annotated[str, typer.Option(help="Bind address; 0.0.0.0 for LAN access.")] = "127.0.0.1",
+    host: Annotated[
+        str, typer.Option(help="Bind address; 0.0.0.0 for LAN access (requires ASR_API_KEY).")
+    ] = "127.0.0.1",
     port: Annotated[int, typer.Option(min=1, max=65535)] = 8000,
     forwarded_allow_ips: Annotated[
         str | None,
@@ -50,7 +42,9 @@ def serve(
 ) -> None:
     """Run the HTTP API (one process: the job queue lives in it)."""
     import uvicorn
+    from rich.markup import escape
 
+    from server.auth import is_loopback_address
     from server.config import ConfigError, get_env
     from server.logging_setup import configure_logging
 
@@ -59,12 +53,22 @@ def serve(
     except ConfigError as exc:
         err.print(f"[red]error:[/red] {exc}")
         raise typer.Exit(2) from None
-    configure_logging(env.log_level, env.log_format, env.log_file)
-    if not _is_loopback(host) and not env.api_key_required:
+    if not is_loopback_address(host) and not env.api_key_required:
+        if not env.allow_unauthenticated_network:
+            err.print(
+                f"[red]error:[/red] refusing to listen on {escape(host)} with an empty "
+                "ASR_API_KEY: every client on the network would control the API. Set "
+                "ASR_API_KEY, bind 127.0.0.1, or - only when the port is published on loopback "
+                "alone (e.g. docker-compose's 127.0.0.1:8000:8000) - set "
+                "ASR_ALLOW_UNAUTHENTICATED_NETWORK=1."
+            )
+            raise typer.Exit(2)
         err.print(
-            "[yellow]warning:[/yellow] ASR_API_KEY is empty, so only loopback Host names "
-            "(plus ASR_ALLOWED_HOSTS) are accepted; set ASR_API_KEY for network clients."
+            "[yellow]warning:[/yellow] ASR_API_KEY is empty and "
+            "ASR_ALLOW_UNAUTHENTICATED_NETWORK is set: any client that reaches this port "
+            "controls the API. Publish it on loopback only, or set ASR_API_KEY."
         )
+    configure_logging(env.log_level, env.log_format, env.log_file)
     uvicorn.run(
         "server.app:app",
         host=host,

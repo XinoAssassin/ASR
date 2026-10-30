@@ -44,9 +44,11 @@ COPY backend/ ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --extra cpu --extra local
 
+# Only the state volumes belong to the runtime user; /app and /opt/venv stay root-owned and
+# read-only for it (bytecode is precompiled by UV_COMPILE_BYTECODE, nothing is written there).
 RUN useradd --create-home --uid 1000 asr \
  && mkdir -p /data/uploads /models \
- && chown -R asr:asr /data /models /app
+ && chown -R asr:asr /data /models
 USER asr
 
 ENV ASR_DATA_DIR=/data \
@@ -64,6 +66,9 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s \
 FROM backend-base AS backend-cpu
 # `asr serve`: one uvicorn worker (the job queue is in-process), ASR_LOG_* honoured. Behind a
 # reverse proxy add `--forwarded-allow-ips <proxy address>` (docs/DEPLOYMENT.md).
+# Binding 0.0.0.0 needs ASR_API_KEY; without one the container refuses to start unless
+# ASR_ALLOW_UNAUTHENTICATED_NETWORK=1, which docker-compose.yml sets because it publishes the
+# port on 127.0.0.1 only. A plain `docker run -p 8000:8000` without a key therefore fails closed.
 CMD ["asr", "serve", "--host", "0.0.0.0", "--port", "8000"]
 
 # ------------------------------------------------------------- backend (CUDA)
@@ -92,9 +97,11 @@ COPY backend/ ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --extra cuda --extra local
 
+# Only the state volumes belong to the runtime user; /app and /opt/venv stay root-owned and
+# read-only for it (bytecode is precompiled by UV_COMPILE_BYTECODE, nothing is written there).
 RUN useradd --create-home --uid 1000 asr \
  && mkdir -p /data/uploads /models \
- && chown -R asr:asr /data /models /app
+ && chown -R asr:asr /data /models
 USER asr
 ENV ASR_DATA_DIR=/data \
     ASR_UPLOAD_ROOTS=/data/uploads \

@@ -63,9 +63,9 @@ async def test_transcodes_once_under_concurrency(
     calls: list[Path] = []
     real = transcode.transcode_for_browser
 
-    def counting(src: Path, dst: Path) -> Path:
+    def counting(src: Path, dst: Path, *, stream_index: int = 0) -> Path:
         calls.append(src)
-        return real(src, dst)
+        return real(src, dst, stream_index=stream_index)
 
     monkeypatch.setattr(audio_route, "transcode_for_browser", counting)
     results = await asyncio.gather(*(client.get(f"/api/audio/{upload['id']}") for _ in range(5)))

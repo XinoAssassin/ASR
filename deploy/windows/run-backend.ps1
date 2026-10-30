@@ -36,7 +36,8 @@ param(
     [string]$BindHost = '127.0.0.1',
     [int]$Port = 8000,
     # File holding the shared X-API-Key (one line). Without it, ASR_API_KEY from the environment
-    # or .env is used; no key at all = auth off, which only works for loopback clients.
+    # or .env is used; no key at all = auth off: loopback clients only, and -BindHost must be
+    # loopback (asr serve refuses anything else).
     [string]$ApiKeyFile = '',
     # Browser origins of the SPA, comma-separated. The desktop app needs http://tauri.localhost.
     [string]$CorsOrigins = 'http://localhost:8080,http://127.0.0.1:8080,http://tauri.localhost',
@@ -55,8 +56,9 @@ if ($ApiKeyFile) {
     $env:ASR_API_KEY = (Get-Content -Raw -Encoding utf8 $ApiKeyFile).Trim()
 }
 if ($BindHost -ne '127.0.0.1' -and $BindHost -ne 'localhost' -and -not $env:ASR_API_KEY) {
-    # A key only in .env is fine too; asr serve prints a warning if none is configured at all.
-    Write-Warning 'Listening beyond loopback: make sure ASR_API_KEY is set (docs/DEPLOYMENT.md).'
+    # A key only in .env is fine too; with no key at all, asr serve refuses a non-loopback
+    # -BindHost and exits (an unauthenticated API must not be reachable from the network).
+    Write-Warning 'Listening beyond loopback needs ASR_API_KEY (-ApiKeyFile or .env); asr serve refuses to start without one (docs/DEPLOYMENT.md).'
 }
 
 $logDir = if ($LogFile) { Split-Path $LogFile -Parent } else { '' }

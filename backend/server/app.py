@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from asr import __version__
 from server.auth import API_KEY_HEADER, EXEMPT_PATHS, ApiKeyMiddleware
+from server.body_limit import MAX_JSON_BODY, BodySizeLimitMiddleware
 from server.config import EnvSettings, apply_core_environ, ensure_dirs, get_env
 from server.db import Database
 from server.jobs import JobManager
@@ -64,19 +65,33 @@ def create_app(env: EnvSettings | None = None) -> FastAPI:
         app.include_router(router)
 
     # Order matters: the last middleware added is the outermost. CORS wraps auth so that 401
-    # responses carry CORS headers and preflight requests are answered before auth runs.
+    # responses carry CORS headers and preflight requests are answered before auth runs; the
+    # 2 MB JSON body cap sits inside auth.
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_JSON_BODY)
     app.add_middleware(
         ApiKeyMiddleware,
         api_key=env.api_key,
         allowed_hosts=env.allowed_hosts,
         allowed_origins=env.cors_origins,
+        allow_network=env.allow_unauthenticated_network,
     )
     if not env.api_key_required:
-        log.warning(
-            "ASR_API_KEY is empty: API authentication is DISABLED. Only loopback Host names%s are "
-            "accepted; set ASR_API_KEY before exposing this server on a network.",
-            f" and {', '.join(env.allowed_hosts)}" if env.allowed_hosts else "",
-        )
+        hosts = f" and {', '.join(env.allowed_hosts)}" if env.allowed_hosts else ""
+        if env.allow_unauthenticated_network:
+            log.warning(
+                "ASR_API_KEY is empty: API authentication is DISABLED and "
+                "ASR_ALLOW_UNAUTHENTICATED_NETWORK accepts clients from any address (Host names: "
+                "loopback%s). Anyone who can reach this port controls the API; publish it on "
+                "127.0.0.1 only, or set ASR_API_KEY.",
+                hosts,
+            )
+        else:
+            log.warning(
+                "ASR_API_KEY is empty: API authentication is DISABLED. Only clients connecting "
+                "from this machine (loopback) with a loopback Host name%s are accepted; set "
+                "ASR_API_KEY to serve other machines.",
+                hosts,
+            )
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
     app.add_middleware(
         CORSMiddleware,

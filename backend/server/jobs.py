@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import logging
 import shutil
+import sqlite3
 import threading
 import time
 import traceback
@@ -537,20 +538,30 @@ class JobManager:
             return list(transcript.segments), []
 
     async def _succeed(self, state: _Running, transcript: Transcript) -> None:
+        # Post-correction can take a while; the run stays registered meanwhile so a cancel still
+        # finds its flag, and a delete is noticed before anything is stored.
+        segments, corrections = await self._post_correct(state.job, transcript)
+        if state.cancel.is_set():
+            await self._finish(state, status="cancelled", error=None)
+            return
         await self._settle(state)
         job_id = state.job.id
         current = await self.db.get_job(job_id)
         if current is None or current.status != "running":  # deleted meanwhile
             return
         transcript_id = uuid.uuid4().hex
-        segments, corrections = await self._post_correct(state.job, transcript)
-        await self.db.insert_transcript(
-            transcript_id,
-            job_id,
-            transcript.model_copy(update={"segments": segments}),
-            original=transcript.segments,
-            corrections=corrections,
-        )
+        try:
+            await self.db.insert_transcript(
+                transcript_id,
+                job_id,
+                transcript.model_copy(update={"segments": segments}),
+                original=transcript.segments,
+                corrections=corrections,
+            )
+        except sqlite3.IntegrityError:
+            if await self.db.get_job(job_id) is None:  # deleted between the check and the insert
+                return
+            raise
         job = await self.db.transition_job(
             job_id,
             ("running",),

@@ -52,7 +52,7 @@ Windows ([§2.3](#23-windows)). All of them end up running
 asr serve --host <addr> --port <port> [--forwarded-allow-ips <proxy-ip>]
 ```
 
-`asr serve` options: `--host` (default `127.0.0.1`; `0.0.0.0` for LAN), `--port` (default 8000),
+`asr serve` options: `--host` (default `127.0.0.1`; `0.0.0.0` for LAN, which requires `ASR_API_KEY`), `--port` (default 8000),
 `--forwarded-allow-ips` (comma-separated proxy addresses whose `X-Forwarded-For/-Proto` are
 trusted; omit when no proxy), `--reload` (development only). Shutdown drains for up to 30 s; a job
 still running is marked failed ("interrupted") at the next start and can be retried, queued jobs
@@ -81,7 +81,10 @@ docker compose up -d --build                          # both on one host
 
 - Ports are published on `${ASR_BIND_ADDR:-127.0.0.1}` (D25). For LAN access set
   `ASR_BIND_ADDR=0.0.0.0` **and** `ASR_API_KEY`. Host ports: `ASR_BACKEND_PORT` (8000),
-  `ASR_FRONTEND_PORT` (8080).
+  `ASR_FRONTEND_PORT` (8080). Compose sets `ASR_ALLOW_UNAUTHENTICATED_NETWORK=1` so the keyless
+  default works through the loopback publish ([§5](#5-access-control-api-key-cors-hosts)).
+- The application code (`/app`, `/opt/venv`) is root-owned and read-only for the runtime user;
+  only `/data` and `/models` are writable.
 - Volumes: `asr-data` → `/data` (database, uploads; back it up), `asr-models` → `/models`.
   The container runs as uid 1000; bind mounts must be writable by that uid.
 - In the container the paths are fixed (`/data`, `/data/uploads`, `/models`); `ASR_DATA_DIR`,
@@ -149,7 +152,10 @@ The production build is static: `cd frontend && pnpm install --frozen-lockfile &
 1. falls back to `index.html` for unknown paths (history-mode routes such as
    `/transcripts/<id>`; without it a page reload on those URLs gives 404),
 2. serves `/config.js` with `Cache-Control: no-store`,
-3. may cache `/assets/*` forever (hashed names).
+3. may cache `/assets/*` forever (hashed names),
+4. sends `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'` and
+   `X-Content-Type-Options: nosniff` (no framing / clickjacking). In nginx, repeat them in every
+   `location` that has its own `add_header` — such a block drops the server-level ones.
 
 `deploy/nginx.conf` does exactly that (it is the frontend image's config). The runtime config:
 
@@ -181,6 +187,7 @@ in the shell that runs them.
 |---|---|---|
 | `ASR_API_KEY` | empty | Shared `X-API-Key`. Empty disables auth (loopback-only mode, [§5](#5-access-control-api-key-cors-hosts)). |
 | `ASR_ALLOWED_HOSTS` | empty | Extra `Host` names accepted while auth is disabled, comma-separated; `*` accepts any (don't). |
+| `ASR_ALLOW_UNAUTHENTICATED_NETWORK` | empty (off) | With `ASR_API_KEY` empty: accept clients from any address and let `asr serve` bind a non-loopback `--host`. Only safe when the port is published on loopback alone (compose sets it for its `127.0.0.1:8000:8000` publish). [§5](#5-access-control-api-key-cors-hosts). |
 | `ASR_CORS_ORIGINS` | `http://localhost:5173,http://localhost:8080` | Browser origins allowed to call the API, comma-separated, `scheme://host[:port]`; `*` is rejected at startup. |
 | `ASR_DATA_DIR` | `./data` | `asr.db`, chunked-upload sessions, caches, job work dirs. |
 | `ASR_UPLOAD_ROOTS` | `<data>/uploads` | Directories uploads may be written to / registered from, `os.pathsep`-separated (`:` Linux, `;` Windows). Must not contain `ASR_DATA_DIR` (startup error). |
@@ -217,9 +224,20 @@ band; they enter it once per browser in Settings → Connection, and once in the
 - Every route except `/api/health`, `/openapi.json`, `/docs`, `/redoc` requires the header
   `X-API-Key`; missing or wrong → `401`. The key is accepted from the header only, never from a
   query string.
-- With the key empty, the backend accepts only `Host: localhost / 127.0.0.1 / [::1]` (plus
-  `ASR_ALLOWED_HOSTS`) and refuses state-changing requests whose `Origin` is neither loopback nor in
-  `ASR_CORS_ORIGINS` (D24); `asr serve` and the app log a warning. This mode is for one machine.
+- With the key empty, the backend accepts only clients connecting **from this machine** (the TCP
+  peer must be a loopback address — a `Host: localhost` header alone proves nothing), only
+  `Host: localhost / 127.0.0.1 / [::1]` (plus `ASR_ALLOWED_HOSTS`), and refuses state-changing
+  requests whose `Origin` is neither loopback nor in `ASR_CORS_ORIGINS` (D24); the app logs a
+  warning. `asr serve --host 0.0.0.0` (or any non-loopback address) **refuses to start** without a
+  key. This mode is for one machine.
+- `ASR_ALLOW_UNAUTHENTICATED_NETWORK=1` lifts the peer check and the bind refusal. It exists for
+  Docker, where every request arrives from the bridge gateway rather than 127.0.0.1:
+  `docker-compose.yml` sets it because it publishes the port on `127.0.0.1` only. It is **only safe
+  behind such a loopback-only publish**: with `ASR_BIND_ADDR=0.0.0.0` set `ASR_API_KEY` (and
+  optionally `ASR_ALLOW_UNAUTHENTICATED_NETWORK=0`). The image on its own (`docker run -p ...`
+  without a key) refuses to start.
+- JSON request bodies are capped at **2 MB** (`413`); the upload routes (`/api/uploads*`) keep
+  their own limits (2 GiB per file, exact 8 MiB parts).
 - `ASR_CORS_ORIGINS` must list **every origin that serves the SPA**, exactly as the browser shows it
   (scheme, host, port; no trailing path): e.g.
   `https://asr-ui.example.com,http://192.168.1.10:8080`. Preflights from other origins get `400`
@@ -247,8 +265,9 @@ band; they enter it once per browser in Settings → Connection, and once in the
 - `X-Forwarded-For / -Proto / -Host` set, paired with
   `asr serve --host 127.0.0.1 --forwarded-allow-ips 127.0.0.1` so the access log shows client IPs.
 
-Behind a proxy the `Host` header is the public name, so auth-off mode would reject everything
-(403) — keep `ASR_API_KEY` set rather than listing the name in `ASR_ALLOWED_HOSTS`.
+Behind a proxy the `Host` header is the public name and (with `--forwarded-allow-ips`) the peer is
+the real client, so auth-off mode rejects everything (403) — keep `ASR_API_KEY` set rather than
+listing the name in `ASR_ALLOWED_HOSTS` and opting in with `ASR_ALLOW_UNAUTHENTICATED_NETWORK`.
 
 Other proxies (Caddy, Traefik, IIS ARR) need the same three things: no response buffering for SSE,
 large request bodies, long read timeouts.

@@ -6,13 +6,16 @@ multipart) so the 2 GiB cap is enforced while receiving, and chunked parts are w
 with 415.
 """
 
+import asyncio
 import contextlib
+import time
 import uuid
+import weakref
 from datetime import UTC, datetime
 from pathlib import Path as FsPath
 from typing import Annotated, Any, BinaryIO
 
-from fastapi import APIRouter, HTTPException, Path, Request, status
+from fastapi import APIRouter, HTTPException, Path, Request, Response, status
 from fastapi.concurrency import run_in_threadpool
 from python_multipart.exceptions import FormParserError
 from python_multipart.multipart import MultipartParser, parse_options_header
@@ -338,18 +341,69 @@ async def upload_part(
     return UploadPartOut(n=n, size=received)
 
 
+COMPLETED_TTL_S = 3600.0
+
+
+class _Completions:
+    """Makes ``complete`` idempotent: a client whose first ``complete`` succeeded but whose
+    response was lost (timeout, desktop retry queue) gets the same upload back for an hour.
+    Concurrent duplicates wait for the first call instead of racing it. In memory: a restart
+    forgets it, and a repeat then answers 404 as before."""
+
+    def __init__(self) -> None:
+        self._done: dict[str, tuple[str, float]] = {}  # session id -> (upload id, monotonic)
+        self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+
+    def lock(self, session_id: str) -> asyncio.Lock:
+        lock = self._locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[session_id] = lock
+        return lock
+
+    def get(self, session_id: str) -> str | None:
+        now = time.monotonic()
+        for sid, (_, at) in list(self._done.items()):
+            if now - at > COMPLETED_TTL_S:
+                del self._done[sid]
+        entry = self._done.get(session_id)
+        return None if entry is None else entry[0]
+
+    def add(self, session_id: str, upload_id: str) -> None:
+        self._done[session_id] = (upload_id, time.monotonic())
+
+
+_completions = _Completions()
+
+
 @router.post(
-    "/{session_id}/complete", response_model=UploadOut, status_code=status.HTTP_201_CREATED
+    "/{session_id}/complete",
+    response_model=UploadOut,
+    status_code=status.HTTP_201_CREATED,
+    responses={200: {"model": UploadOut, "description": "Already completed (repeated call)."}},
 )
-async def complete_upload(session_id: str, env: EnvDep, db: DbDep) -> UploadOut:
-    """Assemble the parts in order into ``target_dir`` and probe the result."""
-    try:
-        stored, original_name = await run_in_threadpool(
-            storage.complete_session, env.data_dir, env.upload_roots, session_id
-        )
-    except storage.StorageError as exc:
-        raise _http(exc) from exc
-    return await _register(db, stored, original_name, delete_on_failure=True)
+async def complete_upload(session_id: str, response: Response, env: EnvDep, db: DbDep) -> UploadOut:
+    """Assemble the parts in order into ``target_dir`` and probe the result.
+
+    Idempotent for an hour: repeating ``complete`` for a session that already completed returns
+    the same upload with 200 (a concurrent repeat waits for the first call)."""
+    async with _completions.lock(session_id):
+        done = _completions.get(session_id)
+        if done is not None:
+            upload = await db.get_upload(done)
+            if upload is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown upload session")
+            response.status_code = status.HTTP_200_OK
+            return upload
+        try:
+            stored, original_name = await run_in_threadpool(
+                storage.complete_session, env.data_dir, env.upload_roots, session_id
+            )
+        except storage.StorageError as exc:
+            raise _http(exc) from exc
+        upload = await _register(db, stored, original_name, delete_on_failure=True)
+        _completions.add(session_id, upload.id)
+        return upload
 
 
 # ----------------------------------------------------------------------------------- register
