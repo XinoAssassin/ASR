@@ -82,7 +82,18 @@ pub fn redact(s: &str) -> String {
     out
 }
 
-fn classify(status: reqwest::StatusCode, body: &str) -> ApiError {
+fn classify(status: reqwest::StatusCode, body: &str, location: Option<&str>) -> ApiError {
+    if status.is_redirection() {
+        // Redirects are not followed (the X-API-Key header must not travel to another host).
+        let to = location
+            .map(|l| redact(l.split('?').next().unwrap_or("")))
+            .unwrap_or_else(|| "?".into());
+        return ApiError::Permanent(format!(
+            "HTTP {}: 后端返回了重定向（{to}），请把后端地址改为最终地址 / the backend redirected \
+             to {to}; set the backend URL to the final address (redirects are not followed)",
+            status.as_u16()
+        ));
+    }
     let detail = serde_json::from_str::<Value>(body)
         .ok()
         .and_then(|v| v.get("detail").cloned())
@@ -129,7 +140,9 @@ impl Client {
         let mut b = reqwest::blocking::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(300))
-            .user_agent(concat!("asr-recorder/", env!("CARGO_PKG_VERSION")));
+            .user_agent(concat!("asr-recorder/", env!("CARGO_PKG_VERSION")))
+            // Never follow redirects: reqwest would forward X-API-Key to the new host.
+            .redirect(reqwest::redirect::Policy::none());
         if is_loopback(&cfg.base_url) {
             // Never route a same-machine backend through an env-configured proxy.
             b = b.no_proxy();
@@ -154,11 +167,30 @@ impl Client {
         &self,
         rb: reqwest::blocking::RequestBuilder,
     ) -> Result<T, ApiError> {
+        self.send_with(rb, &[])
+    }
+
+    /// Like `send`, with extra status codes that count as transient for this endpoint.
+    fn send_with<T: serde::de::DeserializeOwned>(
+        &self,
+        rb: reqwest::blocking::RequestBuilder,
+        transient: &[u16],
+    ) -> Result<T, ApiError> {
         let resp = rb.send().map_err(net)?;
         let status = resp.status();
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         let body = resp.text().map_err(net)?;
         if !status.is_success() {
-            return Err(classify(status, &body));
+            return Err(match classify(status, &body, location.as_deref()) {
+                ApiError::Permanent(m) if transient.contains(&status.as_u16()) => {
+                    ApiError::Transient(m)
+                }
+                e => e,
+            });
         }
         serde_json::from_str(&body)
             .map_err(|e| ApiError::Transient(format!("unexpected response: {e}")))
@@ -208,16 +240,27 @@ impl Client {
         Ok(())
     }
 
-    /// Returns the upload id.
+    /// Returns the upload id. The backend's `complete` is idempotent (re-completing a completed
+    /// session returns the same upload); 409 means a concurrent duplicate is still assembling
+    /// the file, so it is retried.
     pub fn complete(&self, session: &str) -> Result<String, ApiError> {
-        let v: Value = self.send(self.req(
-            reqwest::Method::POST,
-            &format!("/api/uploads/{session}/complete"),
-        ))?;
+        let v: Value = self.send_with(
+            self.req(
+                reqwest::Method::POST,
+                &format!("/api/uploads/{session}/complete"),
+            ),
+            &[409],
+        )?;
         v.get("id")
             .and_then(Value::as_str)
             .map(str::to_string)
             .ok_or_else(|| ApiError::Transient("complete: response without id".into()))
+    }
+
+    /// `GET /api/uploads/{id}`: Ok when the upload exists, NotFound when it is gone.
+    pub fn get_upload(&self, id: &str) -> Result<(), ApiError> {
+        let _: Value = self.send(self.req(reqwest::Method::GET, &format!("/api/uploads/{id}")))?;
+        Ok(())
     }
 
     pub fn create_job(&self, body: &Value) -> Result<JobOut, ApiError> {
@@ -333,16 +376,27 @@ mod tests {
         let r = redact("error sending request for url (http://h/api?token=abc) x-api-key: zzz");
         assert!(!r.contains("abc") && !r.contains("zzz"), "{r}");
         assert_eq!(
-            classify(reqwest::StatusCode::NOT_FOUND, r#"{"detail":"gone"}"#),
+            classify(reqwest::StatusCode::NOT_FOUND, r#"{"detail":"gone"}"#, None),
             ApiError::NotFound("HTTP 404: gone".into())
         );
         assert!(matches!(
-            classify(reqwest::StatusCode::BAD_GATEWAY, ""),
+            classify(reqwest::StatusCode::BAD_GATEWAY, "", None),
             ApiError::Transient(_)
         ));
         assert!(matches!(
-            classify(reqwest::StatusCode::UNAUTHORIZED, "{}"),
+            classify(reqwest::StatusCode::UNAUTHORIZED, "{}", None),
             ApiError::Permanent(_)
         ));
+        match classify(
+            reqwest::StatusCode::TEMPORARY_REDIRECT,
+            "",
+            Some("https://other.example/api/jobs?token=abc"),
+        ) {
+            ApiError::Permanent(m) => {
+                assert!(m.contains("https://other.example/api/jobs"), "{m}");
+                assert!(!m.contains("abc"), "{m}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

@@ -17,7 +17,7 @@ use crate::ipc::{Recording, UploadInfo, UploadState};
 use crate::recorder::Finished;
 use crate::util::iso;
 use client::{ApiError, Client};
-use queue::{Entry, Stage, Store, UploadSession};
+use queue::{Entry, Inserted, Stage, Store, UploadSession};
 
 pub type OnChange = Arc<dyn Fn(&Recording) + Send + Sync>;
 
@@ -42,6 +42,23 @@ fn poll_interval(age: chrono::Duration) -> Duration {
         s if s < 120 => Duration::from_secs(5),
         s if s < 1800 => Duration::from_secs(15),
         _ => Duration::from_secs(60),
+    }
+}
+
+fn mtime_ms(m: &std::fs::Metadata) -> Option<i64> {
+    let t = m.modified().ok()?;
+    Some(DateTime::<Utc>::from(t).timestamp_millis())
+}
+
+/// Error text for a 404 from `POST /api/jobs` while the upload exists.
+fn job_404_message(detail: &str) -> String {
+    if detail.contains("term set") {
+        format!(
+            "术语表不存在，请在设置中修正术语表后重试 / a term set of this job no longer exists; \
+             fix the term sets in the settings and retry ({detail})"
+        )
+    } else {
+        format!("创建转写任务失败 / job creation failed ({detail})")
     }
 }
 
@@ -110,16 +127,25 @@ impl Uploader {
         Some(after)
     }
 
-    /// Register a finished recording; queue it when `auto`.
+    /// Register a finished recording; queue it when `auto`. A file that is already indexed
+    /// keeps its entry (state, job, transcript) untouched; see `Store::insert`.
     pub fn add_finished(&self, f: &Finished, auto: bool) -> Recording {
-        let rec = recording_from(f);
-        let entry = Entry::new(rec.clone(), f.channels, auto);
-        self.store.insert(entry.clone());
-        self.emit(&entry);
-        if auto {
-            self.wake();
+        let entry = Entry::new(recording_from(f), f.channels, auto);
+        match self.store.insert(entry) {
+            Inserted::New(e) => {
+                self.emit(&e);
+                if auto {
+                    self.wake();
+                }
+                e.recording
+            }
+            Inserted::Existing(e) => e.recording,
         }
-        rec
+    }
+
+    /// Whether this file is already in the index (for recovery's adopted files).
+    pub fn has_path(&self, path: &Path) -> bool {
+        self.store.contains_path(&path.to_string_lossy())
     }
 
     /// `recording_upload`: queue now (manual upload or retry).
@@ -166,16 +192,18 @@ impl Uploader {
     /// a wrong URL, key or target dir), whether or not a backoff retry was scheduled.
     pub fn config_changed(&self) {
         let now = iso(Utc::now());
-        for id in self.store.ids() {
-            self.update(&id, |e| {
-                let u = &mut e.recording.upload;
-                if e.queued
-                    && u.state == UploadState::Failed
-                    && matches!(e.failed_stage, Some(Stage::Upload | Stage::Job))
-                {
-                    u.next_retry_at = Some(now.clone());
-                }
-            });
+        // One pass, one save (none when nothing is re-armed).
+        let changed = self.store.update_all(|e| {
+            let u = &mut e.recording.upload;
+            if e.queued
+                && u.state == UploadState::Failed
+                && matches!(e.failed_stage, Some(Stage::Upload | Stage::Job))
+            {
+                u.next_retry_at = Some(now.clone());
+            }
+        });
+        for e in &changed {
+            self.emit(e);
         }
         self.wake();
     }
@@ -212,15 +240,16 @@ impl Uploader {
                 return;
             }
         };
-        if !Path::new(&e.recording.path).is_file() {
+        let u = e.upload();
+        // The file is only needed until the job exists; polling works without it.
+        if u.job_id.is_none() && !Path::new(&e.recording.path).is_file() {
             self.fail(
                 id,
                 Stage::Upload,
-                ApiError::Permanent("recording file is missing".into()),
+                ApiError::Permanent("录音文件不存在 / recording file is missing".into()),
             );
             return;
         }
-        let u = e.upload();
         if u.job_id.is_some() {
             self.poll(&client, &e);
         } else if u.upload_id.is_some() {
@@ -254,8 +283,8 @@ impl Uploader {
     fn upload(&self, client: &Client, e: &Entry, target_dir: &str) -> bool {
         let id = e.recording.id.as_str();
         let path = Path::new(&e.recording.path);
-        let size = match std::fs::metadata(path) {
-            Ok(m) => m.len(),
+        let (size, mtime_ms) = match std::fs::metadata(path) {
+            Ok(m) => (m.len(), mtime_ms(&m)),
             Err(err) => {
                 self.fail(id, Stage::Upload, ApiError::Permanent(err.to_string()));
                 return false;
@@ -267,7 +296,10 @@ impl Uploader {
             u.attempts += 1;
             u.next_retry_at = None;
         });
-        let mut session = match e.session.clone().filter(|s| s.size == size) {
+        // Resume only if the file is unchanged since the session started.
+        let unchanged =
+            |s: &UploadSession| s.size == size && mtime_ms.is_some() && s.mtime_ms == mtime_ms;
+        let mut session = match e.session.clone().filter(unchanged) {
             Some(s) => s,
             None => match client.init_upload(&e.recording.name, size, target_dir) {
                 Ok(o) => {
@@ -277,6 +309,7 @@ impl Uploader {
                         total_parts: o.total_parts,
                         next_part: 0,
                         size,
+                        mtime_ms,
                     };
                     self.store.update(id, |e| e.session = Some(s.clone()));
                     s
@@ -317,7 +350,11 @@ impl Uploader {
                 true
             }
             Err(err) => {
-                if matches!(err, ApiError::NotFound(_)) {
+                // Transient (incl. 409, a concurrent duplicate): keep the session; the backend's
+                // complete is idempotent, so the retry returns the upload. Session gone or
+                // rejected: the next attempt starts a fresh upload instead of replaying a
+                // failing complete forever.
+                if matches!(err, ApiError::NotFound(_) | ApiError::Permanent(_)) {
                     self.store.update(id, |e| e.session = None);
                 }
                 self.fail(id, Stage::Upload, err);
@@ -356,10 +393,20 @@ impl Uploader {
                 });
             }
             Err(ApiError::NotFound(msg)) => {
-                // The upload is gone on the server: upload again.
-                self.store
-                    .update(id, |e| e.recording.upload.upload_id = None);
-                self.fail(id, Stage::Upload, ApiError::NotFound(msg));
+                // 404 means "upload not found" or "term set '<id>' not found": ask the backend
+                // which one before uploading the whole file again.
+                match client.get_upload(&upload_id) {
+                    Err(ApiError::NotFound(_)) => {
+                        log::warn!("{id}: upload {upload_id} is gone on the backend; re-uploading");
+                        self.store
+                            .update(id, |e| e.recording.upload.upload_id = None);
+                        self.fail(id, Stage::Upload, ApiError::NotFound(msg));
+                    }
+                    Ok(()) => self.fail(id, Stage::Job, ApiError::Permanent(job_404_message(&msg))),
+                    Err(err) => {
+                        self.fail(id, Stage::Job, ApiError::Transient(err.message().into()))
+                    }
+                }
             }
             Err(err) => self.fail(id, Stage::Job, err),
         }

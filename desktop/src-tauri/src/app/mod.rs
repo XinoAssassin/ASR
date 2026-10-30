@@ -14,7 +14,7 @@ use crate::ipc::{
     AudioProcess, BackendConfig, DeviceList, RecorderState, RecorderStatus, Recording,
     SidecarConfig, SidecarStatus, StartOptions,
 };
-use crate::recorder::{self, capture, Recorder};
+use crate::recorder::{capture, Recorder};
 use crate::sidecar::Sidecar;
 use crate::uploader::{queue::Store, Uploader};
 
@@ -151,9 +151,12 @@ async fn recorder_devices() -> Res<DeviceList> {
     .map_err(|e| e.to_string())?
 }
 
+/// Async + `spawn_blocking`: opening the devices can take seconds (bounded by the recorder).
 #[tauri::command]
-fn recorder_start(app: AppHandle, options: StartOptions) -> Res<RecorderStatus> {
-    do_start(&app, options)
+async fn recorder_start(app: AppHandle, options: StartOptions) -> Res<RecorderStatus> {
+    tauri::async_runtime::spawn_blocking(move || do_start(&app, options))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -219,11 +222,17 @@ fn backend_get_config(state: State<'_, AppState>) -> BackendConfig {
     state.config.get_masked()
 }
 
+/// Async + `spawn_blocking`: writes the config / key files and re-arms the queue (one save).
 #[tauri::command]
-fn backend_set_config(state: State<'_, AppState>, config: BackendConfig) -> Res<BackendConfig> {
-    let out = state.config.set(config)?;
-    state.uploader.config_changed();
-    Ok(out)
+async fn backend_set_config(app: AppHandle, config: BackendConfig) -> Res<BackendConfig> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let out = state.config.set(config)?;
+        state.uploader.config_changed();
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -361,13 +370,17 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         log::warn!("global shortcut {HOTKEY} unavailable: {e}");
     }
 
-    // Recover recordings orphaned by a crash, then start the upload worker.
+    // Recover recordings orphaned by a crash, then start the upload worker. This runs while
+    // the hotkey / tray / IPC are live: `Recorder::recover_dir` skips partials owned by a
+    // session, so a recording started meanwhile is never finalised under it (no start gate:
+    // finalising a long orphan may take minutes).
     {
         let handle = handle.clone();
         let settings = config.settings();
         let mut dirs = settings.out_dirs.clone();
         dirs.push(default_out);
-        if let Some(dir) = settings.active_partial.as_ref().and_then(|p| p.parent()) {
+        let crashed_partial = settings.active_partial.clone();
+        if let Some(dir) = crashed_partial.as_ref().and_then(|p| p.parent()) {
             dirs.push(dir.to_path_buf());
         }
         dirs.sort();
@@ -376,16 +389,31 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             let state = handle.state::<AppState>();
             let auto = state.config.get_with_key().auto_upload;
             for dir in dirs {
-                for f in recorder::recover_dir(&dir, None) {
-                    state.uploader.add_finished(&f, auto);
+                for r in state.recorder.recover_dir(&dir) {
+                    // Adopted = a finished file from an earlier run; index it only if missing
+                    // (an indexed one keeps its state, job and transcript).
+                    if r.adopted && state.uploader.has_path(&r.finished.path) {
+                        continue;
+                    }
+                    if r.adopted {
+                        log::info!("adopting unindexed {}", r.finished.path.display());
+                    }
+                    state.uploader.add_finished(&r.finished, auto);
                 }
             }
-            state.config.update_settings(|s| s.active_partial = None);
+            // Forget the crashed session's partial, unless a recording started meanwhile has
+            // already stored its own.
+            state.config.update_settings(|s| {
+                if s.active_partial == crashed_partial {
+                    s.active_partial = state.recorder.active_partial();
+                }
+            });
             state.uploader.start();
         });
     }
 
-    // 10 Hz status events while recording.
+    // 10 Hz status events while recording. A session that ended by itself (the file could
+    // not be written) is stopped here, so its partial is finalised and queued as usual.
     {
         let handle = handle.clone();
         std::thread::spawn(move || loop {
@@ -393,6 +421,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             let state = handle.state::<AppState>();
             if state.recorder.state() == RecorderState::Recording {
                 emit_status(&handle, &state.recorder.status(true));
+                if let Some(reason) = state.recorder.failure() {
+                    log::error!("recording ended by itself: {reason}; finalising");
+                    if let Err(e) = do_stop(&handle) {
+                        log::error!("stop after failure: {e}");
+                    }
+                }
             }
         });
     }

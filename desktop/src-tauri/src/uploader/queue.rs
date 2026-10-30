@@ -24,6 +24,11 @@ pub struct UploadSession {
     pub total_parts: u64,
     pub next_part: u64,
     pub size: u64,
+    /// Modification time of the file when the session started (ms since the epoch). A file
+    /// whose size or mtime differs gets a new session instead of resuming. Sessions stored by
+    /// older versions have none and are not resumed.
+    #[serde(default)]
+    pub mtime_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -88,6 +93,31 @@ impl Entry {
     }
 }
 
+/// Result of `Store::insert`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Inserted {
+    New(Entry),
+    /// The file was already indexed; this is the stored entry, unchanged.
+    Existing(Entry),
+}
+
+impl Inserted {
+    pub fn entry(&self) -> &Entry {
+        match self {
+            Self::New(e) | Self::Existing(e) => e,
+        }
+    }
+}
+
+/// Paths are compared as stored, case-insensitively on Windows / macOS file systems.
+fn same_path(a: &str, b: &str) -> bool {
+    if cfg!(any(windows, target_os = "macos")) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
 pub struct Store {
     path: PathBuf,
     entries: Mutex<Vec<Entry>>,
@@ -145,11 +175,64 @@ impl Store {
             .cloned()
     }
 
-    pub fn insert(&self, entry: Entry) {
+    /// Add a recording. An existing entry is never replaced (it may carry a finished job and
+    /// a transcript): an entry for the same file is kept as is (`Inserted::Existing`), and a
+    /// different file whose id is taken gets a suffixed id (`<id>_2`, ...).
+    pub fn insert(&self, mut entry: Entry) -> Inserted {
         let mut v = self.entries.lock().unwrap();
-        v.retain(|e| e.recording.id != entry.recording.id);
-        v.push(entry);
+        if let Some(e) = v
+            .iter()
+            .find(|e| same_path(&e.recording.path, &entry.recording.path))
+        {
+            return Inserted::Existing(e.clone());
+        }
+        let base = entry.recording.id.clone();
+        let taken = |id: &str| v.iter().any(|e| e.recording.id == id);
+        if taken(&base) {
+            let id = (2..)
+                .map(|i| format!("{base}_{i}"))
+                .find(|id| !taken(id))
+                .unwrap();
+            log::warn!(
+                "recording id {base} is taken; indexing {} as {id}",
+                entry.recording.path
+            );
+            entry.recording.id = id;
+        }
+        v.push(entry.clone());
         self.save(&v);
+        Inserted::New(entry)
+    }
+
+    /// Whether a recording with this file path is indexed.
+    pub fn contains_path(&self, path: &str) -> bool {
+        self.entries
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| same_path(&e.recording.path, path))
+    }
+
+    /// Mutate every entry, persisting once (and only if something changed). Returns the
+    /// entries whose recording (the part the SPA sees) changed.
+    pub fn update_all(&self, mut f: impl FnMut(&mut Entry)) -> Vec<Entry> {
+        let mut v = self.entries.lock().unwrap();
+        let mut changed = false;
+        let mut visible = Vec::new();
+        for e in v.iter_mut() {
+            let before = e.clone();
+            f(e);
+            if *e != before {
+                changed = true;
+                if e.recording != before.recording {
+                    visible.push(e.clone());
+                }
+            }
+        }
+        if changed {
+            self.save(&v);
+        }
+        visible
     }
 
     /// Mutate one entry and persist. Returns the updated entry.
@@ -221,6 +304,7 @@ mod tests {
                 total_parts: 2,
                 next_part: 1,
                 size: 10,
+                mtime_ms: Some(1),
             });
         });
         let s2 = Store::open(&p);
@@ -248,6 +332,55 @@ mod tests {
         e.recording.upload.state = UploadState::Pending;
         e.queued = false;
         assert_eq!(e.due_at(), None);
+    }
+
+    #[test]
+    fn insert_never_replaces_an_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(&dir.path().join("recordings.json"));
+        let mut done = Entry::new(rec("a", "2026-01-01T00:00:00Z"), 2, false);
+        done.recording.upload.state = UploadState::Done;
+        done.recording.upload.transcript_id = Some("t1".into());
+        assert!(matches!(s.insert(done.clone()), Inserted::New(_)));
+        // the same file again (e.g. adopted by recovery): kept as is
+        let again = Entry::new(rec("a", "2026-01-01T00:00:00Z"), 2, true);
+        assert_eq!(s.insert(again), Inserted::Existing(done.clone()));
+        assert_eq!(s.get("a").unwrap(), done);
+        // another file with the same stem (another folder): new id
+        let mut other = Entry::new(rec("a", "2026-01-01T00:00:00Z"), 2, true);
+        other.recording.path = "/elsewhere/a.flac".into();
+        let got = s.insert(other);
+        assert_eq!(got.entry().recording.id, "a_2");
+        assert_eq!(s.get("a").unwrap(), done);
+        assert!(s.contains_path("/elsewhere/a.flac"));
+        assert_eq!(s.ids().len(), 2);
+    }
+
+    #[test]
+    fn update_all_saves_once_and_reports_visible_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("recordings.json");
+        let s = Store::open(&p);
+        s.insert(Entry::new(rec("a", "x"), 2, true));
+        s.insert(Entry::new(rec("b", "y"), 2, true));
+        std::fs::remove_file(&p).unwrap();
+        // nothing changes: no write at all
+        assert!(s.update_all(|_| {}).is_empty());
+        assert!(!p.exists());
+        // an internal-only change is saved but not reported
+        assert!(s.update_all(|e| e.failures = 3).is_empty());
+        assert!(p.exists());
+        let changed = s.update_all(|e| {
+            if e.recording.id == "b" {
+                e.recording.upload.attempts = 9;
+            }
+        });
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].recording.id, "b");
+        assert_eq!(
+            Store::open(&p).get("b").unwrap().recording.upload.attempts,
+            9
+        );
     }
 
     #[test]

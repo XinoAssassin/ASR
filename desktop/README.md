@@ -50,17 +50,22 @@ pnpm tauri dev
 # release build (+ NSIS installer); the SPA is built by beforeBuildCommand
 pnpm tauri build
 # or without the CLI / installer: build the SPA first, then
-cd src-tauri; cargo build --release   # target\release\asr-recorder.exe
+cd src-tauri; cargo build --release --features tauri/custom-protocol   # target\release\asr-recorder.exe
 ```
+
+`tauri/custom-protocol` embeds `frontendDist` and serves it from `http://tauri.localhost` (the
+Tauri CLI adds it on `tauri build`). A plain `cargo build --release` produces a dev-mode exe
+that loads `devUrl` (`http://localhost:5173`) instead.
 
 From WSL we build in a Windows-side mirror (the source of truth stays in WSL) through
 `D:\tmp\asr-toolchain\cargo.ps1`, which puts `%USERPROFILE%\.cargo\bin` on PATH and sets the proxy
 and `CARGO_TARGET_DIR`.
 
-Checks: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`. The
-platform-independent logic (resampler, timeline, WAV/FLAC, queue, uploader against a mock
-backend) also builds and tests on Linux without WebKitGTK:
-`cargo test --no-default-features`.
+Checks: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+`cargo test --no-default-features`. All unit tests live in the library (the `app` shell has
+none), and they also build and run on Linux without WebKitGTK. On Windows the lib test exe
+*with* the `app` feature cannot start (`STATUS_ENTRYPOINT_NOT_FOUND`): it links Tauri, which
+needs common controls v6, but tauri-build embeds the manifest only into binaries.
 
 Release builds use the GUI subsystem (no console). Logs go to
 `%LOCALAPPDATA%\dev.asr.recorder\logs\` (tauri-plugin-log). App data (backend config, API key,
@@ -119,7 +124,13 @@ Test hooks (environment variables, for automated checks only):
   and compared sample by sample, renamed to `<stem>.flac`, and only then is the partial removed.
   If FLAC fails the WAV is kept as `<stem>.wav`. After a crash, orphaned `*.partial.wav` files in
   the known output folders are repaired (sizes from the file length) and finalised at the next
-  start.
+  start, and finished `<stem>.flac` / `.wav` files from earlier runs that are missing from the
+  queue (a crash between finalising and queueing) are adopted. Recovery runs in the background
+  while the tray / hotkey / IPC are live; `Recorder::recover_dir` skips partials owned by a
+  session, so recording can start at once and is never finalised under itself.
+* **Write failure.** If the engine cannot write the file for too long it ends the session by
+  itself; the app's status loop then stops the recording, so the partial is finalised and
+  queued as usual (the warning is in `RecorderStatus.warnings`).
 * **Sources that cannot be opened** do not fail the start: with mic + system requested and no
   microphone, the recording runs system-only (mono) with a bilingual warning; only when no
   source opens does `recorder_start` fail. `RecorderStatus.sources` reports what is captured.
@@ -160,9 +171,26 @@ config. `jobOptions: null` means upload only.
 Errors: network / 5xx / 408 / 429 → state `failed` with `nextRetryAt` (exponential backoff 10 s
 → 30 min, ±20 % jitter, unlimited attempts); other 4xx → `failed` without `nextRetryAt` until the
 user retries (`recording_upload`); any `backend_set_config` re-arms failed uploads / job
-creations immediately (the SPA pushes its backend URL and key at every start); 404 on an upload session or
-upload restarts that stage. While a job is transcribing, an unreachable backend only delays the
-next poll. Error texts are redacted (no query strings / keys). Recordings are never deleted.
+creations immediately (the SPA pushes its backend URL and key at every start; one pass over the
+queue, one save). While a job is transcribing, an unreachable backend only delays the next poll,
+and the local file is no longer needed (polling continues if it was moved). Error texts are
+redacted (no query strings / keys). Recordings are never deleted.
+
+* **Resume.** The upload session stores the file's size and modification time; an interrupted
+  upload resumes at the next part only if both match, otherwise a new session starts.
+* **Complete.** The backend's `complete` is idempotent, so a lost response is retried with the
+  same session and returns the same upload; 409 (a concurrent duplicate still assembling) is
+  transient. 404 (session expired) or another 4xx drops the session: the next attempt uploads
+  afresh instead of replaying a failing `complete`.
+* **404 from `POST /api/jobs`** means "upload not found" or "term set '<id>' not found". The
+  worker asks `GET /api/uploads/{id}`: gone → upload again; still there → a permanent job
+  failure with a bilingual message (a deleted term set: fix the term sets, then retry; no
+  re-upload loop).
+* **Redirects are not followed** (reqwest would forward `X-API-Key` to the redirect target): a
+  3xx is a permanent error naming the target, so the user sets the final URL.
+* **Index.** An entry is never replaced: a file that is already indexed (e.g. found again by
+  recovery) keeps its state, job and transcript; a different file whose stem is taken (same
+  second, another folder) is indexed as `<stem>_2`.
 
 ## Local backend sidecar
 
@@ -183,6 +211,29 @@ next poll. Error texts are redacted (no query strings / keys). Recordings are ne
   gracefully on SIGBREAK; possible because the release app has no console of its own), 10 s
   grace, then the Job object is terminated (kills the tree). On Linux / macOS: SIGTERM to the
   process group, then SIGKILL.
+
+## Security
+
+* The API key is stored in `api-key` in the app data dir (never in `backend.json`), returned to
+  the SPA only as `"***"`, and sent only as `X-API-Key` to the configured backend (no redirects).
+  On Unix the file is created with mode 0600 (older 0644 files are tightened at start); on
+  Windows the per-user `%APPDATA%` ACL applies.
+* Content Security Policy (`tauri.conf.json`, sent as a header for the embedded SPA):
+  `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'
+  data: blob:; media-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost
+  http://127.0.0.1:* http://localhost:* https: http:; object-src 'none'; base-uri 'self';
+  form-action 'none'; frame-src 'none'; frame-ancestors 'none'`.
+  * Scripts: only the bundled ones (Tauri adds hashes for its own init scripts); no inline /
+    `eval` / remote scripts.
+  * `style-src 'unsafe-inline'`: Naive UI (css-render) injects `<style>` elements at runtime.
+    `dangerousDisableAssetCspModification: ["style-src"]` keeps Tauri from adding style hashes
+    / nonces, which would make browsers ignore `'unsafe-inline'`.
+  * `connect-src` allows any http(s) origin because the backend URL is user-configurable
+    (LAN hosts, a remote https server); `ipc:` / `http://ipc.localhost` is Tauri's IPC; the
+    loopback entries are covered by `http:` but listed for clarity. Blob URLs (waveform audio,
+    downloads) are media / navigation, not connections.
+  * Verified on Windows (release build, CDP): the SPA renders with its runtime styles, IPC calls
+    succeed, a remote `<script>` is blocked, and the SPA itself logs no CSP violation.
 
 ## Tray, hotkey, window
 

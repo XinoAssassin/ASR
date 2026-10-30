@@ -25,6 +25,18 @@ struct Mock {
     /// (request number, status): fail that request (0-based count of all requests).
     inject_at: Vec<(usize, u16)>,
     requests: usize,
+    /// Completed sessions -> upload id (complete is idempotent, like the backend's).
+    completed: HashMap<String, String>,
+    /// Status to answer a complete with *after* assembling the upload (response lost).
+    complete_then_fail: Vec<u16>,
+    /// Answer the next completes with 409 (a concurrent duplicate is assembling).
+    complete_conflicts: usize,
+    /// Term set ids that do not exist.
+    missing_term_sets: Vec<String>,
+    /// Answer every request with a 307 to this URL.
+    redirect: Option<String>,
+    upload_gets: usize,
+    sessions_created: usize,
 }
 
 struct Server {
@@ -34,9 +46,13 @@ struct Server {
 }
 
 fn respond(stream: &mut std::net::TcpStream, code: u16, body: &str) {
+    respond_with(stream, code, body, "");
+}
+
+fn respond_with(stream: &mut std::net::TcpStream, code: u16, body: &str, headers: &str) {
     let _ = write!(
         stream,
-        "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n{body}",
         body.len()
     );
 }
@@ -86,6 +102,10 @@ fn serve(part_size: u64) -> Server {
                 respond(&mut s, code, r#"{"detail":"injected"}"#);
                 continue;
             }
+            if let Some(to) = m.redirect.clone() {
+                respond_with(&mut s, 307, "", &format!("Location: {to}{path}\r\n"));
+                continue;
+            }
             if !m.inject.is_empty() {
                 let code = m.inject.remove(0);
                 respond(&mut s, code, r#"{"detail":"injected"}"#);
@@ -96,7 +116,8 @@ fn serve(part_size: u64) -> Server {
                 ("POST", ["api", "uploads", "init"]) => {
                     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
                     let size = v["size"].as_u64().unwrap();
-                    let sid = format!("s{}", m.sessions.len());
+                    let sid = format!("s{}", m.sessions_created);
+                    m.sessions_created += 1;
                     let ps = m.part_size;
                     let total = size.div_ceil(ps).max(1);
                     m.sessions.insert(
@@ -123,6 +144,15 @@ fn serve(part_size: u64) -> Server {
                     }
                 }
                 ("POST", ["api", "uploads", sid, "complete"]) => {
+                    if m.complete_conflicts > 0 {
+                        m.complete_conflicts -= 1;
+                        respond(&mut s, 409, r#"{"detail":"upload is being completed"}"#);
+                        continue;
+                    }
+                    if let Some(uid) = m.completed.get(*sid) {
+                        respond(&mut s, 200, &format!(r#"{{"id":"{uid}"}}"#));
+                        continue;
+                    }
                     let Some((_, size, parts)) = m.sessions.remove(*sid) else {
                         respond(&mut s, 404, r#"{"detail":"unknown session"}"#);
                         continue;
@@ -133,12 +163,33 @@ fn serve(part_size: u64) -> Server {
                     assert_eq!(data.len() as u64, size);
                     let uid = format!("u{}", m.uploads.len());
                     m.uploads.insert(uid.clone(), data);
+                    m.completed.insert(sid.to_string(), uid.clone());
+                    if !m.complete_then_fail.is_empty() {
+                        let code = m.complete_then_fail.remove(0);
+                        respond(&mut s, code, r#"{"detail":"lost"}"#);
+                        continue;
+                    }
                     respond(&mut s, 201, &format!(r#"{{"id":"{uid}"}}"#));
                 }
                 ("POST", ["api", "jobs"]) => {
                     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
                     if !m.uploads.contains_key(v["upload_id"].as_str().unwrap()) {
                         respond(&mut s, 404, r#"{"detail":"upload not found"}"#);
+                        continue;
+                    }
+                    let missing = v["term_set_ids"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|t| t.as_str())
+                        .find(|t| m.missing_term_sets.iter().any(|x| x == t))
+                        .map(str::to_string);
+                    if let Some(t) = missing {
+                        respond(
+                            &mut s,
+                            404,
+                            &format!(r#"{{"detail":"term set '{t}' not found"}}"#),
+                        );
                         continue;
                     }
                     m.jobs.push(v);
@@ -148,6 +199,14 @@ fn serve(part_size: u64) -> Server {
                         201,
                         &format!(r#"{{"id":"{id}","status":"queued"}}"#),
                     );
+                }
+                ("GET", ["api", "uploads", uid]) => {
+                    m.upload_gets += 1;
+                    if m.uploads.contains_key(*uid) {
+                        respond(&mut s, 200, &format!(r#"{{"id":"{uid}"}}"#));
+                    } else {
+                        respond(&mut s, 404, r#"{"detail":"unknown upload"}"#);
+                    }
                 }
                 ("GET", ["api", "jobs", id]) => {
                     m.polls += 1;
@@ -174,6 +233,13 @@ struct Env {
 }
 
 fn env(url: &str, key: Option<&str>, opts: Option<serde_json::Value>) -> Env {
+    env_with(url, |c| {
+        c.api_key = key.map(str::to_string);
+        c.job_options = opts;
+    })
+}
+
+fn env_with(url: &str, tweak: impl FnOnce(&mut BackendConfig)) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let data_dir = dir.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
@@ -181,13 +247,12 @@ fn env(url: &str, key: Option<&str>, opts: Option<serde_json::Value>) -> Env {
     let path = dir.path().join("2026-10-29_10-00-00.flac");
     std::fs::write(&path, &file).unwrap();
     let cfg = Arc::new(ConfigStore::open(&data_dir));
-    cfg.set(BackendConfig {
+    let mut c = BackendConfig {
         base_url: url.into(),
-        api_key: key.map(str::to_string),
-        job_options: opts,
         ..Default::default()
-    })
-    .unwrap();
+    };
+    tweak(&mut c);
+    cfg.set(c).unwrap();
     let store = Arc::new(Store::open(&data_dir.join("recordings.json")));
     let events = Arc::new(Mutex::new(Vec::new()));
     let ev = events.clone();
@@ -333,4 +398,214 @@ fn backend_down_is_transient() {
     assert_eq!(u.state, UploadState::Failed);
     assert!(u.next_retry_at.is_some());
     assert_eq!(u.attempts, 1);
+}
+
+fn entry(e: &Env) -> Entry {
+    e.up.store().get(ID).unwrap()
+}
+
+#[test]
+fn missing_term_set_is_a_permanent_job_failure_not_a_reupload() {
+    let srv = serve(10);
+    srv.state.lock().unwrap().missing_term_sets = vec!["gone".into()];
+    let e = env_with(&srv.url, |c| c.term_set_ids = vec!["gone".into()]);
+    e.up.step(ID);
+    let u = state(&e);
+    assert_eq!(u.state, UploadState::Failed, "{u:?}");
+    assert_eq!(u.upload_id.as_deref(), Some("u0"), "the upload is kept");
+    assert_eq!(u.next_retry_at, None, "permanent: waits for the user");
+    let err = u.error.unwrap();
+    assert!(
+        err.contains("术语表") && err.contains("term set 'gone'"),
+        "{err}"
+    );
+    assert_eq!(entry(&e).failed_stage, Some(Stage::Job));
+    assert!(e.up.store().next_due().is_none());
+    // a manual retry with the term set still missing does not upload again
+    e.up.enqueue(ID).unwrap();
+    e.up.step(ID);
+    assert_eq!(state(&e).state, UploadState::Failed);
+    {
+        let m = srv.state.lock().unwrap();
+        assert_eq!(m.uploads.len(), 1);
+        assert_eq!(m.sessions.len(), 0);
+        assert_eq!(m.upload_gets, 2);
+    }
+    // the user fixes the term sets (here: on the backend) and retries
+    srv.state.lock().unwrap().missing_term_sets.clear();
+    e.up.enqueue(ID).unwrap();
+    e.up.step(ID);
+    let u = state(&e);
+    assert_eq!(u.state, UploadState::Transcribing, "{u:?}");
+    assert_eq!(u.attempts, 1);
+    assert_eq!(srv.state.lock().unwrap().uploads.len(), 1);
+}
+
+#[test]
+fn upload_gone_on_the_backend_is_uploaded_again() {
+    let srv = serve(10);
+    let e = env(&srv.url, None, Some(serde_json::json!({})));
+    // init, 4 parts, complete ok; job -> 503
+    srv.state.lock().unwrap().inject_at = vec![(6, 503)];
+    e.up.step(ID);
+    assert_eq!(state(&e).upload_id.as_deref(), Some("u0"));
+    assert_eq!(entry(&e).failed_stage, Some(Stage::Job));
+    srv.state.lock().unwrap().uploads.clear();
+    e.up.step(ID); // job 404 + GET upload 404 -> re-upload scheduled
+    let u = state(&e);
+    assert_eq!(u.upload_id, None, "{u:?}");
+    assert!(u.next_retry_at.is_some());
+    e.up.step(ID);
+    let u = state(&e);
+    assert_eq!(u.state, UploadState::Transcribing, "{u:?}");
+    assert_eq!(u.upload_id.as_deref(), Some("u0"));
+    assert_eq!(u.attempts, 2);
+}
+
+#[test]
+fn lost_complete_response_and_409_are_retried_with_the_same_session() {
+    let srv = serve(10);
+    let e = env(&srv.url, None, Some(serde_json::json!({})));
+    srv.state.lock().unwrap().complete_then_fail = vec![503];
+    e.up.step(ID);
+    let u = state(&e);
+    assert_eq!(u.state, UploadState::Failed, "{u:?}");
+    assert!(u.next_retry_at.is_some());
+    assert!(entry(&e).session.is_some(), "session kept for the retry");
+    // the retry hits a concurrent duplicate first (409: transient), then succeeds
+    srv.state.lock().unwrap().complete_conflicts = 1;
+    e.up.step(ID);
+    let u = state(&e);
+    assert_eq!(u.state, UploadState::Failed, "{u:?}");
+    assert!(u.next_retry_at.is_some(), "409 is transient");
+    assert!(u.error.unwrap().contains("409"));
+    e.up.step(ID);
+    let u = state(&e);
+    assert_eq!(u.state, UploadState::Transcribing, "{u:?}");
+    assert_eq!(u.upload_id.as_deref(), Some("u0"));
+    let m = srv.state.lock().unwrap();
+    assert_eq!(m.uploads.len(), 1, "no second upload");
+    assert_eq!(m.part_puts, vec![0, 1, 2, 3], "no part sent twice");
+}
+
+#[test]
+fn permanent_complete_failure_starts_a_fresh_upload() {
+    let srv = serve(10);
+    let e = env(&srv.url, None, Some(serde_json::json!({})));
+    srv.state.lock().unwrap().inject_at = vec![(5, 422)]; // the complete
+    e.up.step(ID);
+    let u = state(&e);
+    assert_eq!(u.state, UploadState::Failed, "{u:?}");
+    assert_eq!(u.next_retry_at, None);
+    assert!(entry(&e).session.is_none(), "stale session dropped");
+    e.up.enqueue(ID).unwrap();
+    e.up.step(ID);
+    let u = state(&e);
+    assert_eq!(u.state, UploadState::Transcribing, "{u:?}");
+    let m = srv.state.lock().unwrap();
+    assert_eq!(m.sessions_created, 2);
+    assert_eq!(m.sessions.len(), 1, "the first session was abandoned");
+    assert_eq!(m.part_puts, vec![0, 1, 2, 3, 0, 1, 2, 3]);
+}
+
+#[test]
+fn polling_continues_when_the_local_file_is_gone() {
+    let srv = serve(10);
+    let e = env(&srv.url, None, Some(serde_json::json!({})));
+    e.up.step(ID);
+    assert_eq!(state(&e).state, UploadState::Transcribing);
+    std::fs::remove_file(&entry(&e).recording.path).unwrap();
+    e.up.step(ID);
+    e.up.step(ID);
+    let u = state(&e);
+    assert_eq!(u.state, UploadState::Done, "{u:?}");
+    assert_eq!(u.transcript_id.as_deref(), Some("t-j1"));
+}
+
+#[test]
+fn missing_file_before_upload_is_permanent() {
+    let srv = serve(10);
+    let e = env(&srv.url, None, Some(serde_json::json!({})));
+    std::fs::remove_file(&entry(&e).recording.path).unwrap();
+    e.up.step(ID);
+    let u = state(&e);
+    assert_eq!(u.state, UploadState::Failed);
+    assert_eq!(u.next_retry_at, None);
+    assert_eq!(srv.hits.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn changed_file_with_the_same_size_gets_a_new_session() {
+    let srv = serve(10);
+    let e = env(&srv.url, None, Some(serde_json::json!({})));
+    srv.state.lock().unwrap().inject_at = vec![(2, 503)]; // part 1
+    e.up.step(ID);
+    assert_eq!(entry(&e).session.unwrap().next_part, 1);
+    // same size, different content and mtime
+    let path = entry(&e).recording.path;
+    let new: Vec<u8> = (100..137u8).collect();
+    std::fs::write(&path, &new).unwrap();
+    let f = std::fs::File::options().write(true).open(&path).unwrap();
+    f.set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000))
+        .unwrap();
+    drop(f);
+    e.up.enqueue(ID).unwrap();
+    e.up.step(ID);
+    let u = state(&e);
+    assert_eq!(u.state, UploadState::Transcribing, "{u:?}");
+    let m = srv.state.lock().unwrap();
+    assert_eq!(m.uploads["u0"], new);
+    assert_eq!(m.part_puts, vec![0, 0, 1, 2, 3]);
+}
+
+#[test]
+fn redirects_are_not_followed() {
+    let target = serve(10);
+    let srv = serve(10);
+    srv.state.lock().unwrap().redirect = Some(target.url.clone());
+    let e = env(&srv.url, Some("sekret"), Some(serde_json::json!({})));
+    e.up.step(ID);
+    let u = state(&e);
+    assert_eq!(u.state, UploadState::Failed, "{u:?}");
+    assert_eq!(u.next_retry_at, None);
+    let err = u.error.unwrap();
+    assert!(err.contains("307") && err.contains("redirect"), "{err}");
+    assert_eq!(
+        target.hits.load(Ordering::SeqCst),
+        0,
+        "key never sent elsewhere"
+    );
+}
+
+#[test]
+fn re_adding_an_indexed_file_keeps_its_state() {
+    let srv = serve(10);
+    let e = env(&srv.url, None, Some(serde_json::json!({})));
+    e.up.step(ID);
+    e.up.step(ID);
+    e.up.step(ID);
+    assert_eq!(state(&e).state, UploadState::Done);
+    let path = std::path::PathBuf::from(entry(&e).recording.path);
+    assert!(e.up.has_path(&path));
+    let n = e.events.lock().unwrap().len();
+    let rec = e.up.add_finished(
+        &Finished {
+            path,
+            stem: ID.into(),
+            size: 37,
+            duration: 1.0,
+            channels: 2,
+            created_at: Utc::now(),
+        },
+        true,
+    );
+    assert_eq!(rec.upload.state, UploadState::Done);
+    assert_eq!(rec.upload.transcript_id.as_deref(), Some("t-j1"));
+    assert_eq!(state(&e).state, UploadState::Done);
+    assert_eq!(
+        e.events.lock().unwrap().len(),
+        n,
+        "no event for an unchanged entry"
+    );
+    assert!(e.up.store().next_due().is_none());
 }

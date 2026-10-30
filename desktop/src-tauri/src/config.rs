@@ -63,10 +63,29 @@ pub fn normalize_base_url(url: &str) -> Result<String, String> {
     Ok(u.to_string())
 }
 
+/// Key files written by older versions were world-readable on Unix: tighten them to 0600.
+fn restrict_key_file(p: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(m) = std::fs::metadata(p) {
+            if m.permissions().mode() & 0o077 != 0 {
+                if let Err(e) = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600))
+                {
+                    log::warn!("cannot restrict {}: {e}", p.display());
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = p;
+}
+
 impl ConfigStore {
     pub fn open(dir: &Path) -> Self {
         let mut config: BackendConfig = read_json(&dir.join("backend.json"));
         config.api_key = None;
+        restrict_key_file(&dir.join("api-key"));
         let key = std::fs::read_to_string(dir.join("api-key"))
             .ok()
             .map(|s| s.trim().to_string())
@@ -99,7 +118,7 @@ impl ConfigStore {
             Some(k) if k == MASK => {}
             Some(k) if !k.trim().is_empty() => {
                 let k = k.trim().to_string();
-                crate::util::write_atomic(&self.dir.join("api-key"), k.as_bytes())
+                crate::util::write_atomic_private(&self.dir.join("api-key"), k.as_bytes())
                     .map_err(|e| format!("cannot store the API key: {e}"))?;
                 *self.key.lock().unwrap() = Some(k);
             }
@@ -152,6 +171,12 @@ mod tests {
         assert_eq!(out.base_url, "http://h:8000");
         let stored = std::fs::read_to_string(dir.path().join("backend.json")).unwrap();
         assert!(!stored.contains("k-123"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let m = std::fs::metadata(dir.path().join("api-key")).unwrap();
+            assert_eq!(m.permissions().mode() & 0o777, 0o600);
+        }
         // "***" keeps the key, also across a reopen
         c.api_key = Some(MASK.into());
         s.set(c.clone()).unwrap();
@@ -162,6 +187,20 @@ mod tests {
         s2.set(c).unwrap();
         assert_eq!(s2.get_with_key().api_key, None);
         assert!(!dir.path().join("api-key").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn old_world_readable_key_file_is_restricted() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("api-key");
+        std::fs::write(&p, "k-old\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let s = ConfigStore::open(dir.path());
+        assert_eq!(s.get_with_key().api_key.as_deref(), Some("k-old"));
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]
