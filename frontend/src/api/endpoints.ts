@@ -2,11 +2,19 @@
  * Typed helpers over the generated client: each returns the response data or throws ApiError.
  * Anything that changes server state or is shared between pages goes through a store. The only
  * direct calls from components are read-only lookups owned by that one component: the directory
- * tree of DirectoryPicker (`listRoots` / `listDirs`) and the Settings page probing a backend URL
- * before it is saved (`probeHealth`); a store around them would hold no state.
+ * tree of DirectoryPicker (`listRoots` / `listDirs`), the Settings page probing a backend URL
+ * before it is saved (`probeHealth`) and the SiYuan dialog reading the upload's file name for its
+ * path preview (`getUpload`); a store around them would hold no state.
  */
 import { api, normalizeBackendUrl, type Schemas } from './client'
-import { errorFromResponse, toApiError, unwrap, unwrapVoid } from './errors'
+import {
+  ApiError,
+  errorFromResponse,
+  extractDetail,
+  toApiError,
+  unwrap,
+  unwrapVoid,
+} from './errors'
 
 export type HealthOut = Schemas['HealthOut']
 export type FsRoot = Schemas['FsRoot']
@@ -44,6 +52,14 @@ export type ChannelsOption = Schemas['PreprocessOptions']['channels']
 export type ChannelPolicy = ProbeInfo['channel_policy']
 export type FileTransfer = Schemas['CloudSettingsOut']['file_transfer']
 export type ProviderName = JobOut['provider']
+export type EnvironmentOut = Schemas['EnvironmentOut']
+export type SiYuanSettingsOut = Schemas['SiYuanSettingsOut']
+export type SiYuanSettingsUpdate = Schemas['SiYuanSettingsUpdate']
+export type SiYuanTestOut = Schemas['SiYuanTestOut']
+export type SiYuanNotebookOut = Schemas['SiYuanNotebookOut']
+export type SiYuanPushIn = Schemas['SiYuanPushIn']
+export type SiYuanPushOut = Schemas['SiYuanPushOut']
+export type ExportLocale = NonNullable<SiYuanPushIn['locale']>
 
 // health -----------------------------------------------------------------------------------------
 
@@ -218,6 +234,75 @@ export const updateTermSet = (termSetId: string, body: TermSetIn): Promise<TermS
 export const createTermSet = (body: TermSetIn): Promise<TermSetOut> =>
   unwrap(api.POST('/api/term-sets', { body }))
 
+export const deleteTermSet = (termSetId: string): Promise<void> =>
+  unwrapVoid(
+    api.DELETE('/api/term-sets/{term_set_id}', { params: { path: { term_set_id: termSetId } } }),
+  )
+
+/** One rejected line of a term import (1-based line number, message, the raw line). */
+export interface TermImportLineError {
+  line: number
+  message: string
+  input: string | null
+}
+
+/**
+ * 422 from `POST /api/term-sets/import` with per-line errors (`loc: ["body", "text", <line>]`).
+ * Other 422s (blank name, too many terms) stay plain ApiErrors.
+ */
+export class TermImportError extends ApiError {
+  readonly lines: TermImportLineError[]
+
+  constructor(status: number, detail: string | null, lines: TermImportLineError[]) {
+    super(status, detail)
+    this.name = 'TermImportError'
+    this.lines = lines
+  }
+}
+
+interface ImportErrorItem {
+  loc?: unknown[]
+  msg?: unknown
+  input?: unknown
+}
+
+/** The per-line errors of an import 422 body, or [] when the body has none. */
+export function importLineErrors(body: unknown): TermImportLineError[] {
+  const detail = (body as { detail?: unknown } | null)?.detail
+  if (!Array.isArray(detail)) return []
+  const out: TermImportLineError[] = []
+  for (const item of detail as ImportErrorItem[]) {
+    const loc = Array.isArray(item?.loc) ? item.loc : []
+    const line = loc[0] === 'body' && loc[1] === 'text' ? loc[2] : undefined
+    if (typeof line !== 'number') continue
+    const msg = typeof item.msg === 'string' ? item.msg : ''
+    out.push({
+      line,
+      // The backend prefixes "line N: "; the UI shows the line number in its own column.
+      message: msg.replace(/^line \d+:\s*/, ''),
+      input: typeof item.input === 'string' ? item.input : null,
+    })
+  }
+  return out
+}
+
+/** Create a term set from pasted text / a .txt file. Throws TermImportError for bad lines. */
+export async function importTermSet(name: string, text: string): Promise<TermSetOut> {
+  let result
+  try {
+    result = await api.POST('/api/term-sets/import', { body: { name, text } })
+  } catch (e) {
+    throw toApiError(e)
+  }
+  if (!result.response.ok) {
+    const lines = result.response.status === 422 ? importLineErrors(result.error) : []
+    const detail = extractDetail(result.error)
+    if (lines.length) throw new TermImportError(result.response.status, detail, lines)
+    throw new ApiError(result.response.status, detail)
+  }
+  return result.data as TermSetOut
+}
+
 // settings ---------------------------------------------------------------------------------------
 
 export const getSettings = (): Promise<SettingsOut> => unwrap(api.GET('/api/settings'))
@@ -235,5 +320,27 @@ export const downloadLocalModel = (key: string, mirror: boolean): Promise<LocalM
   unwrap(
     api.POST('/api/settings/local-models/{key}/download', {
       params: { path: { key }, query: { mirror } },
+    }),
+  )
+
+// SiYuan (思源笔记) export --------------------------------------------------------------------------
+
+export const getSiyuanSettings = (): Promise<SiYuanSettingsOut> =>
+  unwrap(api.GET('/api/siyuan/settings'))
+
+export const updateSiyuanSettings = (body: SiYuanSettingsUpdate): Promise<SiYuanSettingsOut> =>
+  unwrap(api.PUT('/api/siyuan/settings', { body }))
+
+export const testSiyuan = (): Promise<SiYuanTestOut> => unwrap(api.POST('/api/siyuan/test'))
+
+/** 422 when SiYuan is not configured, 502 when the backend cannot reach it. */
+export const listSiyuanNotebooks = (): Promise<SiYuanNotebookOut[]> =>
+  unwrap(api.GET('/api/siyuan/notebooks'))
+
+export const pushToSiyuan = (transcriptId: string, body: SiYuanPushIn): Promise<SiYuanPushOut> =>
+  unwrap(
+    api.POST('/api/transcripts/{transcript_id}/siyuan', {
+      params: { path: { transcript_id: transcriptId } },
+      body,
     }),
   )

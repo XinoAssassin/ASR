@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.stubGlobal('window', { localStorage: { getItem: () => null, setItem: () => undefined, removeItem: () => undefined } })
-const { fetchBlob } = await import('./download')
+const { exportPath, fetchBlob } = await import('./download')
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -39,5 +39,26 @@ describe('fetchBlob', () => {
     expect(totals.every((t) => t === null)).toBe(true)
     const { blob } = await fetchBlob('/x', new AbortController().signal)
     expect(blob.size).toBe(2)
+  })
+})
+
+describe('exportPath', () => {
+  it('sends the locale for Markdown only', () => {
+    const md = new URL(
+      exportPath('t/1', { format: 'md', timestamps: false, mergeSameSpeaker: true, locale: 'en' }),
+      'http://x',
+    )
+    expect(md.pathname).toBe('/api/transcripts/t%2F1/export')
+    expect(Object.fromEntries(md.searchParams)).toEqual({
+      format: 'md',
+      timestamps: 'false',
+      merge_same_speaker: 'true',
+      locale: 'en',
+    })
+    const srt = new URL(
+      exportPath('t1', { format: 'srt', timestamps: true, mergeSameSpeaker: false, locale: 'en' }),
+      'http://x',
+    )
+    expect(srt.searchParams.has('locale')).toBe(false)
   })
 })

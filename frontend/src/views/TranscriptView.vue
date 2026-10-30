@@ -52,6 +52,7 @@ import {
   shortcutAction,
 } from '@/components/interaction'
 import SegmentRow from '@/components/SegmentRow.vue'
+import SiyuanExportDialog from '@/components/SiyuanExportDialog.vue'
 import SpeakerPanel from '@/components/SpeakerPanel.vue'
 import SummaryPanel from '@/components/SummaryPanel.vue'
 import WaveformPlayer, { type WaveRegion } from '@/components/WaveformPlayer.vue'
@@ -62,6 +63,7 @@ import { formatBytes, formatDateTime, formatDuration } from '@/utils/format'
 import { PiecesMemo, type Piece } from '@/utils/highlight'
 import { findMatches } from '@/utils/search'
 import { findActiveSegment } from '@/utils/segments'
+import { exportLocaleOf } from '@/utils/siyuanPath'
 
 const props = defineProps<{ id: string }>()
 
@@ -471,9 +473,16 @@ function onKeydown(e: KeyboardEvent): void {
 
 // --- export -------------------------------------------------------------------------------------
 
-const EXPORT_FORMATS: ExportFormat[] = ['txt', 'srt', 'vtt', 'json']
+const EXPORT_FORMATS: ExportFormat[] = ['txt', 'srt', 'vtt', 'json', 'md']
 const exportTimestamps = ref(true)
 const exportMerge = ref(false)
+/** Markdown headings / labels follow the UI language. */
+const exportLocale = computed(() => exportLocaleOf(locale.value))
+const siyuanOpen = ref(false)
+
+function formatLabel(format: ExportFormat): string {
+  return format === 'md' ? t('transcript.markdown') : format.toUpperCase()
+}
 
 async function doExport(format: ExportFormat): Promise<void> {
   try {
@@ -481,6 +490,7 @@ async function doExport(format: ExportFormat): Promise<void> {
       format,
       timestamps: exportTimestamps.value,
       mergeSameSpeaker: exportMerge.value,
+      locale: exportLocale.value,
     })
     message.success(t('transcript.exported', { name }))
   } catch (e) {
@@ -814,14 +824,30 @@ onBeforeUnmount(() => {
                     v-for="fmt in EXPORT_FORMATS"
                     :key="fmt"
                     :loading="store.exporting"
+                    :title="fmt === 'md' ? t('transcript.exportMd') : undefined"
                     :data-testid="`export-${fmt}`"
                     @click="doExport(fmt)"
                   >
-                    {{ fmt.toUpperCase() }}
+                    {{ formatLabel(fmt) }}
                   </NButton>
                 </NButtonGroup>
+                <NButton data-testid="export-siyuan" @click="siyuanOpen = true">
+                  {{ t('siyuan.send') }}
+                </NButton>
               </NSpace>
             </NCard>
+            <SiyuanExportDialog
+              v-model:show="siyuanOpen"
+              :transcript-id="store.transcript.id"
+              :provider="store.transcript.provider"
+              :upload-id="store.job?.upload_id ?? null"
+              :file-url="store.job?.file_url ?? null"
+              :created-at="store.transcript.created_at"
+              :timestamps="exportTimestamps"
+              :merge-same-speaker="exportMerge"
+              :locale="exportLocale"
+              :flush="store.flush"
+            />
           </div>
         </div>
       </NSpace>

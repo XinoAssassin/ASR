@@ -21,8 +21,9 @@ import {
   useDialog,
   useMessage,
 } from 'naive-ui'
-import { computed, h, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useRoute } from 'vue-router'
 
 import {
   BackendUrlError,
@@ -34,13 +35,17 @@ import {
   type ProviderName,
   type SettingsUpdate,
 } from '@/api'
+import EnvironmentCard from '@/components/EnvironmentCard.vue'
+import EnvTag from '@/components/EnvTag.vue'
 import DesktopSettingsCard from '@/components/recorder/DesktopSettingsCard.vue'
 import SidecarCard from '@/components/recorder/SidecarCard.vue'
+import SiyuanSettingsCard from '@/components/SiyuanSettingsCard.vue'
 import { useApiErrors } from '@/composables/useApiErrors'
 import { isDesktop } from '@/platform'
 import { useHealthStore } from '@/stores/health'
 import { useRecorderStore } from '@/stores/recorder'
 import { useSettingsStore } from '@/stores/settings'
+import { envVariable } from '@/utils/envFacts'
 
 import { createFormSync } from './formSync'
 
@@ -52,6 +57,12 @@ const health = useHealthStore()
 const settings = useSettingsStore()
 const desktop = isDesktop()
 const recorder = useRecorderStore()
+const route = useRoute()
+
+/** Environment variable behind a settings field (`env_only`), for the "env" markers. */
+function envOf(field: string): string | null {
+  return envVariable(settings.server?.env_only, field)
+}
 
 /** Desktop: the browser connection settings are the source of truth; hand them to Rust too. */
 async function pushToDesktop(): Promise<void> {
@@ -399,6 +410,10 @@ async function refreshLocalModels(): Promise<void> {
 onMounted(() => {
   void settings.load()
   void refreshLocalModels()
+  // "Open Settings" from the SiYuan dialog links to #siyuan.
+  if (route.hash === '#siyuan') {
+    void nextTick(() => document.getElementById('siyuan')?.scrollIntoView({ block: 'start' }))
+  }
 })
 </script>
 
@@ -476,6 +491,7 @@ onMounted(() => {
         </NDescriptionsItem>
         <NDescriptionsItem :label="t('health.apiKeyRequired')">
           {{ health.info.api_key_required ? t('common.yes') : t('common.no') }}
+          <EnvTag v-if="envOf('api_key_required')" :name="envOf('api_key_required')!" />
         </NDescriptionsItem>
       </NDescriptions>
       <NAlert v-else-if="health.state === 'error'" type="error">
@@ -541,6 +557,18 @@ onMounted(() => {
                 </template>
               </NTag>
               <NTag v-else type="warning" size="small">{{ t('settings.cloud.keyNotSet') }}</NTag>
+              <NText
+                v-if="settings.server?.cloud.api_key_source"
+                depth="3"
+                class="small"
+                data-testid="cloud-key-source"
+              >
+                {{
+                  settings.server.cloud.api_key_source === 'env'
+                    ? t('envFacts.keySourceEnv')
+                    : t('envFacts.keySourceSettings')
+                }}
+              </NText>
               <NButton
                 v-if="settings.server?.cloud.api_key_set"
                 size="small"
@@ -633,6 +661,7 @@ onMounted(() => {
         </NDescriptionsItem>
         <NDescriptionsItem :label="t('settings.local.cacheDir')">
           {{ settings.server.local.model_cache_dir }}
+          <EnvTag v-if="envOf('local.model_cache_dir')" :name="envOf('local.model_cache_dir')!" />
         </NDescriptionsItem>
       </NDescriptions>
       <NForm label-placement="left" label-width="140" :disabled="!settings.server">
@@ -669,6 +698,16 @@ onMounted(() => {
         size="small"
       />
     </NCard>
+
+    <!-- SiYuan export (the backend pushes the documents itself) -->
+    <SiyuanSettingsCard />
+
+    <!-- Read-only: only environment variables set these -->
+    <EnvironmentCard
+      v-if="settings.server?.environment"
+      :environment="settings.server.environment"
+      :env-only="settings.server.env_only ?? {}"
+    />
   </NSpace>
 </template>
 
@@ -676,5 +715,9 @@ onMounted(() => {
 .settings {
   max-width: 960px;
   margin: 0 auto;
+}
+
+.small {
+  font-size: 12px;
 }
 </style>

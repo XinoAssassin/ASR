@@ -90,12 +90,14 @@ export function audioPath(uploadId: string): string {
   return `/api/audio/${encodeURIComponent(uploadId)}`
 }
 
-export type ExportFormat = 'txt' | 'srt' | 'vtt' | 'json'
+export type ExportFormat = 'txt' | 'srt' | 'vtt' | 'json' | 'md'
 
 export interface ExportOptions {
   format: ExportFormat
   timestamps: boolean
   mergeSameSpeaker: boolean
+  /** Headings and labels of the Markdown note (`md` only; other formats ignore it). */
+  locale?: 'zh' | 'en'
 }
 
 export function exportPath(transcriptId: string, options: ExportOptions): string {
@@ -104,6 +106,7 @@ export function exportPath(transcriptId: string, options: ExportOptions): string
     timestamps: String(options.timestamps),
     merge_same_speaker: String(options.mergeSameSpeaker),
   })
+  if (options.format === 'md' && options.locale) query.set('locale', options.locale)
   return `/api/transcripts/${encodeURIComponent(transcriptId)}/export?${query.toString()}`
 }
 

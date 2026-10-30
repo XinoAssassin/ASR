@@ -6,6 +6,7 @@ const routes: RouteRecordRaw[] = [
   // Desktop only; the view itself shows a "desktop app only" notice in the web build.
   { path: '/recorder', name: 'recorder', component: () => import('@/views/RecorderView.vue') },
   { path: '/jobs', name: 'jobs', component: () => import('@/views/JobsView.vue') },
+  { path: '/term-sets', name: 'term-sets', component: () => import('@/views/TermSetsView.vue') },
   {
     path: '/transcripts/:id',
     name: 'transcript',

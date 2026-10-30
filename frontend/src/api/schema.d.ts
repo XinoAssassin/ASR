@@ -1546,7 +1546,10 @@ export interface components {
         };
         /**
          * TermSetImport
-         * @description Plain-text import: one term per line, optionally ``term<TAB or ,>weight[<TAB or ,>note]``.
+         * @description Plain-text import into a new set.
+         *
+         *     One term per line, ``term[<TAB or ,>weight[<TAB or ,>note]]``, where ``term`` may use the
+         *     asr-hotword syntax ``Target | alias … ~~~ black …``.
          */
         TermSetImport: {
             /** Name */

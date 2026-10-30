@@ -46,6 +46,7 @@ const navItems = [
   // Desktop only (the web build has no recorder).
   ...(desktop ? [{ key: 'recorder', to: '/recorder', label: 'nav.recorder' }] : []),
   { key: 'jobs', to: '/jobs', label: 'nav.jobs' },
+  { key: 'term-sets', to: '/term-sets', label: 'nav.termSets' },
   { key: 'settings', to: '/settings', label: 'nav.settings' },
 ] as const
 
