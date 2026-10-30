@@ -258,6 +258,11 @@ Errors: FastAPI default `{"detail": ...}`; 401 for missing/wrong `X-API-Key`, 40
 | D51 | faster-whisper is an optional extra and an explicit `local.asr_model` choice only; `language_hints == ["en"]` still uses Qwen3-ASR (WER 3.42 % 1.7B / 4.11 % 0.6B vs whisper-turbo 4.02 %, small 7.27 % on 73 LibriSpeech clips) | docs/M11_EXTRAS.md |
 | D52 | [5b] L2 (MacBERT4CSC) not shipped: on 19 LLM-ASR hypotheses 4 edits helped, 27 hurt at p >= 0.5, none helped at 0.9; pyannote not run (gated HF models, needs torchaudio which stops at torch 2.11) | docs/M11_EXTRAS.md |
 | D53 | CLI commands load the same `.env` files as `asr serve` through a startup hook registered by `server.cli` (real env vars win); `ASR_TORCH_THREADS` / `ASR_LOCAL_DTYPE` are validated settings propagated to the core library | Deploy agent found `.env` ignored by the CLI and these two knobs |
+| D54 | Open mode (empty `ASR_API_KEY`) additionally requires a loopback TCP peer; `asr serve` refuses a non-loopback bind without a key unless `ASR_ALLOW_UNAUTHENTICATED_NETWORK=1` (compose sets it because it publishes on 127.0.0.1; the bare image fails closed). Amends D24 | Review: `Host: localhost` from a LAN peer reached the whole API |
+| D55 | Optimistic concurrency for transcripts: conditional `UPDATE … WHERE updated_at = ?`, optional `expected_updated_at` → 409; LLM suggestions / summary merge into the current row | Two clients (browser + desktop, two tabs) overwrote each other |
+| D56 | Chunked `complete` is idempotent for 1 h; JSON bodies capped at 2 MB (uploads exempt); migrations atomic and re-runnable | Review findings; lets web and desktop uploaders retry complete safely |
+| D57 | Correction offsets and `SplitOp.at` are code-point indices; every correction records its offset and review applies strictly there (EditError when the text moved); the SPA converts from UTF-16 | Rejects restored text at the wrong occurrence |
+| D58 | Desktop recovery is race-safe per entry (busy stems skipped) instead of gating start; gaps > 10 s with no audio on any track are cut with a warning; write errors are retried from a 300 s backlog, then the session stops itself | AGENTS rule 8 under crash / sleep / disk-full |
 
 ### Follow-ups (not in M0–M3 scope)
 - `JobOut.upload_name` / `JobOut.duration` to avoid one `GET /api/uploads/{id}` per row in the Jobs table.
@@ -430,4 +435,21 @@ Rust (`desktop/`) + SPA (e25bbf0, 101e5b0) against the M10 contract additions (0
 To finish M10 on a machine with audio: `selftest2.exe --process-test --seconds 40 --gap-at 20 --gap 8`
 (built with `--features selftest`, see desktop/README.md), a manual tray / Ctrl+Alt+R check, and a real
 Teams / Feishu call with a microphone (also the open item of M9).
+
+## 15. Whole-project review and fixes (2026-10-30)
+
+Seven read-only reviewers (providers + audio, core lib + scripts, server + deploy, frontend logic,
+frontend UI, desktop recorder, desktop shell) found about 80 issues; seven fix agents with the same
+split fixed them, each with a regression test that fails on the old code. Top items: unauthenticated
+LAN access via a spoofed Host (D54), `GPT-4`-style terms collapsing a chunk to one segment, the
+repetition filter rewriting digits, rejects restoring at the wrong place (D57), case-sensitive
+replace behind a case-insensitive search, desktop recovery able to delete the live recording (D58),
+an endless re-upload loop on a deleted term set, and lost edits after failed saves.
+Commits: 1928e08 (recorder), 8ab2f41 (providers / audio), 6addfc4 (core), 6456301 (server / deploy),
+87ca8ef + 611e271 (frontend), the desktop shell commit right after this log entry.
+Checks after integration: backend 691 passed / 2 skipped; frontend 132 tests, typecheck, build;
+desktop Linux fmt / clippy / 65 tests (the timing test `slow_reopen_does_not_drop_healthy_track`
+passed 20/20 on Linux but failed once on Windows under heavy CPU load — watch for flakiness);
+Windows clippy (app + selftest), 61 lib tests, release build starts and exits 0. Real audio capture
+was not re-run (no audio endpoint while RDP is disconnected).
 
