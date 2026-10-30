@@ -34,8 +34,14 @@ def cpu_features() -> CpuFeatures:
 
 
 def resolve_dtype(requested: str | None = None, *, device: str = "cpu") -> DtypeName:
-    """``auto`` -> bfloat16 where the hardware runs it natively, else float32."""
-    choice = (requested or os.environ.get("ASR_LOCAL_DTYPE", "") or "auto").strip().lower()
+    """``auto`` -> bfloat16 where the hardware runs it natively, else float32.
+
+    ``None`` and ``"auto"`` both defer to ``ASR_LOCAL_DTYPE`` first (callers pass the literal
+    ``"auto"`` as their default); an explicit dtype argument wins over the environment.
+    """
+    choice = (requested or "").strip().lower()
+    if choice in ("", "auto"):
+        choice = os.environ.get("ASR_LOCAL_DTYPE", "").strip().lower() or "auto"
     if choice in ("float32", "bfloat16", "float16"):
         return choice  # type: ignore[return-value]
     if choice != "auto":

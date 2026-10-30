@@ -146,6 +146,16 @@ def test_transcode_for_browser(tmp_path: Path, backend: str) -> None:
     assert (info.codec, info.sample_rate, info.channels) == ("mp3", 8_000, 1)
 
 
+def test_transcode_for_browser_uses_the_job_stream(tmp_path: Path, backend: str) -> None:
+    from tests.test_audio_fixtures import write_multistream
+
+    src = write_multistream(tmp_path)  # stream 0 mono tone, stream 1 stereo speech
+    first = transcode.transcode_for_browser(src, tmp_path / "a.mp3")
+    second = transcode.transcode_for_browser(src, tmp_path / "b.mp3", stream_index=1)
+    assert decode.probe(first).channels == 1
+    assert decode.probe(second).channels == 2
+
+
 @pytest.mark.skipif(not REAL_EXCERPT.exists(), reason="run scripts/make_fixtures.py first")
 def test_real_excerpt_to_cloud_flac(tmp_path: Path) -> None:
     dst = transcode.transcode_audio(
@@ -190,3 +200,21 @@ def test_clipping_ratio() -> None:
     x[15:20] = 0.99
     assert clipping_ratio(x) == pytest.approx(0.015)
     assert clipping_ratio(np.zeros(0, dtype=np.float32)) == 0.0
+
+
+def test_peak_gain_is_capped() -> None:
+    from asr.audio.preprocess import MAX_GAIN_DB
+
+    x = (0.003 * np.sin(np.linspace(0, 100, 16_000))).astype(np.float32)  # about -50 dBFS
+    y, gain_db = peak_safety_gain(x)
+    assert gain_db == pytest.approx(MAX_GAIN_DB) and MAX_GAIN_DB <= 30.0
+    assert 20 * np.log10(float(np.abs(y).max())) == pytest.approx(-20.5, abs=0.1)
+
+
+@pytest.mark.parametrize("peak_dbfs", [-90.0, -70.0, -61.0])
+def test_peak_gain_leaves_near_silence_alone(peak_dbfs: float) -> None:
+    rng = np.random.default_rng(0)
+    x = rng.uniform(-1, 1, 16_000).astype(np.float32)
+    x *= np.float32(10 ** (peak_dbfs / 20) / np.abs(x).max())  # dither-level noise
+    y, gain_db = peak_safety_gain(x)
+    assert gain_db == 0.0 and y is x

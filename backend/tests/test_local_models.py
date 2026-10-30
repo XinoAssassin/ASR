@@ -77,3 +77,17 @@ def test_resolve_dtype(monkeypatch: pytest.MonkeyPatch) -> None:
     assert device.resolve_dtype("float32") == "float32"  # explicit argument wins over env
     with pytest.raises(ValueError, match="unknown dtype"):
         device.resolve_dtype("int8")
+
+
+def test_resolve_dtype_auto_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Callers pass the literal ``"auto"``; ``ASR_LOCAL_DTYPE`` must still apply."""
+    from asr.providers.local import device
+
+    monkeypatch.setattr(device, "cpu_features", lambda: device.CpuFeatures("AVX512", True))
+    monkeypatch.setenv("ASR_LOCAL_DTYPE", "float32")
+    assert device.resolve_dtype("auto") == "float32"
+    assert device.resolve_dtype(" AUTO ") == "float32"
+    monkeypatch.setenv("ASR_LOCAL_DTYPE", "auto")
+    assert device.resolve_dtype("auto") == "bfloat16"
+    monkeypatch.setenv("ASR_LOCAL_DTYPE", "float32")
+    assert device.resolve_dtype("bfloat16") == "bfloat16"  # explicit argument still wins

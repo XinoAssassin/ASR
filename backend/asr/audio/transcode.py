@@ -122,17 +122,24 @@ def browser_params(sample_rate: int, channels: int) -> tuple[int, int | None, in
     return rate, channels_arg, BROWSER_MP3_BITRATE[out_channels]
 
 
-def transcode_for_browser(src: Path, dst: Path) -> Path:
+def transcode_for_browser(src: Path, dst: Path, *, stream_index: int = 0) -> Path:
     """MP3 transcode for the browser player (EXECUTION_LOG D12).
 
     Mono stays mono and stereo stays stereo (per-channel recordings remain audible as such);
     sources with more channels are downmixed to mono. The sample rate is kept when MP3
     supports it (otherwise the nearest MPEG rate); 64 kbit/s mono, 96 kbit/s stereo.
+    ``stream_index`` picks the audio stream (the one the job transcribed).
     """
-    meta = decode.stream_meta(Path(src), 0)
+    meta = decode.stream_meta(Path(src), stream_index)
     rate, channels_arg, bitrate = browser_params(meta.sample_rate, meta.channels)
     return transcode_audio(
-        src, dst, fmt="mp3", sample_rate=rate, channels=channels_arg, bitrate=bitrate
+        src,
+        dst,
+        fmt="mp3",
+        sample_rate=rate,
+        channels=channels_arg,
+        bitrate=bitrate,
+        stream_index=stream_index,
     )
 
 

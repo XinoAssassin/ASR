@@ -51,14 +51,19 @@ def fold_small_clusters(
 
     A cluster is kept when it holds at least ``max(min_share * N, min_windows)`` windows (the
     largest cluster is always kept). Nearest = highest cosine similarity to a kept centroid.
+    Negative labels (HDBSCAN's ``-1`` outliers) are never a cluster: those windows are always
+    reassigned, and if every window is an outlier they all become cluster 0.
     """
     labels = np.asarray(labels).copy()
-    ids, counts = np.unique(labels, return_counts=True)
+    valid = labels >= 0
+    if not valid.any():
+        return np.zeros_like(labels)
+    ids, counts = np.unique(labels[valid], return_counts=True)
     threshold = max(min_share * len(labels), min_windows)
     keep = [i for i, c in zip(ids, counts, strict=True) if c >= threshold] or [
         ids[np.argmax(counts)]
     ]
-    if len(keep) == len(ids):
+    if len(keep) == len(ids) and valid.all():
         return labels
     unit = embeddings / np.maximum(np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-8)
     centroids = np.stack([unit[labels == k].mean(0) for k in keep])
@@ -66,6 +71,11 @@ def fold_small_clusters(
     small = ~np.isin(labels, keep)
     labels[small] = np.asarray(keep)[np.argmax(unit[small] @ centroids.T, axis=1)]
     return labels
+
+
+def reassign_outliers(embeddings: np.ndarray, labels: np.ndarray) -> np.ndarray:
+    """Only the outlier part of ``fold_small_clusters``: every real cluster is kept."""
+    return fold_small_clusters(embeddings, labels, min_share=0.0, min_windows=0)
 
 
 class CamPlusDiarizer:
@@ -126,5 +136,7 @@ class CamPlusDiarizer:
         labels = np.asarray(self._cluster(torch.from_numpy(embeddings), **params))
         if not num_speakers:
             labels = fold_small_clusters(embeddings, labels)
+        elif (labels < 0).any():
+            labels = reassign_outliers(embeddings, labels)
         merged = postprocess(windows, None, labels, embeddings)
         return order_labels([Turn(float(s), float(e), int(k)) for s, e, k in merged])

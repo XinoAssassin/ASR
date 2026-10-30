@@ -170,3 +170,11 @@ def test_latin_full_stop_splits_only_before_space() -> None:
         [ChunkResult(start=0, end=3, text=text, tokens=tokens)], [], default_speaker="S"
     )
     assert [s.text for s in segs] == ["Version 3.5 is out.", "Mr Smith agrees"]
+
+
+def test_compute_type_auto_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ASR_LOCAL_DTYPE", "float32")
+    assert compute_type("cpu", "auto") == "float32"
+    monkeypatch.delenv("ASR_LOCAL_DTYPE")
+    assert compute_type("cpu", "auto") == "int8"
+    assert compute_type("cuda", "auto") == "float16"

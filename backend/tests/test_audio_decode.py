@@ -279,3 +279,20 @@ def test_real_excerpt_probe_and_decode(backend: str) -> None:
     x = decode.decode_pcm16k(REAL_EXCERPT)
     assert x.shape[0] == pytest.approx(20 * 16_000, rel=0.01)
     assert float(np.abs(x).max()) > 0.01
+
+
+def test_mid_stream_layout_change_keeps_first_layout(tmp_path: Path, backend: str) -> None:
+    """Concatenated mono + stereo ADTS: the layout changes mid-stream; blocks keep the first."""
+    from tests.test_audio_fixtures import encode, speech_like
+
+    mono, stereo = tmp_path / "m.aac", tmp_path / "s.aac"
+    encode(mono, [speech_like(1.0, 16_000)[None, :]], 16_000, container="adts", codec="aac")
+    encode(stereo, [correlated_stereo(1.0, 16_000)], 16_000, container="adts", codec="aac")
+    path = tmp_path / "changed.aac"
+    path.write_bytes(mono.read_bytes() + stereo.read_bytes())
+
+    blocks = list(decode.iter_decoded(path, rate=16_000))
+    assert {b.shape[0] for b in blocks} == {1}
+    multi = decode.decode_multichannel(path, rate=16_000)
+    assert multi.shape[0] == 1 and multi.shape[1] / 16_000 == pytest.approx(2.0, abs=0.2)
+    assert decode.decode_pcm16k(path).shape == (multi.shape[1],)

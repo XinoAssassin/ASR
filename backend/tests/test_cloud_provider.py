@@ -218,6 +218,30 @@ def test_supplied_probe_skips_probing(router, work_dir, tmp_path, monkeypatch):
     )
 
 
+def test_supplied_probe_of_another_stream_is_reprobed(router, work_dir, tmp_path, monkeypatch):
+    """The server stores a stream-0 probe; a job on stream 1 must probe stream 1 itself."""
+    from asr.audio import decode
+
+    seen: list[int] = []
+
+    def probe(path, stream_index=0):
+        seen.append(stream_index)
+        return fake_probe(stream_index=stream_index, audio_streams=2)
+
+    monkeypatch.setattr(decode, "probe", probe)
+    fake = patch_audio(monkeypatch)
+    mock_dashscope(router)
+    options = _options()
+    options.preprocess.stream_index = 1
+    make_provider(work_dir).transcribe(
+        AudioSource(path=make_audio(tmp_path), probe=fake_probe(audio_streams=2)),
+        options,
+        Recorder(),
+    )
+    assert seen == [1]
+    assert fake.calls[0]["stream_index"] == 1
+
+
 # -------------------------------------------------------------------------- D8 preparation
 def test_downmix_stereo_transcodes_to_mono_flac(router, work_dir, tmp_path, monkeypatch):
     fake = patch_audio(

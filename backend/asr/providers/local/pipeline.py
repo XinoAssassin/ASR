@@ -30,6 +30,7 @@ from asr.providers.base import (
     make_speakers,
     speaker_id,
 )
+from asr.providers.local.asr_transformers import ENGINE_LANGUAGES
 from asr.providers.local.device import resolve_dtype
 from asr.providers.local.merge import ChunkResult, SpeakerTurn, Token, build_segments
 from asr.providers.local.models import ModelNotDownloaded, engine_installed, spec
@@ -76,7 +77,7 @@ class LocalEngines:
 def default_asr_model(device: str = "cpu") -> str:
     """M4 decision (docs/M4_BAKEOFF.md): 1.7B where bf16 is native, 0.6B otherwise."""
     return (
-        "qwen3-asr-1.7b" if resolve_dtype("auto", device=device) == "bfloat16" else "qwen3-asr-0.6b"
+        "qwen3-asr-1.7b" if resolve_dtype(None, device=device) == "bfloat16" else "qwen3-asr-0.6b"
     )
 
 
@@ -199,6 +200,10 @@ class LocalPipelineProvider:
                 "or use a Qwen3-ASR model for Chinese audio"
             )
         single_speaker = options.num_speakers == 1
+        # Every non-diarized track (per_channel channels 1..n) is one known speaker, so the
+        # diarized track holds the job's speaker count minus those.
+        fixed_tracks = sum(1 for t in tracks if not t.diarize)
+        oracle = options.num_speakers - fixed_tracks if options.num_speakers is not None else None
 
         all_segments = []
         next_label = 0
@@ -218,11 +223,10 @@ class LocalPipelineProvider:
                 engines, pieces, spans, terms, options.context, language, report, at, warnings
             )
 
-            if track.diarize and not single_speaker and speech:
+            diarize = track.diarize and not single_speaker and (oracle is None or oracle > 1)
+            if diarize and speech:
                 report("diarizing", at(0.85), "Identifying speakers")
-                raw_turns = engines.diarizer.diarize(
-                    track.audio, speech, num_speakers=options.num_speakers
-                )
+                raw_turns = engines.diarizer.diarize(track.audio, speech, num_speakers=oracle)
                 labels = sorted({t.label for t in raw_turns})
                 names = {lab: speaker_id(next_label + i) for i, lab in enumerate(labels)}
                 next_label += max(len(labels), 1)
@@ -256,7 +260,9 @@ class LocalPipelineProvider:
     ) -> tuple[list[_Track], float]:
         stream = options.preprocess.stream_index
         try:
-            probe = source.probe or audio_decode.probe(path, stream)
+            probe = source.probe
+            if probe is None or probe.stream_index != stream:  # stored probe is of stream 0
+                probe = audio_decode.probe(path, stream)
             resolved = audio_channels.resolve_channels(probe, options.preprocess.channels)
         except ValueError as exc:
             raise ProviderError(f"Cannot read the audio file: {exc}") from None
@@ -311,7 +317,9 @@ class LocalPipelineProvider:
                     report("aligning", at(0.05 + 0.6 * (i + 0.5) / n), f"Aligning ({i + 1}/{n})")
                     try:
                         aligned = engines.aligner.align(piece, text, language=language or "zh")
-                    except ValueError as exc:  # e.g. a language the aligner does not support
+                    except (ValueError, ImportError) as exc:
+                        # An unsupported language (ValueError) or a missing tokenizer package
+                        # (ImportError: nagisa for ja, soynlp for ko): keep the text, no words.
                         if not any(w.startswith("Word timestamps unavailable") for w in warnings):
                             warnings.append(f"Word timestamps unavailable: {exc}")
                         aligned = []
@@ -327,9 +335,38 @@ def _is_whisper(asr_model: str) -> bool:
         return False
 
 
+# Language codes Qwen3-ASR can be forced to (transformers' ``LANGUAGE_CODE_TO_NAME``).
+KNOWN_LANGUAGES = ENGINE_LANGUAGES["qwen3_asr"]
+_LANGUAGE_ALIASES = {
+    "chinese": "zh",
+    "mandarin": "zh",
+    "cmn": "zh",
+    "english": "en",
+    "cantonese": "yue",
+    "zh-yue": "yue",
+    "japanese": "ja",
+    "korean": "ko",
+}
+
+
+def normalize_language(hint: str) -> str | None:
+    """``zh-CN`` / ``zh_Hans`` -> ``zh``, ``en-US`` -> ``en``; ``auto`` or unknown -> ``None``."""
+    h = hint.strip().lower().replace("_", "-")
+    if not h or h == "auto":
+        return None
+    if h in _LANGUAGE_ALIASES:
+        return _LANGUAGE_ALIASES[h]
+    if h in KNOWN_LANGUAGES:
+        return h
+    primary = h.split("-", 1)[0]
+    primary = _LANGUAGE_ALIASES.get(primary, primary)
+    return primary if primary in KNOWN_LANGUAGES else None
+
+
 def _language(hints: Sequence[str]) -> str | None:
-    """Chinese-primary: force zh when it is among the hints, else the first hint, else auto."""
-    cleaned = [h.strip().lower() for h in hints if h.strip()]
+    """Chinese-primary: force zh when it is among the hints, else the first known hint, else
+    auto-detect (``None``). Hints are normalised; ``auto`` and unknown codes force nothing."""
+    cleaned = [c for h in hints if (c := normalize_language(h))]
     if "zh" in cleaned:
         return "zh"
     return cleaned[0] if cleaned else None

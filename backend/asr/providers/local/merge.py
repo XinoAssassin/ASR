@@ -52,9 +52,50 @@ def _fold(ch: str) -> str:
     return unicodedata.normalize("NFKC", ch).lower()
 
 
+def _aligner_kept(ch: str) -> bool:
+    """Characters Qwen3-ForcedAligner keeps in its tokens: letters, numbers, CJK, apostrophes.
+
+    Everything else (``-`` ``.`` ``+`` ``%`` ``$`` ...) is dropped *inside* a word, so ``GPT-4``
+    becomes the token ``GPT4``; mirrors ``_is_kept_char`` in transformers' Qwen3-ASR processor.
+    """
+    return ch == "'" or unicodedata.category(ch)[0] in "LN" or _is_cjk(ch)
+
+
+def _is_cjk(ch: str) -> bool:
+    cp = ord(ch)
+    return (
+        0x4E00 <= cp <= 0x9FFF
+        or 0x3400 <= cp <= 0x4DBF
+        or 0x20000 <= cp <= 0x2CEAF
+        or 0xF900 <= cp <= 0xFAFF
+        or 0x2F800 <= cp <= 0x2FA1F
+    )
+
+
+def _match_at(folded: str, text: str, i: int, needle: str) -> int:
+    """End index of ``needle`` matched from ``folded[i]``, skipping characters the aligner drops
+    (never whitespace, never before the first character); ``-1`` when it does not match."""
+    j = i
+    for k, c in enumerate(needle):
+        while (
+            k > 0
+            and j < len(folded)
+            and folded[j] != c
+            and not text[j].isspace()
+            and not _aligner_kept(text[j])
+        ):
+            j += 1
+        if j >= len(folded) or folded[j] != c:
+            return -1
+        j += 1
+    return j
+
+
 def token_spans(text: str, tokens: Sequence[Token]) -> list[tuple[int, int]] | None:
     """Character span of every token in ``text`` (matched in order, case / width-insensitive).
 
+    A token may omit punctuation the text has inside the word (aligner ``GPT4`` for ``GPT-4``,
+    ``35`` for ``3.5``, ``realtime`` for ``real-time``); its span then covers those characters.
     Returns ``None`` if a token cannot be found, so callers fall back to chunk-level segments.
     """
     folded = "".join(_fold(c) if len(_fold(c)) == 1 else c for c in text)
@@ -62,11 +103,20 @@ def token_spans(text: str, tokens: Sequence[Token]) -> list[tuple[int, int]] | N
     pos = 0
     for tok in tokens:
         needle = "".join(_fold(c) for c in tok.text)
-        idx = folded.find(needle, pos)
+        if not needle:
+            spans.append((pos, pos))
+            continue
+        idx = folded.find(needle[0], pos)
+        end = -1
+        while idx >= 0:
+            end = _match_at(folded, text, idx, needle)
+            if end >= 0:
+                break
+            idx = folded.find(needle[0], idx + 1)
         if idx < 0:
             return None
-        spans.append((idx, idx + len(needle)))
-        pos = idx + len(needle)
+        spans.append((idx, end))
+        pos = end
     return spans
 
 
@@ -130,32 +180,52 @@ def snap_changes(
     labels: list[str], tokens: Sequence[Token], text: str, spans: Sequence[tuple[int, int]]
 ) -> list[str]:
     """Move each speaker change to the best boundary within ``SNAP_TOKENS`` tokens: a punctuation
-    mark if there is one (nearest wins), otherwise the longest pause between tokens."""
+    mark if there is one (nearest wins), otherwise the longest pause between tokens.
+
+    A change never moves onto or past a neighbouring change, so every run keeps at least one
+    token: snapping does not erase a short run that lies between two changes.
+    """
     out = list(labels)
-    for a, _ in _runs(out)[1:]:
-        lo, hi = max(a - SNAP_TOKENS, 1), min(a + SNAP_TOKENS, len(out) - 1)
-        if hi < lo:
-            continue
-        candidates = range(lo, hi + 1)
-
-        def punct(i: int) -> bool:
-            return any(c in CLAUSE_BREAK for c in text[spans[i - 1][1] : spans[i][0]])
-
-        punctuated = [i for i in candidates if punct(i)]
-        if punctuated:
-            best = min(punctuated, key=lambda i: abs(i - a))
-        else:
-            best = max(candidates, key=lambda i: (tokens[i].start - tokens[i - 1].end, -abs(i - a)))
-            if tokens[best].start - tokens[best - 1].end <= 0.05:
-                continue  # no real pause nearby: keep the diarization boundary
-        if best == a:
-            continue
-        before, after = out[a - 1], out[a]
-        if best < a:
-            out[best:a] = [after] * (a - best)
-        else:
-            out[a:best] = [before] * (best - a)
+    changes = [a for a, _ in _runs(out)[1:]]
+    prev = 0  # where the previous change ended up after snapping
+    for k, a in enumerate(changes):
+        nxt = changes[k + 1] if k + 1 < len(changes) else len(out)
+        best = _snap_target(
+            a, max(a - SNAP_TOKENS, 1, prev + 1), min(a + SNAP_TOKENS, nxt - 1), tokens, text, spans
+        )
+        if best != a:
+            before, after = out[a - 1], out[a]
+            if best < a:
+                out[best:a] = [after] * (a - best)
+            else:
+                out[a:best] = [before] * (best - a)
+        prev = best
     return out
+
+
+def _snap_target(
+    a: int,
+    lo: int,
+    hi: int,
+    tokens: Sequence[Token],
+    text: str,
+    spans: Sequence[tuple[int, int]],
+) -> int:
+    """Best position in ``[lo, hi]`` for the change at ``a`` (``a`` itself if none is better)."""
+    if hi < lo:
+        return a
+    candidates = range(lo, hi + 1)
+
+    def punct(i: int) -> bool:
+        return any(c in CLAUSE_BREAK for c in text[spans[i - 1][1] : spans[i][0]])
+
+    punctuated = [i for i in candidates if punct(i)]
+    if punctuated:
+        return min(punctuated, key=lambda i: abs(i - a))
+    best = max(candidates, key=lambda i: (tokens[i].start - tokens[i - 1].end, -abs(i - a)))
+    if tokens[best].start - tokens[best - 1].end <= 0.05:
+        return a  # no real pause nearby: keep the diarization boundary
+    return best
 
 
 def _trailing_end(text: str, end: int) -> int:

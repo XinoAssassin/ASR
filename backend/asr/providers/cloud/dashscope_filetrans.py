@@ -362,7 +362,7 @@ class DashScopeFiletransProvider:
         path = Path(source.path)  # type: ignore[arg-type]
         stream_index = options.preprocess.stream_index
         probe = source.probe
-        if probe is None:
+        if probe is None or probe.stream_index != stream_index:  # stored probe is of stream 0
             try:
                 probe = audio_decode.probe(path, stream_index)
             except (ValueError, OSError) as exc:

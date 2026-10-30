@@ -141,6 +141,8 @@ def decode_multichannel(
     blocks = list(iter_decoded(path, rate=rate, stream_index=stream_index, max_seconds=max_seconds))
     if not blocks:
         return np.zeros((0, 0), dtype=np.float32)
+    if len({b.shape[0] for b in blocks}) > 1:
+        raise AudioDecodeError(f"channel count changed while decoding {Path(path).name}")
     out = np.concatenate(blocks, axis=1).astype(np.float32, copy=False)
     if max_seconds is not None:
         out = out[:, : round(max_seconds * rate)]
@@ -272,23 +274,33 @@ def _iter_pyav(
     with _open_pyav(path) as container:
         stream = _select_pyav_stream(container, stream_index)
         stream.thread_type = "AUTO"
-        resampler = AudioResampler(format="fltp", rate=rate)
+        # The output layout is pinned to the first frame's, so a mid-stream layout change
+        # (concatenated mono + stereo ADTS / MP3) is remixed instead of changing the block shape.
+        # PyAV's resampler turns into a passthrough when its first input already matches the
+        # output and would then pass later frames through unchanged, so an input change always
+        # starts a new resampler.
+        resampler: AudioResampler | None = None
+        layout = None
+        current = None
         try:
             for frame in container.decode(stream):
-                try:
-                    out = resampler.resample(frame)
-                except ValueError:
-                    # Mid-stream layout / rate change: flush and start a new resampler.
+                key = (frame.format.name, frame.layout.name, frame.sample_rate)
+                if resampler is None:
+                    layout = frame.layout.name
+                elif key != current:
                     yield from (f.to_ndarray() for f in resampler.resample(None))
-                    resampler = AudioResampler(format="fltp", rate=rate)
-                    out = resampler.resample(frame)
+                    resampler = None
+                if resampler is None:
+                    resampler = AudioResampler(format="fltp", layout=layout, rate=rate)
+                    current = key
+                out = resampler.resample(frame)
                 for f in out:
                     block = f.to_ndarray()
                     produced += block.shape[1]
                     yield block
                 if limit is not None and produced >= limit:
                     return
-            for f in resampler.resample(None):
+            for f in resampler.resample(None) if resampler is not None else []:
                 yield f.to_ndarray()
         except av.FFmpegError as exc:
             raise AudioDecodeError(f"cannot decode {path.name}: {_ffmpeg_reason(exc)}") from exc

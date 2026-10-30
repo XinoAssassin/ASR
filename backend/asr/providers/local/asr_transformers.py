@@ -49,6 +49,56 @@ def fun_asr_nano_processor(path: str) -> Any:
     )
 
 
+# Codes each engine's processor accepts for a forced language (transformers'
+# ``LANGUAGE_CODE_TO_NAME`` of qwen3_asr / fun_asr_nano). Anything else would raise ValueError in
+# ``resolve_language``, so it is sent as ``None`` (auto-detect) instead.
+ENGINE_LANGUAGES: dict[str, frozenset[str]] = {
+    "qwen3_asr": frozenset(
+        {
+            "ar",
+            "yue",
+            "zh",
+            "cs",
+            "da",
+            "nl",
+            "en",
+            "fil",
+            "fi",
+            "fr",
+            "de",
+            "el",
+            "hi",
+            "hu",
+            "id",
+            "it",
+            "ja",
+            "ko",
+            "mk",
+            "ms",
+            "fa",
+            "pl",
+            "pt",
+            "ro",
+            "ru",
+            "es",
+            "sv",
+            "th",
+            "tr",
+            "vi",
+        }
+    ),
+    "fun_asr_nano": frozenset({"zh", "en", "ja"}),
+}
+
+
+def engine_language(engine: str, language: str | None) -> str | None:
+    """``language`` if ``engine`` can be forced to it, else ``None`` (let the model detect)."""
+    if not language:
+        return None
+    code = language.strip().lower()
+    return code if code in ENGINE_LANGUAGES.get(engine, frozenset()) else None
+
+
 def qwen3_prompt(terms: Sequence[str], context: str | None) -> str | None:
     parts = []
     if context:
@@ -100,7 +150,7 @@ class TransformersAsr:
                 continue
             kwargs: dict[str, object] = {
                 "audio": audio.astype(np.float32),
-                "language": language,
+                "language": engine_language(self.engine, language),
                 "processor_kwargs": {
                     "return_tensors": "pt",
                     "audio_kwargs": {"sampling_rate": SAMPLE_RATE},

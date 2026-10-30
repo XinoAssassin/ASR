@@ -7,6 +7,7 @@ extra (``faster-whisper``); the model files come from the registry (``asr models
 
 from __future__ import annotations
 
+import os
 import unicodedata
 from collections.abc import Sequence
 from pathlib import Path
@@ -20,7 +21,12 @@ BEAM_SIZE = 5
 
 
 def compute_type(device: str, dtype: str = "auto") -> str:
-    """CTranslate2 compute type: int8 on CPU (no bf16 kernels there), float16 on CUDA."""
+    """CTranslate2 compute type: int8 on CPU (no bf16 kernels there), float16 on CUDA.
+
+    ``"auto"`` defers to ``ASR_LOCAL_DTYPE`` like ``resolve_dtype``; only float32 changes it.
+    """
+    if (dtype or "auto").strip().lower() == "auto":
+        dtype = os.environ.get("ASR_LOCAL_DTYPE", "").strip().lower() or "auto"
     if dtype == "float32":
         return "float32"
     return "float16" if device == "cuda" else "int8"
