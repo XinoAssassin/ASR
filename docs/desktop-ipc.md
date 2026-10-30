@@ -137,6 +137,15 @@ backend rejects `per_channel` on mono files). For a 2-channel recording a missin
 channels option becomes `per_channel` (the backend's `auto` may downmix correlated stereo);
 explicit `downmix` / `left` / `right` are kept.
 
+Recorder warnings (bilingual, shown verbatim in `RecorderStatus.warnings`) include: a source that
+could not be opened (recording continues without it), "write failed, retrying (N s held in memory)",
+"recording stopped: …" after 300 s of failed writes (the core then finalises and queues what was
+written), and "recording paused for about N s (system sleep?), gap skipped" when no track delivered
+audio for more than 10 s (`elapsed` excludes the cut time).
+
+Startup recovery runs in the background and never blocks `recorder_start`: orphaned partials are
+finalised and queued, and finished `<stem>.flac` / `.wav` files missing from the queue are adopted.
+
 Tray / hotkey toggle: replays the last stored `StartOptions` (`recorder_start` and
 `recorder_set_options` both store them). A stored `processId` whose process is gone falls back to
 the whole device with a warning.
