@@ -67,10 +67,7 @@ none), and they also build and run on Linux without WebKitGTK. On Windows the li
 *with* the `app` feature cannot start (`STATUS_ENTRYPOINT_NOT_FOUND`): it links Tauri, which
 needs common controls v6, but tauri-build embeds the manifest only into binaries.
 
-CI (`.forgejo/workflows/desktop.yml`): fmt / clippy / tests of the library on Linux, and an MSVC
-build of the full app (clippy with the `app` feature, library tests, release build with the
-embedded SPA, self-test binary) on a Windows runner; the dev machine itself has only the GNU
-toolchain.
+There is no desktop CI: builds and tests run on the dev machine (GNU toolchain).
 
 Release builds use the GUI subsystem (no console). Logs go to
 `%LOCALAPPDATA%\dev.asr.recorder\logs\` (tauri-plugin-log). App data (backend config, API key,
