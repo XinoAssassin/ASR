@@ -4,6 +4,7 @@
 #   docker compose up -d --build backend             # backend host only
 #   docker compose up -d --build frontend            # static host only (no dependency on backend)
 #   docker compose -f docker-compose.yml -f docker-compose.cuda.yml up -d --build backend   # NVIDIA
+#   docker compose -f docker-compose.yml -f docker-compose.rocm.yml up -d --build backend   # AMD (ROCm)
 #
 # Values come from the shell or from ./.env (see .env.example). Paths inside the container are
 # fixed here on purpose: ASR_DATA_DIR / ASR_UPLOAD_ROOTS / ASR_MODEL_CACHE_DIR in .env describe a

@@ -157,6 +157,9 @@ or a config change. Warning strings are bilingual and shown verbatim.
 
 ## Backend notes
 
+- The connection pushed by `backend_set_config` is the SPA's *active backend profile* (built-in
+  本机 or a remote one); switching profiles pushes the new URL / key, and the SPA keeps the
+  recording upload settings per profile.
 - Tauri 2 on Windows serves the SPA from `http://tauri.localhost` (`tauri://localhost` on macOS /
   Linux); a backend must list that origin in `ASR_CORS_ORIGINS` for the SPA's own API calls. The
   app-started sidecar gets it added automatically; only a backend started by hand needs it set. Rust's uploads are not browser

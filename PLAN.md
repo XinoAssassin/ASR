@@ -251,6 +251,7 @@ PUT    /api/settings
 POST   /api/settings/test-cloud       verify the DashScope key
 GET    /api/settings/local-models     local model download status; POST .../download
 GET    /api/health
+GET    /api/system/hardware       cpu / cuda / rocm availability and device names (local.device / options.local.device: cpu | cuda | rocm)
 ```
 
 ### 5.4 Data model
@@ -311,7 +312,8 @@ Timestamps are seconds (float) throughout; the cloud provider converts from mill
 - Export: txt / srt / vtt / json / Markdown, and "send to SiYuan"; options: timestamps, merge consecutive same-speaker
 
 **Settings**
-- Backend URL, X-API-Key
+- Backend profiles: built-in 本机 (local / desktop sidecar) and remote ones (e.g. a NAS), each with URL and X-API-Key; switcher in the top bar
+- Hardware: CPU / CUDA / ROCm from `/api/system/hardware` (also selectable per job)
 - Default provider
 - Local: ASR model, diarization model, device (cpu / cuda), model cache dir, download status and one-click download
 - Cloud: endpoint, model name, DashScope key (masked), file transfer method (temp upload / OSS / public URL) and its credentials, "test connection"
@@ -367,7 +369,7 @@ av>=19                          # PyAV, bundled FFmpeg (docs/research/bundled-ff
 imageio-ffmpeg                  # static ffmpeg CLI fallback
 qwen-asr                        # Qwen3-ASR + ForcedAligner, default local ASR (Python 3.12)
 funasr, modelscope              # FSMN-VAD / CAM++ diarization; Fun-ASR-Nano / Paraformer fallback ASR
-torch                           # CPU wheel locally; cu12x wheel on NVIDIA hosts (pyproject extras: cpu / cuda)
+torch                           # extras cpu / cuda (cu126) / rocm (Linux rocm7.2 from pytorch.org; Windows AMD torch 2.14.0+rocm10.1.0, gfx1151)
 httpx                           # cloud provider (REST; the dashscope SDK does not accept oss:// temp URLs)
 oss2                            # Alibaba OSS transfer fallback
 typer, rich                     # CLI
@@ -426,6 +428,7 @@ Default local models (ModelScope, cached after first download):
 - Cloud file transfer: DashScope temporary upload is sufficient (confirmed); Alibaba OSS kept as an optional fallback; R2 and tunnels not offered.
 - All documentation in English; UI strings Chinese-first with i18n.
 - Desktop app: Tauri 2 wrapping the same SPA; records system audio + mic as a 2-channel 16 kHz FLAC and uploads via the normal API; Windows first, macOS second.
+- Runtime: website, desktop app and a local backend natively on Windows (AMD iGPU via ROCm, measured RTF 0.17 for Qwen3-ASR-1.7B on a Radeon 8060S); remote backends from the ghcr.io images (cpu / cuda / rocm). WSL is the development environment. The NPU is not used for ASR (docs/research/amd-npu.md).
 - Export formats: txt / srt / vtt / json / Markdown (front matter, summary, speaker table, dialogue); a SiYuan push creates the same note in a SiYuan notebook through the SiYuan kernel API, token kept server-side. DOCX export was dropped (2026-10-30, not needed).
 
 ## 11. Open questions
