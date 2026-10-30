@@ -2,7 +2,8 @@
 /**
  * One transcript segment for proofreading: click to seek, Enter / double-click to edit (autosaved
  * by the store), split at the caret, merge with the next segment, reassign the speaker.
- * Highlights are rendered as plain spans from `pieces` (no v-html).
+ * Highlights are rendered as plain spans from `pieces` (no v-html). While a split / merge is in
+ * flight (`busy`) both are ignored, so a double-click on "merge" cannot merge twice.
  */
 import { NButton, NDropdown, NInput, NTag, NText, type DropdownOption } from 'naive-ui'
 import { computed, nextTick, ref, watch } from 'vue'
@@ -11,6 +12,7 @@ import { useI18n } from 'vue-i18n'
 import type { Segment, Speaker } from '@/api'
 import { formatTimestamp } from '@/utils/format'
 import type { Piece } from '@/utils/highlight'
+import { isImeKey, splitOffset } from './interaction'
 
 const props = defineProps<{
   segment: Segment
@@ -20,6 +22,8 @@ const props = defineProps<{
   active: boolean
   editing: boolean
   isLast: boolean
+  /** A split / merge is pending: ignore further ones until it settles. */
+  busy?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -27,6 +31,7 @@ const emit = defineEmits<{
   startEdit: []
   stopEdit: []
   text: [value: string]
+  /** `at` is a code-point offset into the text (the backend counts code points, not UTF-16). */
   split: [at: number]
   merge: []
   setSpeaker: [speakerId: string]
@@ -71,17 +76,18 @@ function onInput(value: string): void {
   emit('text', value)
 }
 
-function caret(): number {
-  const el = input.value?.textareaElRef ?? null
-  return el?.selectionStart ?? -1
+function splitHere(): void {
+  if (props.busy) return
+  const at = splitOffset(draft.value, input.value?.textareaElRef?.selectionStart)
+  if (at !== null) emit('split', at)
 }
 
-function splitHere(): void {
-  const at = caret()
-  if (at > 0 && at < draft.value.length) emit('split', at)
+function mergeNext(): void {
+  if (!props.busy) emit('merge')
 }
 
 function onKeydown(e: KeyboardEvent): void {
+  if (isImeKey(e)) return
   if (e.key === 'Escape') {
     e.preventDefault()
     emit('stopEdit')
@@ -117,18 +123,26 @@ function onPieceClick(p: Piece, e: MouseEvent): void {
   >
     <div class="segment-meta">
       <NDropdown trigger="click" :options="speakerOptions" @select="onSpeaker">
-        <span class="speaker-chip" data-testid="segment-speaker" @click.stop>{{ speaker.name }}</span>
+        <span class="speaker-chip" data-testid="segment-speaker" @click.stop @dblclick.stop>{{
+          speaker.name
+        }}</span>
       </NDropdown>
       <NText depth="3" class="ts">
         {{ formatTimestamp(segment.start) }} – {{ formatTimestamp(segment.end) }}
       </NText>
       <NTag v-if="segment.edited" size="tiny" :bordered="false">{{ t('transcript.edited') }}</NTag>
-      <span class="actions" @click.stop>
+      <span class="actions" @click.stop @dblclick.stop>
         <NButton v-if="!editing" size="tiny" quaternary data-testid="segment-edit" @click="emit('startEdit')">
           {{ t('proofread.edit') }}
         </NButton>
         <template v-else>
-          <NButton size="tiny" quaternary data-testid="segment-split" @click="splitHere">
+          <NButton
+            size="tiny"
+            quaternary
+            :disabled="busy"
+            data-testid="segment-split"
+            @click="splitHere"
+          >
             {{ t('proofread.split') }}
           </NButton>
           <NButton size="tiny" quaternary data-testid="segment-done" @click="emit('stopEdit')">
@@ -139,8 +153,9 @@ function onPieceClick(p: Piece, e: MouseEvent): void {
           v-if="!isLast"
           size="tiny"
           quaternary
+          :disabled="busy"
           data-testid="segment-merge"
-          @click="emit('merge')"
+          @click="mergeNext"
         >
           {{ t('proofread.mergeNext') }}
         </NButton>

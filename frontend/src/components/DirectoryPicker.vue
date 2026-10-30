@@ -2,10 +2,11 @@
 /**
  * Target directory for uploads: root select (`/api/fs/roots`) + lazily loaded subdirectory tree
  * (`/api/fs/dirs`) + manual path input + recent directories. The server validates the path
- * against ASR_UPLOAD_ROOTS (rule 2); this component only helps pick one.
+ * against ASR_UPLOAD_ROOTS (rule 2); this component only helps pick one. A subfolder that fails to
+ * load shows its error next to that node; the rest of the tree stays usable ("refresh" retries).
  */
 import { NAlert, NButton, NInput, NSelect, NSpace, NTag, NText, NTree, type TreeOption } from 'naive-ui'
-import { computed, onMounted, ref } from 'vue'
+import { computed, h, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { listDirs, listRoots, type FsDir, type FsRoot } from '@/api'
@@ -68,9 +69,15 @@ async function onLoad(node: TreeOption): Promise<void> {
     node.children = toNodes(dirs)
     if (!dirs.length) node.isLeaf = true
   } catch (e) {
+    // Must resolve with children set: an expanded, unloaded node would be retried in a loop.
+    const text = describe(e)
     node.children = []
     node.isLeaf = true
-    treeError.value = describe(e)
+    const attrs = { type: 'error', depth: 3, class: 'node-error', title: text } as const
+    node.suffix = () =>
+      h(NText, { ...attrs, 'data-testid': 'dir-node-error' }, () =>
+        t('upload.dir.subdirFailed', { error: text }),
+      )
   }
 }
 
@@ -152,6 +159,11 @@ onMounted(() => void loadRoots())
   border: 1px solid var(--n-border-color, rgba(128, 128, 128, 0.25));
   border-radius: 4px;
   padding: 4px 8px;
+}
+
+:deep(.node-error) {
+  font-size: 12px;
+  margin-left: 8px;
 }
 
 .recent-tag {

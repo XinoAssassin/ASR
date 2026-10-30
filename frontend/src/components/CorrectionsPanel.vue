@@ -2,9 +2,11 @@
 /**
  * [5b] corrections for review: automatic ones (term / repetition) and LLM suggestions. Accept /
  * reject, jump to the segment, add the mis-hearing as an alias to a term set, and ask the LLM.
+ * Clicking a highlight in the dialogue focuses its item here: the filter switches to "all" when the
+ * item is hidden by "open" (accepted / rejected ones), and the item is scrolled into view.
  */
 import { NButton, NEmpty, NPopconfirm, NRadioButton, NRadioGroup, NSelect, NSpace, NTag, NText } from 'naive-ui'
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import type { Correction, TermSetOut } from '@/api'
@@ -16,6 +18,8 @@ const props = defineProps<{
   texts: Record<string, string>
   termSets: TermSetOut[]
   focusedId: string | null
+  /** Bumped on every focus request, so clicking the same highlight again scrolls again. */
+  focusSeq?: number
   llmRunning: boolean
 }>()
 
@@ -49,11 +53,27 @@ const contexts = computed(() => {
   return out
 })
 
+const root = ref<HTMLElement | null>(null)
+
+watch(
+  () => [props.focusedId, props.focusSeq] as const,
+  async ([id]) => {
+    if (!id) return
+    const target = props.corrections.find((c) => c.id === id)
+    if (!target) return
+    if (!visible.value.includes(target)) filter.value = 'all'
+    await nextTick()
+    root.value
+      ?.querySelector<HTMLElement>(`[data-correction-id="${CSS.escape(id)}"]`)
+      ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  },
+)
+
 const STATUS_TYPE = { applied: 'success', suggested: 'warning', accepted: 'info', rejected: 'default' } as const
 </script>
 
 <template>
-  <div class="corrections" data-testid="corrections-panel">
+  <div ref="root" class="corrections" data-testid="corrections-panel">
     <NSpace justify="space-between" align="center" class="head">
       <NRadioGroup v-model:value="filter" size="small">
         <NRadioButton value="open">{{ t('proofread.openCorrections', { n: openCount }) }}</NRadioButton>

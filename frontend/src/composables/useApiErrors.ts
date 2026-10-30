@@ -21,6 +21,8 @@ export function useApiErrors() {
         return withDetail('errors.forbidden')
       case 404:
         return withDetail('errors.notFound')
+      case 409:
+        return withDetail('errors.conflict')
       case 413:
         return withDetail('errors.tooLarge')
       case 415:

@@ -1,8 +1,12 @@
 /**
  * Proofreading highlights: split a segment's text into plain pieces carrying mark kinds, so the
  * template renders spans (never v-html). Marks may overlap; pieces are cut at every boundary.
+ * All mark positions are UTF-16 indices; `Correction.offset` from the server counts code points
+ * and is converted here.
  */
 import type { Correction } from '@/api/endpoints'
+
+import { codePointToUtf16 } from './text'
 
 export type MarkKind = 'term' | 'search' | 'current' | 'correction' | 'suggestion'
 
@@ -47,6 +51,11 @@ export function searchMarks(text: string, query: string): Mark[] {
   }))
 }
 
+/** A correction's server offset (code points) as a UTF-16 index into `text`; null when absent. */
+function correctionOffset(text: string, c: Correction): number | null {
+  return c.offset == null ? null : codePointToUtf16(text, c.offset)
+}
+
 /** Applied / accepted corrections mark the new text; suggestions mark the text they would change. */
 export function correctionMarks(text: string, corrections: Correction[]): Mark[] {
   const marks: Mark[] = []
@@ -55,7 +64,7 @@ export function correctionMarks(text: string, corrections: Correction[]): Mark[]
     const suggestion = c.status === 'suggested'
     const needle = suggestion ? c.before : c.after
     if (!needle) continue
-    const offset = c.offset ?? null
+    const offset = correctionOffset(text, c)
     const start =
       offset !== null && text.slice(offset, offset + needle.length) === needle
         ? offset
@@ -82,7 +91,7 @@ export function correctionContext(
   width = 10,
 ): { left: string; hit: string; right: string } | null {
   const current = c.status === 'applied' || c.status === 'accepted' ? c.after : c.before
-  const offset = c.offset ?? null
+  const offset = correctionOffset(text, c)
   let start: number
   if (offset !== null && offset <= text.length && text.slice(offset, offset + current.length) === current) {
     start = offset

@@ -21,6 +21,27 @@ export class ApiError extends Error {
   get isUnauthorized(): boolean {
     return this.status === 401
   }
+
+  /** 409: the resource changed since the client read it (`expected_updated_at` mismatch). */
+  get isConflict(): boolean {
+    return this.status === 409
+  }
+}
+
+/**
+ * A backend URL that cannot be used: `invalid` (not a URL even with `http://` in front) or
+ * `scheme` (a scheme other than http / https). Thrown by `setBackendUrl` / `normalizeBackendUrl`.
+ */
+export class BackendUrlError extends Error {
+  readonly reason: 'invalid' | 'scheme'
+  readonly input: string
+
+  constructor(reason: 'invalid' | 'scheme', input: string) {
+    super(reason === 'scheme' ? `Unsupported URL scheme: ${input}` : `Invalid URL: ${input}`)
+    this.name = 'BackendUrlError'
+    this.reason = reason
+    this.input = input
+  }
 }
 
 interface ValidationItem {

@@ -2,7 +2,7 @@
  * Typed helpers over the generated client: each returns the response data or throws ApiError.
  * Stores call these; components never talk to the backend directly.
  */
-import { api, normalizeBaseUrl, type Schemas } from './client'
+import { api, normalizeBackendUrl, type Schemas } from './client'
 import { errorFromResponse, toApiError, unwrap, unwrapVoid } from './errors'
 
 export type HealthOut = Schemas['HealthOut']
@@ -17,7 +17,12 @@ export type JobList = Schemas['JobList']
 export type JobOptions = Schemas['JobOptions']
 export type JobStatus = JobOut['status']
 export type TranscriptOut = Schemas['TranscriptOut']
-export type TranscriptOp = Schemas['TranscriptPatch']['ops'][number]
+type SchemaTranscriptOp = Schemas['TranscriptPatch']['ops'][number]
+/** `ignore_case` has a server default (false), so it is optional when building the op. */
+export type ReplaceOp = Omit<Schemas['ReplaceOp'], 'ignore_case'> & { ignore_case?: boolean }
+/** `at` is a code-point index (see `utf16ToCodePoint` in `@/utils/text`). */
+export type SplitOp = Schemas['SplitOp']
+export type TranscriptOp = Exclude<SchemaTranscriptOp, { op: 'replace' }> | ReplaceOp
 export type Correction = Schemas['Correction']
 export type SpeakerUpdate = Schemas['SpeakerUpdate']
 export type LlmSuggestionsOut = Schemas['LlmSuggestionsOut']
@@ -43,12 +48,12 @@ export const getHealth = (): Promise<HealthOut> => unwrap(api.GET('/api/health')
 
 /** Check a backend URL that is not saved yet (Settings → "test"). */
 export async function probeHealth(baseUrl: string, timeoutMs = 8000): Promise<HealthOut> {
+  // Throws BackendUrlError (not an ApiError) for an unusable URL, before any request.
+  const url = `${normalizeBackendUrl(baseUrl)}/api/health`
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const response = await fetch(`${normalizeBaseUrl(baseUrl)}/api/health`, {
-      signal: controller.signal,
-    })
+    const response = await fetch(url, { signal: controller.signal })
     if (!response.ok) throw await errorFromResponse(response)
     return (await response.json()) as HealthOut
   } catch (e) {
@@ -82,8 +87,8 @@ export const listJobs = (query: {
   status?: JobStatus | null
 }): Promise<JobList> => unwrap(api.GET('/api/jobs', { params: { query } }))
 
-export const getJob = (jobId: string): Promise<JobOut> =>
-  unwrap(api.GET('/api/jobs/{job_id}', { params: { path: { job_id: jobId } } }))
+export const getJob = (jobId: string, signal?: AbortSignal): Promise<JobOut> =>
+  unwrap(api.GET('/api/jobs/{job_id}', { params: { path: { job_id: jobId } }, signal }))
 
 export const cancelJob = (jobId: string): Promise<JobOut> =>
   unwrap(api.POST('/api/jobs/{job_id}/cancel', { params: { path: { job_id: jobId } } }))
@@ -100,32 +105,64 @@ export const deleteJob = (jobId: string, deleteAudio: boolean): Promise<void> =>
 
 // transcripts ------------------------------------------------------------------------------------
 
-export const getTranscript = (transcriptId: string): Promise<TranscriptOut> =>
+export const getTranscript = (transcriptId: string, signal?: AbortSignal): Promise<TranscriptOut> =>
   unwrap(
     api.GET('/api/transcripts/{transcript_id}', {
       params: { path: { transcript_id: transcriptId } },
+      signal,
     }),
   )
 
+export interface WriteOptions {
+  /**
+   * `updated_at` of the transcript the change was based on; the backend answers 409 when the
+   * stored transcript is newer (edited elsewhere). Omitted / null: no check.
+   */
+  expectedUpdatedAt?: string | null
+  /** Let the request outlive the page (pagehide flush). */
+  keepalive?: boolean
+  signal?: AbortSignal
+}
 
-export const patchTranscript = (transcriptId: string, ops: TranscriptOp[]): Promise<TranscriptOut> =>
-  unwrap(
+function writeInit(options: WriteOptions): { keepalive?: boolean; signal?: AbortSignal } {
+  const init: { keepalive?: boolean; signal?: AbortSignal } = {}
+  if (options.keepalive) init.keepalive = true
+  if (options.signal) init.signal = options.signal
+  return init
+}
+
+export function patchTranscript(
+  transcriptId: string,
+  ops: TranscriptOp[],
+  options: WriteOptions = {},
+): Promise<TranscriptOut> {
+  // Ops whose fields have server defaults (ReplaceOp.ignore_case) may omit them.
+  const body: Schemas['TranscriptPatch'] = { ops: ops as SchemaTranscriptOp[] }
+  if (options.expectedUpdatedAt) body.expected_updated_at = options.expectedUpdatedAt
+  return unwrap(
     api.PATCH('/api/transcripts/{transcript_id}', {
       params: { path: { transcript_id: transcriptId } },
-      body: { ops },
+      body,
+      ...writeInit(options),
     }),
   )
+}
 
-export const updateSpeakers = (
+export function updateSpeakers(
   transcriptId: string,
   speakers: SpeakerUpdate[],
-): Promise<TranscriptOut> =>
-  unwrap(
+  options: WriteOptions = {},
+): Promise<TranscriptOut> {
+  const body: Schemas['SpeakersUpdate'] = { speakers }
+  if (options.expectedUpdatedAt) body.expected_updated_at = options.expectedUpdatedAt
+  return unwrap(
     api.PUT('/api/transcripts/{transcript_id}/speakers', {
       params: { path: { transcript_id: transcriptId } },
-      body: { speakers },
+      body,
+      ...writeInit(options),
     }),
   )
+}
 
 export const revertTranscript = (transcriptId: string): Promise<TranscriptOut> =>
   unwrap(
@@ -163,6 +200,9 @@ export const deleteSummary = (transcriptId: string): Promise<void> =>
 // term sets --------------------------------------------------------------------------------------
 
 export const listTermSets = (): Promise<TermSetOut[]> => unwrap(api.GET('/api/term-sets'))
+
+export const getTermSet = (termSetId: string): Promise<TermSetOut> =>
+  unwrap(api.GET('/api/term-sets/{term_set_id}', { params: { path: { term_set_id: termSetId } } }))
 
 export const updateTermSet = (termSetId: string, body: TermSetIn): Promise<TermSetOut> =>
   unwrap(

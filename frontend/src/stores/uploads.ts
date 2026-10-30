@@ -16,6 +16,7 @@ import {
   type ApiError,
   type ChannelsOption,
   type UploadOut,
+  type UploadSession,
 } from '@/api'
 import { isAcceptedFile } from '@/utils/audio'
 import { defaultJobForm, type JobFormState } from '@/utils/jobForm'
@@ -35,7 +36,12 @@ export interface QueueItem {
   part: number
   totalParts: number
   error: ApiError | null
+  /** Server session of the last attempt: a retry after an error / cancel resumes it. */
+  session: UploadSession | null
 }
+
+/** Statuses that "Upload" (re)starts; `pendingCount` counts exactly these. */
+const STARTABLE: readonly QueueStatus[] = ['pending', 'error', 'cancelled']
 
 export interface ReadyUpload {
   upload: UploadOut
@@ -69,7 +75,7 @@ export const useUploadsStore = defineStore('uploads', () => {
   const providerInitialized = ref(false)
 
   const pendingCount = computed(
-    () => queue.value.filter((i) => i.status === 'pending' || i.status === 'error').length,
+    () => queue.value.filter((i) => STARTABLE.includes(i.status)).length,
   )
 
   function rememberDir(dir: string): void {
@@ -88,15 +94,15 @@ export const useUploadsStore = defineStore('uploads', () => {
         rejected.push(file.name)
         continue
       }
-      const duplicate = queue.value.some(
-        (i) =>
-          i.file.name === file.name &&
-          i.file.size === file.size &&
-          i.file.lastModified === file.lastModified &&
-          i.status !== 'done',
-      )
-      if (duplicate) continue
-      queue.value.push({
+      const same = (i: QueueItem): boolean =>
+        i.file.name === file.name &&
+        i.file.size === file.size &&
+        i.file.lastModified === file.lastModified
+      // Queued or uploading already: skip. Done items may be uploaded again on purpose.
+      if (queue.value.some((i) => same(i) && (i.status === 'pending' || i.status === 'uploading'))) {
+        continue
+      }
+      const fresh: QueueItem = {
         key: `f${++keySeq}`,
         file,
         status: 'pending',
@@ -105,7 +111,14 @@ export const useUploadsStore = defineStore('uploads', () => {
         part: 0,
         totalParts: 0,
         error: null,
-      })
+        session: null,
+      }
+      // A failed / cancelled copy is replaced (in place) by the newly picked file.
+      const stale = queue.value.findIndex(
+        (i) => same(i) && (i.status === 'error' || i.status === 'cancelled'),
+      )
+      if (stale >= 0) queue.value.splice(stale, 1, fresh)
+      else queue.value.push(fresh)
     }
     return rejected
   }
@@ -138,13 +151,18 @@ export const useUploadsStore = defineStore('uploads', () => {
     try {
       const upload = await uploadFileChunked(entry.file, dir, {
         signal: controller.signal,
+        resume: entry.session,
+        onSession: (session) => {
+          const it = live()
+          if (it) it.session = session
+        },
         onProgress: (p) => {
           const it = live()
           if (it) Object.assign(it, p)
         },
       })
       const it = live()
-      if (it) Object.assign(it, { status: 'done', loaded: it.total })
+      if (it) Object.assign(it, { status: 'done', loaded: it.total, session: null })
       addReady(upload, 'uploaded')
     } catch (e) {
       const it = live()
@@ -157,7 +175,7 @@ export const useUploadsStore = defineStore('uploads', () => {
     }
   }
 
-  /** Upload every pending / failed item sequentially into `targetDir`. */
+  /** Upload every pending / failed / cancelled item (what `pendingCount` shows) into `targetDir`. */
   async function uploadAll(): Promise<void> {
     const dir = targetDir.value.trim()
     if (!dir || uploading.value) return
@@ -165,9 +183,7 @@ export const useUploadsStore = defineStore('uploads', () => {
     rememberDir(dir)
     try {
       for (const entry of queue.value) {
-        if (entry.status === 'pending' || entry.status === 'error' || entry.status === 'cancelled') {
-          await uploadOne(entry, dir)
-        }
+        if (STARTABLE.includes(entry.status)) await uploadOne(entry, dir)
       }
     } finally {
       uploading.value = false

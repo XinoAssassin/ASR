@@ -100,4 +100,17 @@ describe('sidecar store', () => {
     expect(store.error).toMatch(/not found/)
     expect(store.config).toBeNull()
   })
+
+  it('does not leak the status listener when init fails, so retries do not stack', async () => {
+    fake.state.missing.add('sidecar_get_config')
+    const store = useSidecarStore()
+    await store.init()
+    expect(fake.listenerCount()).toBe(0)
+    await store.init()
+    expect(fake.listenerCount()).toBe(0)
+    fake.state.missing.clear()
+    await store.init()
+    expect(fake.listenerCount()).toBe(1)
+    expect(store.error).toBeNull()
+  })
 })

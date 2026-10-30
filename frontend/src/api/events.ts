@@ -5,7 +5,7 @@
  */
 import { EventStreamContentType, fetchEventSource } from '@microsoft/fetch-event-source'
 
-import { apiUrl, authHeaders, notifyUnauthorized, type Schemas } from './client'
+import { apiUrl, authHeaders, notifyAuthorized, notifyUnauthorized, type Schemas } from './client'
 import { ApiError, errorFromResponse } from './errors'
 import { isRetryableStatus } from './upload'
 
@@ -49,10 +49,14 @@ export function watchJob(jobId: string, options: WatchJobOptions): JobStream {
   const done = fetchEventSource(apiUrl(`/api/jobs/${encodeURIComponent(jobId)}/events`), {
     headers: authHeaders(),
     signal: controller.signal,
+    // The library's default closes the stream when the tab is hidden and reopens it when shown;
+    // that reopen is not tied to our controller's lifetime and can orphan a second connection.
+    openWhenHidden: true,
     async onopen(response) {
       const type = response.headers.get('content-type') ?? ''
       if (response.ok && type.startsWith(EventStreamContentType)) {
         retryMs = minRetryMs
+        notifyAuthorized()
         return
       }
       if (response.status === 401) notifyUnauthorized()

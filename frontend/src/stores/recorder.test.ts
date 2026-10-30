@@ -202,6 +202,21 @@ describe('recorder store', () => {
     expect(fake.listenerCount()).toBe(0)
   })
 
+  it('a failed init unlistens what it registered, so a retry does not stack handlers', async () => {
+    const original = fake.events.onRecordingChanged
+    fake.events.onRecordingChanged = async () => {
+      throw 'listen failed'
+    }
+    const store = useRecorderStore()
+    await store.init()
+    expect(store.error).toMatch(/listen failed/)
+    expect(fake.listenerCount()).toBe(0)
+    fake.events.onRecordingChanged = original
+    await store.init()
+    expect(fake.listenerCount()).toBe(2)
+    expect(store.initialized).toBe(true)
+  })
+
   it('captures one application by pid and shows it while recording (M10)', async () => {
     const store = useRecorderStore()
     await store.init()

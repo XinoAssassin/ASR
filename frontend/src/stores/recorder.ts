@@ -282,10 +282,9 @@ export const useRecorderStore = defineStore('recorder', () => {
     if (!available) return Promise.resolve()
     initPromise ??= (async () => {
       const platform = await getDesktop()
-      unlisteners = await Promise.all([
-        platform.events.onRecorderStatus(setStatus),
-        platform.events.onRecordingChanged(upsertRecording),
-      ])
+      // One at a time, so a failing listen() does not leak the ones that succeeded.
+      unlisteners.push(await platform.events.onRecorderStatus(setStatus))
+      unlisteners.push(await platform.events.onRecordingChanged(upsertRecording))
       const results = await Promise.allSettled([
         refreshStatus(),
         refreshDevices(),
@@ -306,6 +305,9 @@ export const useRecorderStore = defineStore('recorder', () => {
       }
       initialized.value = true
     })().catch((e: unknown) => {
+      // Unlisten this failed attempt's handlers before a retry registers new ones.
+      for (const off of unlisteners) off()
+      unlisteners = []
       initPromise = null
       error.value = ipcErrorMessage(e)
     })

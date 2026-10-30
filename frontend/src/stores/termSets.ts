@@ -3,6 +3,7 @@ import { ref } from 'vue'
 
 import {
   createTermSet,
+  getTermSet,
   listTermSets,
   toApiError,
   updateTermSet,
@@ -41,13 +42,16 @@ export const useTermSetsStore = defineStore('termSets', () => {
       saved = await createTermSet({ name: newSetName, terms: withAlias([], term, alias) })
       items.value = [...items.value, saved]
     } else {
-      const set = items.value.find((s) => s.id === termSetId)
-      if (!set) throw new Error('term set not found')
+      // Re-read the set right before the PUT: the cached list may be stale (edited elsewhere),
+      // and the PUT replaces the whole term list. Throws ApiError(404) if it is gone.
+      const set = await getTermSet(termSetId)
       saved = await updateTermSet(termSetId, {
         name: set.name,
         terms: withAlias(set.terms ?? [], term, alias),
       })
-      items.value = items.value.map((s) => (s.id === saved.id ? saved : s))
+      items.value = items.value.some((s) => s.id === saved.id)
+        ? items.value.map((s) => (s.id === saved.id ? saved : s))
+        : [...items.value, saved]
     }
     return saved
   }

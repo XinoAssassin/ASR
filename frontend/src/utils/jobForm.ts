@@ -48,9 +48,10 @@ export interface JobTarget {
 
 export function buildJobCreate(form: JobFormState, target: JobTarget, extraTerms: Term[]): JobCreate {
   const context = form.context.trim().slice(0, MAX_CONTEXT_LENGTH)
+  // A cleared count (null / NaN) falls back to auto rather than silently becoming 1.
   const numSpeakers =
-    form.speakerMode === 'fixed'
-      ? Math.min(MAX_SPEAKERS, Math.max(1, Math.round(form.numSpeakers)))
+    form.speakerMode === 'fixed' && Number.isFinite(form.numSpeakers) && form.numSpeakers >= 1
+      ? Math.min(MAX_SPEAKERS, Math.round(form.numSpeakers))
       : null
   return {
     upload_id: target.uploadId,

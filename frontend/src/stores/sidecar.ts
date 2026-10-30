@@ -81,6 +81,9 @@ export const useSidecarStore = defineStore('sidecar', () => {
       status.value = s
       error.value = null
     })().catch((e: unknown) => {
+      // Drop the listener of this failed attempt, or every retry would add another one.
+      unlisten?.()
+      unlisten = null
       initPromise = null
       error.value = ipcErrorMessage(e)
     })

@@ -21,6 +21,7 @@ import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import JobOptionsForm from '@/components/JobOptionsForm.vue'
 import ProbeCard from '@/components/ProbeCard.vue'
 import SourceTips from '@/components/SourceTips.vue'
+import { isImeKey, speakerCountMissing } from '@/components/interaction'
 import { createJob } from '@/api'
 import { useApiErrors } from '@/composables/useApiErrors'
 import { useSettingsStore } from '@/stores/settings'
@@ -82,6 +83,7 @@ function percent(item: QueueItem): number {
   return item.total ? Math.floor((item.loaded / item.total) * 100) : item.status === 'done' ? 100 : 0
 }
 
+// pendingCount includes failed and cancelled items: "upload" restarts them too.
 const canUpload = computed(
   () => !!uploads.targetDir.trim() && uploads.pendingCount > 0 && !uploads.uploading,
 )
@@ -96,8 +98,14 @@ async function startUpload(): Promise<void> {
 
 const registerPath = ref('')
 
+function onRegisterKeydown(e: KeyboardEvent): void {
+  if (e.key !== 'Enter' || isImeKey(e)) return // Enter that picks an IME candidate
+  e.preventDefault()
+  void register()
+}
+
 async function register(): Promise<void> {
-  if (!registerPath.value.trim()) return
+  if (!registerPath.value.trim() || uploads.registering) return
   try {
     await uploads.register(registerPath.value)
     registerPath.value = ''
@@ -116,7 +124,8 @@ const canStart = computed(
     uploads.ready.length > 0 &&
     !submitting.value &&
     !uploads.uploading &&
-    termsParsed.value.errors.length === 0,
+    termsParsed.value.errors.length === 0 &&
+    !speakerCountMissing(uploads.jobForm),
 )
 
 async function startJobs(): Promise<void> {
@@ -269,7 +278,7 @@ onMounted(() => {
                 :placeholder="t('upload.register.placeholder')"
                 data-testid="register-path-input"
                 style="min-width: 420px"
-                @keyup.enter="register"
+                @keydown="onRegisterKeydown"
               />
               <NButton
                 :loading="uploads.registering"

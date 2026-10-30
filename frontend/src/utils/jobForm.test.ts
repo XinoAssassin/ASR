@@ -34,6 +34,17 @@ describe('buildJobCreate', () => {
     })
   })
 
+  it('falls back to auto when a fixed speaker count was cleared', () => {
+    for (const numSpeakers of [null, Number.NaN, 0]) {
+      const body = buildJobCreate(
+        { ...defaultJobForm(), speakerMode: 'fixed', numSpeakers: numSpeakers as unknown as number },
+        { uploadId: 'u', channels: 'auto', streamIndex: 0 },
+        [],
+      )
+      expect(body.options?.num_speakers).toBeNull()
+    }
+  })
+
   it('passes the preprocessing and correction switches', () => {
     const body = buildJobCreate(
       { ...defaultJobForm(), peakGain: false, termCorrection: false, repetitionFilter: true },

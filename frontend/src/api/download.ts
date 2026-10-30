@@ -5,7 +5,7 @@
  */
 import { parseContentDispositionFilename } from '@/utils/contentDisposition'
 
-import { apiUrl, authHeaders, notifyUnauthorized } from './client'
+import { apiUrl, authHeaders, notifyAuthorized, notifyUnauthorized } from './client'
 import { errorFromResponse, toApiError } from './errors'
 
 export interface BlobResult {
@@ -24,6 +24,7 @@ export async function fetchBlob(path: string, signal?: AbortSignal): Promise<Blo
     if (response.status === 401) notifyUnauthorized()
     throw await errorFromResponse(response)
   }
+  notifyAuthorized()
   const blob = await response.blob()
   return {
     blob,

@@ -42,6 +42,8 @@ export const useJobsStore = defineStore('jobs', () => {
   const streams = new Map<string, JobStream>()
   let pollTimer: ReturnType<typeof setInterval> | null = null
   let active = false
+  /** Incremented per list request; only the latest one may write the list. */
+  let loadSeq = 0
 
   const hasActiveJobs = computed(() => items.value.some((j) => !isTerminal(j.status)))
 
@@ -66,6 +68,7 @@ export const useJobsStore = defineStore('jobs', () => {
   }
 
   async function load(): Promise<void> {
+    const seq = ++loadSeq
     loading.value = true
     try {
       const result = await listJobs({
@@ -73,15 +76,19 @@ export const useJobsStore = defineStore('jobs', () => {
         page_size: pageSize.value,
         status: status.value,
       })
+      // An older request (previous page / filter, or a poll) answering late is ignored.
+      if (seq !== loadSeq) return
       items.value = result.items
       total.value = result.total
       error.value = null
       void fetchUploads(result.items)
     } catch (e) {
-      error.value = toApiError(e)
+      if (seq === loadSeq) error.value = toApiError(e)
     } finally {
-      loading.value = false
-      if (active) syncLive()
+      if (seq === loadSeq) {
+        loading.value = false
+        if (active) syncLive()
+      }
     }
   }
 

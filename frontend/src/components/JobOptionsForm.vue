@@ -21,6 +21,8 @@ import type { TermSetOut } from '@/api'
 import { LANGUAGE_OPTIONS, MAX_CONTEXT_LENGTH, MAX_SPEAKERS, type JobFormState } from '@/utils/jobForm'
 import { parseTerms } from '@/utils/terms'
 
+import { speakerCountMissing } from './interaction'
+
 const form = defineModel<JobFormState>({ required: true })
 const props = defineProps<{ termSets: TermSetOut[]; termSetsError: string | null }>()
 
@@ -31,6 +33,8 @@ const termSetOptions = computed(() =>
 )
 
 const parsed = computed(() => parseTerms(form.value.extraTerms))
+/** Cleared count in fixed mode; the Upload page also blocks "Start" on this. */
+const speakersMissing = computed(() => speakerCountMissing(form.value))
 </script>
 
 <template>
@@ -50,7 +54,11 @@ const parsed = computed(() => parseTerms(form.value.extraTerms))
         </NSpace>
       </NCheckboxGroup>
     </NFormItem>
-    <NFormItem :label="t('jobOptions.speakers')">
+    <NFormItem
+      :label="t('jobOptions.speakers')"
+      :validation-status="speakersMissing ? 'error' : undefined"
+      :feedback="speakersMissing ? t('jobOptions.speakersMissing') : undefined"
+    >
       <NSpace align="center">
         <NRadioGroup v-model:value="form.speakerMode" data-testid="job-speaker-mode">
           <NRadio value="auto">{{ t('jobOptions.speakersAuto') }}</NRadio>
@@ -62,6 +70,7 @@ const parsed = computed(() => parseTerms(form.value.extraTerms))
           :min="1"
           :max="MAX_SPEAKERS"
           size="small"
+          :status="speakersMissing ? 'error' : undefined"
           data-testid="job-num-speakers"
           style="width: 110px"
         />

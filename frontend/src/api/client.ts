@@ -12,6 +12,7 @@ import createClient, { type Client, type Middleware } from 'openapi-fetch'
 
 import { DESKTOP_DEFAULT_BACKEND, isDesktop } from '@/platform'
 
+import { BackendUrlError } from './errors'
 import type { components, paths } from './schema'
 
 export type Schemas = components['schemas']
@@ -44,8 +45,42 @@ function normalizeBaseUrl(url: string | null | undefined): string {
   return (url ?? '').trim().replace(/\/+$/, '')
 }
 
+/** `scheme:` not followed by a digit: `ftp://x`, `javascript:…`, but not `gpu:8000`. */
+const HAS_SCHEME = /^[a-z][a-z0-9+.-]*:(?!\d)/i
+
+/**
+ * Validate and normalise a backend URL typed by the user: trimmed, `http://` added when there is
+ * no scheme (`gpu:8000` → `http://gpu:8000`), no trailing slash. Empty stays empty (= no
+ * override). Throws BackendUrlError for anything that is not an http(s) URL.
+ */
+export function normalizeBackendUrl(input: string | null | undefined): string {
+  const raw = normalizeBaseUrl(input)
+  if (!raw) return ''
+  const withScheme = HAS_SCHEME.test(raw) ? raw : `http://${raw}`
+  let parsed: URL
+  try {
+    parsed = new URL(withScheme)
+  } catch {
+    throw new BackendUrlError('invalid', raw)
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new BackendUrlError('scheme', raw)
+  }
+  if (!parsed.hostname) throw new BackendUrlError('invalid', raw)
+  return normalizeBaseUrl(withScheme)
+}
+
+/** `normalizeBackendUrl` for stored / configured values: an unusable one counts as unset. */
+function safeBackendUrl(input: string | null | undefined): string {
+  try {
+    return normalizeBackendUrl(input)
+  } catch {
+    return ''
+  }
+}
+
 export function getBackendUrl(): string {
-  const override = normalizeBaseUrl(readStorage(STORAGE_KEYS.backendUrl))
+  const override = safeBackendUrl(readStorage(STORAGE_KEYS.backendUrl))
   if (override) return override
   return getDefaultBackendUrl()
 }
@@ -59,7 +94,7 @@ export function getApiKey(): string | null {
  * same origin on the web, else the local backend in the desktop app.
  */
 export function getDefaultBackendUrl(): string {
-  const configured = normalizeBaseUrl(window.__ASR_CONFIG__?.backendUrl)
+  const configured = safeBackendUrl(window.__ASR_CONFIG__?.backendUrl)
   if (configured) return configured
   return isDesktop() ? DESKTOP_DEFAULT_BACKEND : ''
 }
@@ -89,14 +124,41 @@ export function notifyUnauthorized(): void {
   for (const listener of unauthorizedListeners) listener()
 }
 
+type AuthorizedListener = () => void
+const authorizedListeners = new Set<AuthorizedListener>()
+
+/** Register a callback fired when an authenticated endpoint answered successfully. */
+export function onAuthorized(listener: AuthorizedListener): () => void {
+  authorizedListeners.add(listener)
+  return () => authorizedListeners.delete(listener)
+}
+
+/** Paths the backend serves without X-API-Key: success there says nothing about the key. */
+const PUBLIC_PATHS = ['/api/health']
+
+/** Called by the transports on a 2xx from an endpoint that needs the key (clears the banner). */
+export function notifyAuthorized(url?: string): void {
+  if (url) {
+    let path = url
+    try {
+      path = new URL(url, 'http://local').pathname
+    } catch {
+      // keep the raw string
+    }
+    if (PUBLIC_PATHS.some((p) => path === p || path.endsWith(p))) return
+  }
+  for (const listener of authorizedListeners) listener()
+}
+
 const authMiddleware: Middleware = {
   onRequest({ request }) {
     const key = getApiKey()
     if (key) request.headers.set(API_KEY_HEADER, key)
     return request
   },
-  onResponse({ response }) {
+  onResponse({ request, response }) {
     if (response.status === 401) notifyUnauthorized()
+    else if (response.ok) notifyAuthorized(request.url)
     return response
   },
 }
@@ -110,15 +172,19 @@ function createApiClient(): Client<paths> {
 /** Typed client. A live binding: it is rebuilt when the backend URL changes. */
 export let api: Client<paths> = createApiClient()
 
-/** Persist (or clear, with null/"") the backend URL override and rebuild the client. */
+/**
+ * Persist (or clear, with null/"") the backend URL override and rebuild the client. Throws
+ * BackendUrlError (nothing is saved) when the URL is not http(s); a missing scheme becomes http.
+ */
 export function setBackendUrl(url: string | null): void {
-  writeStorage(STORAGE_KEYS.backendUrl, normalizeBaseUrl(url) || null)
+  const normalized = normalizeBackendUrl(url)
+  writeStorage(STORAGE_KEYS.backendUrl, normalized || null)
   api = createApiClient()
 }
 
-/** Raw localStorage override (empty when config.js / same origin applies). */
+/** The localStorage override, normalised (empty when config.js / same origin applies). */
 export function getBackendUrlOverride(): string {
-  return normalizeBaseUrl(readStorage(STORAGE_KEYS.backendUrl))
+  return safeBackendUrl(readStorage(STORAGE_KEYS.backendUrl))
 }
 
 export { normalizeBaseUrl, readStorage, writeStorage }

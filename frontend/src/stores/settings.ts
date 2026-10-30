@@ -91,10 +91,13 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
+  /** Throws BackendUrlError (nothing saved) for a non-http(s) URL; `gpu:8000` gets `http://`. */
   function setBackendUrl(url: string): void {
     persistBackendUrl(url)
     backendUrl.value = getBackendUrlOverride()
     server.value = null
+    // A 401 from the previous backend says nothing about this one.
+    health.clearUnauthorized()
     void health.check()
   }
 

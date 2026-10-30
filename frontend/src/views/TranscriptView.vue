@@ -19,14 +19,31 @@ import {
   NSwitch,
   NTag,
   NText,
+  useDialog,
   useMessage,
 } from 'naive-ui'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { RouterLink, onBeforeRouteLeave } from 'vue-router'
+import { RouterLink, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 
-import type { Correction, ExportFormat, Segment, Speaker } from '@/api'
+import {
+  toApiError,
+  type Correction,
+  type ExportFormat,
+  type Segment,
+  type Speaker,
+  type TranscriptOp,
+} from '@/api'
 import CorrectionsPanel from '@/components/CorrectionsPanel.vue'
+import {
+  clampMatchIndex,
+  isImeKey,
+  isInteractiveTarget,
+  isPopupOpen,
+  matchCounter,
+  nextMatchIndex,
+  shortcutAction,
+} from '@/components/interaction'
 import SegmentRow from '@/components/SegmentRow.vue'
 import SpeakerPanel from '@/components/SpeakerPanel.vue'
 import SummaryPanel from '@/components/SummaryPanel.vue'
@@ -43,6 +60,7 @@ const props = defineProps<{ id: string }>()
 
 const { t, locale } = useI18n()
 const message = useMessage()
+const dialog = useDialog()
 const { describe, notify } = useApiErrors()
 const store = useTranscriptStore()
 const termSets = useTermSetsStore()
@@ -55,6 +73,9 @@ const playing = ref(false)
 const playerError = ref<string | null>(null)
 const editingId = ref<string | null>(null)
 const focusedCorrection = ref<string | null>(null)
+const focusSeq = ref(0)
+/** A split / merge is in flight; further ones are ignored until it settles (no double merge). */
+const structuralPending = ref(false)
 
 const segments = computed<Segment[]>(() =>
   [...(store.transcript?.segments ?? [])].sort((a, b) => a.start - b.start),
@@ -100,16 +121,36 @@ function speakerOf(id: string): Speaker {
 const query = ref('')
 const replacement = ref('')
 const matchIndex = ref(0)
+/** The current match has been scrolled to (so the next Enter / ↓ moves on). */
+const matchRevealed = ref(false)
 const matches = computed(() => findMatches(segments.value, query.value))
-const currentMatch = computed(() => matches.value[matchIndex.value] ?? null)
+const currentMatch = computed(
+  () => matches.value[clampMatchIndex(matchIndex.value, matches.value.length)] ?? null,
+)
+const matchCountText = computed(() => matchCounter(matchIndex.value, matches.value.length))
 
-watch(query, () => (matchIndex.value = 0))
+watch(query, () => {
+  matchIndex.value = 0
+  matchRevealed.value = false
+})
+// Edits / replace can shrink the match list under the current index.
+watch(
+  () => matches.value.length,
+  (n) => (matchIndex.value = clampMatchIndex(matchIndex.value, n)),
+)
 
 function stepMatch(delta: number): void {
   if (!matches.value.length) return
-  matchIndex.value = (matchIndex.value + delta + matches.value.length) % matches.value.length
+  matchIndex.value = nextMatchIndex(matchIndex.value, delta, matches.value.length, matchRevealed.value)
+  matchRevealed.value = true
   const m = currentMatch.value
   if (m) void scrollTo(m.segmentId)
+}
+
+function onSearchKeydown(e: KeyboardEvent): void {
+  if (e.key !== 'Enter' || isImeKey(e)) return
+  e.preventDefault()
+  stepMatch(e.shiftKey ? -1 : 1)
 }
 
 async function replaceAll(): Promise<void> {
@@ -117,10 +158,11 @@ async function replaceAll(): Promise<void> {
   if (!find) return
   const n = matches.value.length
   try {
-    await store.applyOps([{ op: 'replace', find, replace: replacement.value }])
+    // Case-insensitive, like the search that counted and highlighted the matches.
+    await store.applyOps([{ op: 'replace', find, replace: replacement.value, ignore_case: true }])
     message.success(t('proofread.replaced', { n }))
   } catch (e) {
-    notify(e, t('proofread.saveFailed'))
+    notifySaveError(e)
   }
 }
 
@@ -187,11 +229,35 @@ watch(activeId, async (id) => {
 
 // --- editing ------------------------------------------------------------------------------------
 
+/** 409: the store has already reloaded the server's version (unsent text kept on top). */
+function isConflict(e: unknown): boolean {
+  return toApiError(e).status === 409
+}
+
+function notifySaveError(e: unknown): void {
+  if (!isConflict(e)) return notify(e, t('proofread.saveFailed'))
+  message.warning(t('proofread.conflictReloaded'), { duration: 8000, closable: true })
+}
+
 async function run(op: () => Promise<void>): Promise<void> {
   try {
     await op()
   } catch (e) {
-    notify(e, t('proofread.saveFailed'))
+    notifySaveError(e)
+  }
+}
+
+const saveConflict = computed(() => store.saveState === 'error' && store.saveError?.status === 409)
+const retrying = ref(false)
+
+async function retrySave(): Promise<void> {
+  retrying.value = true
+  try {
+    await store.retrySave()
+  } catch (e) {
+    notifySaveError(e)
+  } finally {
+    retrying.value = false
   }
 }
 
@@ -205,14 +271,21 @@ function stopEdit(): void {
   void run(() => store.flush())
 }
 
-function split(seg: Segment, at: number): void {
+/** Run a split / merge unless one is still pending (a double-click must not merge twice). */
+function structural(op: TranscriptOp): void {
+  if (structuralPending.value) return
+  structuralPending.value = true
   editingId.value = null
-  void run(() => store.applyOps([{ op: 'split', segment_id: seg.id, at }]))
+  void run(() => store.applyOps([op])).finally(() => (structuralPending.value = false))
+}
+
+/** `at` is a code-point offset (SegmentRow converts the textarea's UTF-16 caret). */
+function split(seg: Segment, at: number): void {
+  structural({ op: 'split', segment_id: seg.id, at })
 }
 
 function mergeNext(seg: Segment): void {
-  editingId.value = null
-  void run(() => store.applyOps([{ op: 'merge', segment_id: seg.id }]))
+  structural({ op: 'merge', segment_id: seg.id })
 }
 
 function setSpeaker(seg: Segment, speakerId: string): void {
@@ -265,6 +338,7 @@ function jumpToSegment(segmentId: string): void {
 
 function focusCorrection(id: string): void {
   focusedCorrection.value = id
+  focusSeq.value++
 }
 
 async function addAlias(c: Correction, termSetId: string | null): Promise<void> {
@@ -312,36 +386,35 @@ async function suggest(): Promise<void> {
 
 // --- keyboard -----------------------------------------------------------------------------------
 
-function isTyping(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false
-  if (target.isContentEditable) return true
-  return !!target.closest(
-    'input, textarea, select, button, a, [contenteditable], [role="textbox"], [role="button"], [role="switch"], [role="slider"]',
-  )
-}
-
 function onKeydown(e: KeyboardEvent): void {
-  if (e.isComposing) return
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
-    e.preventDefault()
-    searchInput.value?.focus()
-    return
-  }
-  if (e.ctrlKey || e.metaKey || e.altKey || isTyping(e.target)) return
-  if (e.code === 'Space' || e.key === ' ') {
-    e.preventDefault()
-    player.value?.playPause()
-  } else if (e.key === 'ArrowLeft') {
-    e.preventDefault()
-    stepSegment(-1)
-  } else if (e.key === 'ArrowRight') {
-    e.preventDefault()
-    stepSegment(1)
-  } else if (e.key === 'Enter') {
-    const seg = segments.value[activeIndex.value >= 0 ? activeIndex.value : 0]
-    if (seg) {
+  const action = shortcutAction(e, {
+    interactiveTarget: isInteractiveTarget(e.target),
+    popupOpen: isPopupOpen(),
+  })
+  switch (action) {
+    case 'search':
       e.preventDefault()
-      startEdit(seg)
+      searchInput.value?.focus()
+      break
+    case 'playPause':
+      e.preventDefault()
+      player.value?.playPause()
+      break
+    case 'prev':
+      e.preventDefault()
+      stepSegment(-1)
+      break
+    case 'next':
+      e.preventDefault()
+      stepSegment(1)
+      break
+    case 'edit': {
+      const seg = segments.value[activeIndex.value >= 0 ? activeIndex.value : 0]
+      if (seg) {
+        e.preventDefault()
+        startEdit(seg)
+      }
+      break
     }
   }
 }
@@ -373,13 +446,45 @@ watch(
     currentTime.value = 0
     playerError.value = null
     editingId.value = null
+    query.value = ''
     void store.load(id)
   },
 )
 
-onBeforeRouteLeave(async () => {
-  await store.flush().catch(() => undefined)
+function confirmDiscard(): Promise<boolean> {
+  return new Promise((resolve) => {
+    dialog.warning({
+      title: t('proofread.unsavedTitle'),
+      content: t('proofread.unsavedLeave'),
+      positiveText: t('proofread.leaveAnyway'),
+      negativeText: t('proofread.stay'),
+      onPositiveClick: () => resolve(true),
+      onNegativeClick: () => resolve(false),
+      onClose: () => resolve(false),
+      onMaskClick: () => resolve(false),
+    })
+  })
+}
+
+/**
+ * Save what was typed (including the last < AUTOSAVE_MS of keystrokes) before the page shows
+ * another transcript or is left; if that fails, ask before dropping it.
+ */
+async function saveBeforeLeaving(): Promise<boolean> {
+  try {
+    await store.flush()
+  } catch {
+    // reported below via hasUnsavedChanges
+  }
+  return store.hasUnsavedChanges ? confirmDiscard() : true
+}
+
+onBeforeRouteUpdate(async (to, from) => {
+  if (to.params.id === from.params.id) return
+  return saveBeforeLeaving()
 })
+
+onBeforeRouteLeave(() => saveBeforeLeaving())
 
 onMounted(() => {
   void store.load(props.id)
@@ -389,7 +494,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
-  void store.flush().catch(() => undefined)
+  // reset() still sends pending text (on its own transcript id) before clearing the page state.
   store.reset()
 })
 </script>
@@ -481,11 +586,9 @@ onBeforeUnmount(() => {
                 :placeholder="t('proofread.searchPlaceholder')"
                 style="width: 200px"
                 data-testid="search-input"
-                @keydown.enter="stepMatch(1)"
+                @keydown="onSearchKeydown"
               />
-              <NText depth="3" data-testid="search-count">
-                {{ matches.length ? `${matchIndex + 1}/${matches.length}` : '0/0' }}
-              </NText>
+              <NText depth="3" data-testid="search-count">{{ matchCountText }}</NText>
               <NButtonGroup size="small">
                 <NButton :disabled="!matches.length" @click="stepMatch(-1)">↑</NButton>
                 <NButton :disabled="!matches.length" @click="stepMatch(1)">↓</NButton>
@@ -514,6 +617,26 @@ onBeforeUnmount(() => {
                 {{ t('proofread.revertConfirm') }}
               </NPopconfirm>
             </NSpace>
+            <NAlert
+              v-if="store.saveState === 'error'"
+              :type="saveConflict ? 'warning' : 'error'"
+              :show-icon="false"
+              class="gap"
+              data-testid="save-error"
+            >
+              <NSpace align="center" justify="space-between" :wrap="false">
+                <span>
+                  {{
+                    saveConflict
+                      ? t('proofread.conflictReloaded')
+                      : `${t('proofread.saveFailed')}：${describe(store.saveError)}`
+                  }}
+                </span>
+                <NButton size="small" :loading="retrying" data-testid="save-retry" @click="retrySave">
+                  {{ t('proofread.retrySave') }}
+                </NButton>
+              </NSpace>
+            </NAlert>
             <NText depth="3" class="hint">{{ t('proofread.shortcuts') }}</NText>
             <NEmpty v-if="!segments.length" :description="t('transcript.empty')" />
             <div v-else ref="listEl" class="dialogue" data-testid="transcript-segments">
@@ -527,6 +650,7 @@ onBeforeUnmount(() => {
                 :active="seg.id === activeId"
                 :editing="seg.id === editingId"
                 :is-last="i === segments.length - 1"
+                :busy="structuralPending"
                 @seek="seekTo(seg)"
                 @start-edit="startEdit(seg)"
                 @stop-edit="stopEdit"
@@ -564,6 +688,7 @@ onBeforeUnmount(() => {
                 :texts="segmentTexts"
                 :term-sets="termSets.items"
                 :focused-id="focusedCorrection"
+                :focus-seq="focusSeq"
                 :llm-running="store.llmRunning"
                 @review="review"
                 @jump="jumpToSegment"

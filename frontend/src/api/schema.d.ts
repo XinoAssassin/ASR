@@ -326,6 +326,7 @@ export interface paths {
          * Patch Transcript
          * @description Apply ops in order to ``segments`` / ``speakers`` / ``corrections``; ``original`` is
          *     immutable (rule 9). All ops are validated before anything is written (all-or-nothing).
+         *     With ``expected_updated_at`` the patch is refused (409) if the transcript changed since.
          */
         patch: operations["patch_transcript_api_transcripts__transcript_id__patch"];
         trace?: never;
@@ -401,7 +402,8 @@ export interface paths {
         /**
          * Update Speakers
          * @description Rename / recolour speakers; an id not in the transcript yet adds a new speaker (for a
-         *     voice diarization missed). Speakers not listed are unchanged.
+         *     voice diarization missed). Speakers not listed are unchanged. With ``expected_updated_at``
+         *     the update is refused (409) if the transcript changed since.
          */
         put: operations["update_speakers_api_transcripts__transcript_id__speakers_put"];
         post?: never;
@@ -510,6 +512,9 @@ export interface paths {
         /**
          * Complete Upload
          * @description Assemble the parts in order into ``target_dir`` and probe the result.
+         *
+         *     Idempotent for an hour: repeating ``complete`` for a session that already completed returns
+         *     the same upload with 200 (a concurrent repeat waits for the first call).
          */
         post: operations["complete_upload_api_uploads__session_id__complete_post"];
         delete?: never;
@@ -1072,6 +1077,12 @@ export interface components {
             /** Find */
             find: string;
             /**
+             * Ignore Case
+             * @description Match `find` case-insensitively.
+             * @default false
+             */
+            ignore_case: boolean;
+            /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
              */
@@ -1179,6 +1190,11 @@ export interface components {
         };
         /** SpeakersUpdate */
         SpeakersUpdate: {
+            /**
+             * Expected Updated At
+             * @description The transcript's `updated_at` as loaded. If it changed since, the request is refused with 409 and nothing is written. Omit to apply on top of the current version.
+             */
+            expected_updated_at?: string | null;
             /** Speakers */
             speakers: components["schemas"]["SpeakerUpdate"][];
         };
@@ -1305,6 +1321,11 @@ export interface components {
         };
         /** TranscriptPatch */
         TranscriptPatch: {
+            /**
+             * Expected Updated At
+             * @description The transcript's `updated_at` as loaded. If it changed since, the request is refused with 409 and nothing is written. Omit to apply on top of the current version.
+             */
+            expected_updated_at?: string | null;
             /** Ops */
             ops: (components["schemas"]["EditTextOp"] | components["schemas"]["SetSpeakerOp"] | components["schemas"]["SplitOp"] | components["schemas"]["MergeOp"] | components["schemas"]["ReplaceOp"] | components["schemas"]["MergeSpeakersOp"] | components["schemas"]["ReviewCorrectionOp"])[];
         };
@@ -1448,7 +1469,10 @@ export type $defs = Record<string, never>;
 export interface operations {
     get_audio_api_audio__upload_id__get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Audio stream to play; default: the newest job's `options.preprocess.stream_index` for this upload, else 0. */
+                stream_index?: number | null;
+            };
             header?: never;
             path: {
                 upload_id: string;
@@ -2157,6 +2181,13 @@ export interface operations {
                     "application/json": components["schemas"]["TranscriptOut"];
                 };
             };
+            /** @description `expected_updated_at` no longer matches. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -2293,6 +2324,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TranscriptOut"];
                 };
+            };
+            /** @description `expected_updated_at` no longer matches. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -2513,6 +2551,15 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Already completed (repeated call). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UploadOut"];
+                };
+            };
             /** @description Successful Response */
             201: {
                 headers: {

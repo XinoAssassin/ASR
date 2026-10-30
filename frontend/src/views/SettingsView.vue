@@ -23,6 +23,7 @@ import { computed, h, onBeforeUnmount, onMounted, reactive, ref, watch } from 'v
 import { useI18n } from 'vue-i18n'
 
 import {
+  BackendUrlError,
   downloadLocalModel,
   getDefaultBackendUrl,
   listLocalModels,
@@ -40,6 +41,8 @@ import { isDesktop } from '@/platform'
 import { useHealthStore } from '@/stores/health'
 import { useRecorderStore } from '@/stores/recorder'
 import { useSettingsStore } from '@/stores/settings'
+
+import { createFormSync } from './formSync'
 
 const { t } = useI18n()
 const message = useMessage()
@@ -67,10 +70,17 @@ watch(
   () => settings.backendUrl,
   (url) => (urlInput.value = url),
 )
+/** Why the typed backend URL was rejected (not http(s) / not a URL); cleared on edit. */
+const urlError = ref<string | null>(null)
+watch(urlInput, () => (urlError.value = null))
 const keyInput = ref(settings.apiKey)
 const probing = ref(false)
 const probeResult = ref<{ ok: true; info: HealthOut } | { ok: false; text: string } | null>(null)
 const defaultUrl = getDefaultBackendUrl()
+
+function describeUrlError(e: BackendUrlError): string {
+  return t(`settings.connection.urlInvalid.${e.reason}`, { url: e.input })
+}
 
 async function testBackendUrl(): Promise<void> {
   probing.value = true
@@ -79,15 +89,23 @@ async function testBackendUrl(): Promise<void> {
     const info = await probeHealth(urlInput.value.trim() || defaultUrl)
     probeResult.value = { ok: true, info }
   } catch (e) {
-    probeResult.value = { ok: false, text: describe(e) }
+    if (e instanceof BackendUrlError) urlError.value = describeUrlError(e)
+    else probeResult.value = { ok: false, text: describe(e) }
   } finally {
     probing.value = false
   }
 }
 
 function saveBackendUrl(): void {
-  settings.setBackendUrl(urlInput.value)
+  try {
+    settings.setBackendUrl(urlInput.value)
+  } catch (e) {
+    if (!(e instanceof BackendUrlError)) throw e
+    urlError.value = describeUrlError(e) // nothing was saved
+    return
+  }
   urlInput.value = settings.backendUrl
+  urlError.value = null
   message.success(t('settings.saved'))
   void settings.load()
   void pushToDesktop()
@@ -135,9 +153,9 @@ const resolvedEndpoint = computed(() =>
     : form.endpointChoice,
 )
 
-function fillForm(): void {
+function fillForm(): boolean {
   const s = settings.server
-  if (!s) return
+  if (!s) return false
   form.provider = s.provider_default
   form.model = s.cloud.model
   form.fileTransfer = s.cloud.file_transfer
@@ -149,9 +167,12 @@ function fillForm(): void {
   } else {
     form.endpointChoice = ENDPOINTS.includes(s.cloud.endpoint) ? s.cloud.endpoint : ENDPOINTS[0]!
   }
+  return true
 }
 
-watch(() => settings.server, fillForm, { immediate: true })
+// Each card re-fills only from its own save (or while untouched), so saving one card never
+// discards what was typed into the other.
+const serverSync = createFormSync(form, fillForm)
 
 async function saveServer(): Promise<void> {
   if (form.endpointChoice === 'custom' && !workspaceValid.value) {
@@ -169,6 +190,7 @@ async function saveServer(): Promise<void> {
   if (form.newKey.trim()) update.cloud!.api_key = form.newKey.trim()
   try {
     await settings.save(update)
+    serverSync.refill()
     message.success(t('settings.saved'))
   } catch (e) {
     notify(e, t('settings.saveFailed'))
@@ -219,12 +241,21 @@ function isWhisper(id: string): boolean {
   return id.startsWith('faster-whisper')
 }
 
+function fillLocalForm(): boolean {
+  const s = settings.server
+  if (!s) return false
+  localForm.asrModel = s.local.asr_model ?? ''
+  localForm.device = s.local.device
+  return true
+}
+
+const localSync = createFormSync(localForm, fillLocalForm)
+
 watch(
   () => settings.server,
-  (s) => {
-    if (!s) return
-    localForm.asrModel = s.local.asr_model ?? ''
-    localForm.device = s.local.device
+  () => {
+    serverSync.sync()
+    localSync.sync()
   },
   { immediate: true },
 )
@@ -299,6 +330,7 @@ async function startDownload(key: string): Promise<void> {
 async function saveLocal(): Promise<void> {
   try {
     await settings.save({ local: { asr_model: localForm.asrModel, device: localForm.device } })
+    localSync.refill()
     message.success(t('settings.saved'))
   } catch (e) {
     notify(e, t('settings.saveFailed'))
@@ -336,6 +368,7 @@ onMounted(() => {
               <NInput
                 v-model:value="urlInput"
                 data-testid="backend-url-input"
+                :status="urlError ? 'error' : undefined"
                 :placeholder="defaultUrl || t('health.sameOrigin')"
                 clearable
                 style="min-width: 320px"
@@ -350,6 +383,7 @@ onMounted(() => {
                 {{ t('settings.connection.reset') }}
               </NButton>
             </NSpace>
+            <NText v-if="urlError" type="error" data-testid="backend-url-error">{{ urlError }}</NText>
             <NText depth="3">{{ t('settings.connection.backendUrlHint') }}</NText>
             <NAlert v-if="probeResult?.ok" type="success" :show-icon="true">
               {{ t('settings.connection.testOk', { version: probeResult.info.version }) }}

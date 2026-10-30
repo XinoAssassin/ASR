@@ -1,7 +1,12 @@
 /**
  * Chunked upload (D11): `POST /api/uploads/init` → `PUT /api/uploads/{session}/parts/{n}` for
- * every part, sequentially, with retry → `POST /api/uploads/{session}/complete`.
- * Parts go through XMLHttpRequest because fetch has no upload-progress events.
+ * every part, sequentially, with retry → `POST /api/uploads/{session}/complete` (also retried; the
+ * backend makes it idempotent). Parts go through XMLHttpRequest because fetch has no
+ * upload-progress events.
+ *
+ * Resume: the caller keeps the `UploadSession` reported through `onSession` and passes it back as
+ * `resume`; the upload then continues from the first part that was not acknowledged (the server
+ * accepts re-sent parts). A session the server no longer knows (404) is started over.
  */
 import { api, apiUrl, authHeaders, notifyUnauthorized, type Schemas } from './client'
 import { ApiError, extractDetail, unwrap } from './errors'
@@ -17,8 +22,24 @@ export interface UploadProgress {
   totalParts: number
 }
 
+/** Server-side upload session, enough to resume after a failure or cancel. */
+export interface UploadSession {
+  sessionId: string
+  partSize: number
+  totalParts: number
+  /** First part not acknowledged yet (parts are sent in order). */
+  nextPart: number
+  /** What the session was created for; a resume with different values starts over. */
+  targetDir: string
+  size: number
+}
+
 export interface ChunkedUploadOptions {
   onProgress?: (progress: UploadProgress) => void
+  /** A session to continue (from a previous, failed or cancelled attempt). */
+  resume?: UploadSession | null
+  /** Called after init and after every acknowledged part with the session to resume from. */
+  onSession?: (session: UploadSession) => void
   signal?: AbortSignal
   /** Attempts per part (first try included). */
   attempts?: number
@@ -97,46 +118,102 @@ function putPart(
   })
 }
 
-export async function uploadFileChunked(
+async function withRetry<T>(
+  run: () => Promise<T>,
+  attempts: number,
+  retryDelayMs: number,
+  signal: AbortSignal | undefined,
+  beforeWait?: () => void,
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await run()
+    } catch (e) {
+      if (!(e instanceof ApiError) || !isRetryableStatus(e.status) || attempt >= attempts) throw e
+      beforeWait?.()
+      await sleep(retryDelayMs * 2 ** (attempt - 1), signal)
+    }
+  }
+}
+
+async function initSession(
   file: File,
   targetDir: string,
-  options: ChunkedUploadOptions = {},
-): Promise<UploadOut> {
-  const { onProgress, signal, attempts = 4, retryDelayMs = 1000 } = options
+  signal: AbortSignal | undefined,
+): Promise<UploadSession> {
   const init = await unwrap(
     api.POST('/api/uploads/init', {
       body: { filename: file.name, size: file.size, target_dir: targetDir },
       signal,
     }),
   )
-  const { session_id: sessionId, part_size: partSize, total_parts: totalParts } = init
-  const report = (loaded: number, part: number): void =>
-    onProgress?.({ loaded: Math.min(loaded, file.size), total: file.size, part, totalParts })
-  report(0, 0)
+  return {
+    sessionId: init.session_id,
+    partSize: init.part_size,
+    totalParts: init.total_parts,
+    nextPart: 0,
+    targetDir,
+    size: file.size,
+  }
+}
 
-  for (let n = 0; n < totalParts; n++) {
-    const start = n * partSize
-    const chunk = file.slice(start, Math.min(start + partSize, file.size))
-    const url = apiUrl(
-      `/api/uploads/${encodeURIComponent(sessionId)}/parts/${encodeURIComponent(String(n))}`,
-    )
-    for (let attempt = 1; ; attempt++) {
-      try {
-        await putPart(url, chunk, (loaded) => report(start + loaded, n), signal)
-        break
-      } catch (e) {
-        if (!(e instanceof ApiError) || !isRetryableStatus(e.status) || attempt >= attempts) throw e
-        report(start, n)
-        await sleep(retryDelayMs * 2 ** (attempt - 1), signal)
-      }
-    }
-    report(start + chunk.size, n)
+function isGone(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 404
+}
+
+export async function uploadFileChunked(
+  file: File,
+  targetDir: string,
+  options: ChunkedUploadOptions = {},
+): Promise<UploadOut> {
+  const { onProgress, onSession, signal, attempts = 4, retryDelayMs = 1000 } = options
+  const resume = options.resume
+  const reusable =
+    resume && resume.targetDir === targetDir && resume.size === file.size ? { ...resume } : null
+  try {
+    return await send(reusable ?? (await initSession(file, targetDir, signal)))
+  } catch (e) {
+    // The server dropped the session (expired / cleaned up): start over once with a new one.
+    if (reusable && isGone(e)) return send(await initSession(file, targetDir, signal))
+    throw e
   }
 
-  return unwrap(
-    api.POST('/api/uploads/{session_id}/complete', {
-      params: { path: { session_id: sessionId } },
+  async function send(session: UploadSession): Promise<UploadOut> {
+    const { sessionId, partSize, totalParts } = session
+    onSession?.({ ...session })
+    const report = (loaded: number, part: number): void =>
+      onProgress?.({ loaded: Math.min(loaded, file.size), total: file.size, part, totalParts })
+    report(Math.min(session.nextPart * partSize, file.size), session.nextPart)
+
+    for (let n = session.nextPart; n < totalParts; n++) {
+      const start = n * partSize
+      const chunk = file.slice(start, Math.min(start + partSize, file.size))
+      const url = apiUrl(
+        `/api/uploads/${encodeURIComponent(sessionId)}/parts/${encodeURIComponent(String(n))}`,
+      )
+      await withRetry(
+        () => putPart(url, chunk, (loaded) => report(start + loaded, n), signal),
+        attempts,
+        retryDelayMs,
+        signal,
+        () => report(start, n),
+      )
+      report(start + chunk.size, n)
+      session.nextPart = n + 1
+      onSession?.({ ...session })
+    }
+
+    return withRetry(
+      () =>
+        unwrap(
+          api.POST('/api/uploads/{session_id}/complete', {
+            params: { path: { session_id: sessionId } },
+            signal,
+          }),
+        ),
+      attempts,
+      retryDelayMs,
       signal,
-    }),
-  )
+    )
+  }
 }
