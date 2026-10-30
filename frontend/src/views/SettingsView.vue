@@ -16,7 +16,9 @@ import {
   NSpace,
   NTag,
   NText,
+  type ButtonProps,
   type DataTableColumns,
+  useDialog,
   useMessage,
 } from 'naive-ui'
 import { computed, h, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
@@ -24,9 +26,7 @@ import { useI18n } from 'vue-i18n'
 
 import {
   BackendUrlError,
-  downloadLocalModel,
   getDefaultBackendUrl,
-  listLocalModels,
   probeHealth,
   type FileTransfer,
   type HealthOut,
@@ -46,6 +46,7 @@ import { createFormSync } from './formSync'
 
 const { t } = useI18n()
 const message = useMessage()
+const dialog = useDialog()
 const { describe, notify } = useApiErrors()
 const health = useHealthStore()
 const settings = useSettingsStore()
@@ -58,7 +59,7 @@ async function pushToDesktop(): Promise<void> {
   try {
     await recorder.syncBackend()
   } catch (e) {
-    message.error(`${t('recorder.settings.syncFailed')}：${(e as Error).message}`)
+    message.error(t('common.labelDetail', { label: t('recorder.settings.syncFailed'), detail: (e as Error).message }))
   }
 }
 
@@ -96,14 +97,50 @@ async function testBackendUrl(): Promise<void> {
   }
 }
 
-function saveBackendUrl(): void {
+type KeyChoice = 'clear' | 'keep' | 'cancel'
+type TestButtonProps = ButtonProps & { 'data-testid': string }
+const KEY_CLEAR_BUTTON: TestButtonProps = { type: 'warning', 'data-testid': 'key-clear-confirm' }
+const KEY_KEEP_BUTTON: TestButtonProps = { 'data-testid': 'key-keep' }
+
+/** The stored API key would go to another host: clear it (default), keep it, or cancel. */
+function askAboutKey(): Promise<KeyChoice> {
+  return new Promise((resolve) => {
+    let settled = false
+    const done = (choice: KeyChoice): void => {
+      if (!settled) resolve(choice)
+      settled = true
+    }
+    dialog.warning({
+      title: t('settings.connection.keyOtherHostTitle'),
+      content: t('settings.connection.keyOtherHost'),
+      positiveText: t('settings.connection.clearKeyAndSave'),
+      negativeText: t('settings.connection.keepKey'),
+      positiveButtonProps: KEY_CLEAR_BUTTON,
+      negativeButtonProps: KEY_KEEP_BUTTON,
+      onPositiveClick: () => done('clear'),
+      onNegativeClick: () => done('keep'),
+      onClose: () => done('cancel'),
+      onMaskClick: () => done('cancel'),
+      onAfterLeave: () => done('cancel'),
+    })
+  })
+}
+
+async function saveBackendUrl(): Promise<void> {
+  let clearApiKey = false
   try {
-    settings.setBackendUrl(urlInput.value)
+    if (settings.keyAtRisk(urlInput.value)) {
+      const choice = await askAboutKey()
+      if (choice === 'cancel') return
+      clearApiKey = choice === 'clear'
+    }
+    settings.setBackendUrl(urlInput.value, { clearApiKey })
   } catch (e) {
     if (!(e instanceof BackendUrlError)) throw e
     urlError.value = describeUrlError(e) // nothing was saved
     return
   }
+  if (clearApiKey) keyInput.value = ''
   urlInput.value = settings.backendUrl
   urlError.value = null
   message.success(t('settings.saved'))
@@ -113,7 +150,15 @@ function saveBackendUrl(): void {
 
 function resetBackendUrl(): void {
   urlInput.value = ''
-  saveBackendUrl()
+  void saveBackendUrl()
+}
+
+function clearApiKey(): void {
+  keyInput.value = ''
+  settings.clearApiKey()
+  message.success(t('settings.connection.keyCleared'))
+  void health.check()
+  void pushToDesktop()
 }
 
 function saveApiKey(): void {
@@ -121,7 +166,7 @@ function saveApiKey(): void {
   message.success(t('settings.saved'))
   void health.check()
   void settings.load()
-  void loadLocalModels() // the list was empty (401) before the key was set
+  void refreshLocalModels() // the list was empty (401) before the key was set
   void pushToDesktop()
 }
 
@@ -216,23 +261,26 @@ async function runCloudTest(): Promise<void> {
 
 // --- local models (status only; management in Settings arrives with M6) ----------------------
 
-const localModels = ref<LocalModelOut[]>([])
-const localModelsError = ref<string | null>(null)
 const useMirror = ref(true)
 const localForm = reactive({ asrModel: '', device: 'cpu' as 'cpu' | 'cuda' })
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
-const anyDownloading = computed(() => localModels.value.some((m) => m.status === 'downloading'))
+const localModelsError = computed(() =>
+  settings.localModelsError ? describe(settings.localModelsError) : null,
+)
 const asrModelOptions = computed(() => [
   { label: t('settings.local.auto'), value: '' },
-  ...localModels.value
+  ...settings.localModels
     .filter((m) => m.kind === 'asr')
     .map((m) => {
       const notes = [
         isWhisper(m.id) && t('settings.local.englishOnly'),
         !m.downloaded && t('settings.local.notDownloaded'),
       ].filter(Boolean)
-      return { label: notes.length ? `${m.id}（${notes.join('，')}）` : m.id, value: m.id }
+      const label = notes.length
+        ? t('common.withNote', { text: m.id, note: notes.join(t('common.listSep')) })
+        : m.id
+      return { label, value: m.id }
     }),
 ])
 
@@ -273,7 +321,9 @@ const modelColumns = computed<DataTableColumns<LocalModelOut>>(() => [
     title: t('settings.local.modelName'),
     key: 'name',
     render: (row) =>
-      isWhisper(row.id) ? `${row.name}（${t('settings.local.whisperNote')}）` : row.name,
+      isWhisper(row.id)
+        ? t('common.withNote', { text: row.name, note: t('settings.local.whisperNote') })
+        : row.name,
   },
   { title: t('settings.local.kind'), key: 'kind' },
   {
@@ -299,7 +349,7 @@ const modelColumns = computed<DataTableColumns<LocalModelOut>>(() => [
         NButton,
         {
           size: 'small',
-          disabled: row.downloaded || anyDownloading.value,
+          disabled: row.downloaded || settings.anyDownloading,
           loading: row.status === 'downloading',
           onClick: () => void startDownload(row.id),
           'data-testid': `download-${row.id}`,
@@ -310,9 +360,9 @@ const modelColumns = computed<DataTableColumns<LocalModelOut>>(() => [
 ])
 
 function schedulePoll(): void {
-  if (anyDownloading.value && pollTimer === null) {
-    pollTimer = setInterval(() => void loadLocalModels(), 3000)
-  } else if (!anyDownloading.value && pollTimer !== null) {
+  if (settings.anyDownloading && pollTimer === null) {
+    pollTimer = setInterval(() => void refreshLocalModels(), 3000)
+  } else if (!settings.anyDownloading && pollTimer !== null) {
     clearInterval(pollTimer)
     pollTimer = null
   }
@@ -320,8 +370,8 @@ function schedulePoll(): void {
 
 async function startDownload(key: string): Promise<void> {
   try {
-    await downloadLocalModel(key, useMirror.value)
-    await loadLocalModels()
+    await settings.downloadLocalModel(key, useMirror.value)
+    schedulePoll()
   } catch (e) {
     notify(e, t('settings.local.downloadFailed'))
   }
@@ -341,19 +391,14 @@ onBeforeUnmount(() => {
   if (pollTimer !== null) clearInterval(pollTimer)
 })
 
-async function loadLocalModels(): Promise<void> {
-  try {
-    localModels.value = await listLocalModels()
-    localModelsError.value = null
-    schedulePoll()
-  } catch (e) {
-    localModelsError.value = describe(e)
-  }
+async function refreshLocalModels(): Promise<void> {
+  await settings.loadLocalModels()
+  schedulePoll()
 }
 
 onMounted(() => {
   void settings.load()
-  void loadLocalModels()
+  void refreshLocalModels()
 })
 </script>
 
@@ -405,6 +450,15 @@ onMounted(() => {
               />
               <NButton type="primary" data-testid="api-key-save" @click="saveApiKey">
                 {{ t('common.save') }}
+              </NButton>
+              <NButton
+                v-if="settings.apiKey"
+                quaternary
+                type="error"
+                data-testid="api-key-clear"
+                @click="clearApiKey"
+              >
+                {{ t('settings.connection.clearKey') }}
               </NButton>
             </NSpace>
             <NText depth="3">{{ t('settings.connection.apiKeyHint') }}</NText>
@@ -610,7 +664,7 @@ onMounted(() => {
       <NDataTable
         v-else
         :columns="modelColumns"
-        :data="localModels"
+        :data="settings.localModels"
         :row-key="(row: LocalModelOut) => row.id"
         size="small"
       />

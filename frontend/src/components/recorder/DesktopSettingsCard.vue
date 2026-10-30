@@ -82,7 +82,7 @@ async function save(): Promise<void> {
     })
     message.success(t('settings.saved'))
   } catch (e) {
-    message.error(`${t('recorder.settings.syncFailed')}：${(e as Error).message}`)
+    message.error(t('common.labelDetail', { label: t('recorder.settings.syncFailed'), detail: (e as Error).message }))
   }
 }
 
@@ -91,7 +91,7 @@ async function sync(): Promise<void> {
     await recorder.syncBackend()
     message.success(t('recorder.settings.synced'))
   } catch (e) {
-    message.error(`${t('recorder.settings.syncFailed')}：${(e as Error).message}`)
+    message.error(t('common.labelDetail', { label: t('recorder.settings.syncFailed'), detail: (e as Error).message }))
   }
 }
 
@@ -105,7 +105,7 @@ onMounted(() => {
   <NCard :title="t('recorder.settings.title')" data-testid="desktop-settings">
     <NText depth="3" class="intro">{{ t('recorder.settings.intro') }}</NText>
     <NAlert v-if="!recorder.config && recorder.error" type="error" class="block">
-      {{ t('recorder.settings.loadFailed') }}：{{ recorder.error }}
+      {{ t('common.labelDetail', { label: t('recorder.settings.loadFailed'), detail: recorder.error }) }}
     </NAlert>
 
     <NDescriptions :column="1" bordered size="small" label-placement="left" class="block">

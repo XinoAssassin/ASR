@@ -46,9 +46,16 @@ export function watchJob(jobId: string, options: WatchJobOptions): JobStream {
   let terminal = false
   let retryMs = minRetryMs
 
-  const done = fetchEventSource(apiUrl(`/api/jobs/${encodeURIComponent(jobId)}/events`), {
-    headers: authHeaders(),
+  const path = `/api/jobs/${encodeURIComponent(jobId)}/events`
+  const done = fetchEventSource(apiUrl(path), {
     signal: controller.signal,
+    // The library keeps the headers of the first request for every reconnect; read the key and
+    // the backend URL again per attempt, so a key changed in Settings applies on the next retry.
+    fetch: (_input, init) =>
+      fetch(apiUrl(path), {
+        ...init,
+        headers: { ...(init?.headers as Record<string, string> | undefined), ...authHeaders() },
+      }),
     // The library's default closes the stream when the tab is hidden and reopens it when shown;
     // that reopen is not tied to our controller's lifetime and can orphan a second connection.
     openWhenHidden: true,

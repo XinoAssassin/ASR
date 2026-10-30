@@ -24,31 +24,39 @@ export interface Piece {
   refs: string[]
 }
 
-function occurrences(text: string, needle: string, caseInsensitive: boolean): number[] {
+/** RegExp special characters (escaping only these keeps the pattern valid with the `u` flag). */
+const REGEX_SPECIAL = /[.*+?^${}()|[\]\\]/g
+
+/**
+ * Case-insensitive literal matcher, like the backend's `re.compile(re.escape(find), re.I)`.
+ * Matching on the original string keeps indices right even where lower-casing changes the length
+ * (`İ` → `i̇`), which mapping `toLowerCase()` indices back onto the original did not.
+ */
+export function literalPattern(needle: string, caseInsensitive = true): RegExp {
+  return new RegExp(needle.replace(REGEX_SPECIAL, '\\$&'), caseInsensitive ? 'giu' : 'gu')
+}
+
+/** Non-overlapping matches of `needle` in `text` as [start, end) UTF-16 ranges. */
+export function occurrences(
+  text: string,
+  needle: string,
+  caseInsensitive = true,
+): Array<{ start: number; end: number }> {
   if (!needle) return []
-  const hay = caseInsensitive ? text.toLowerCase() : text
-  const pin = caseInsensitive ? needle.toLowerCase() : needle
-  const out: number[] = []
-  let i = hay.indexOf(pin)
-  while (i >= 0) {
-    out.push(i)
-    i = hay.indexOf(pin, i + pin.length)
+  const out: Array<{ start: number; end: number }> = []
+  for (const m of text.matchAll(literalPattern(needle, caseInsensitive))) {
+    if (!m[0]) break
+    out.push({ start: m.index, end: m.index + m[0].length })
   }
   return out
 }
 
 export function termMarks(text: string, terms: string[]): Mark[] {
-  return terms.flatMap((term) =>
-    occurrences(text, term, true).map((start) => ({ start, end: start + term.length, kind: 'term' as const })),
-  )
+  return terms.flatMap((term) => occurrences(text, term).map((r) => ({ ...r, kind: 'term' as const })))
 }
 
 export function searchMarks(text: string, query: string): Mark[] {
-  return occurrences(text, query, true).map((start) => ({
-    start,
-    end: start + query.length,
-    kind: 'search' as const,
-  }))
+  return occurrences(text, query).map((r) => ({ ...r, kind: 'search' as const }))
 }
 
 /** A correction's server offset (code points) as a UTF-16 index into `text`; null when absent. */
@@ -137,4 +145,90 @@ export function pieces(text: string, marks: Mark[]): Piece[] {
     }
   }
   return out
+}
+
+export interface PieceInputs {
+  text: string
+  /** Job terms (highlighted). */
+  terms: string[]
+  /** Corrections of this segment. */
+  corrections: Correction[]
+  /** Trimmed search query ('' = no search). */
+  query: string
+  /** The current search match, when it is in this segment. */
+  current: { start: number; end: number } | null
+}
+
+interface MemoEntry {
+  text: string
+  termsKey: string
+  correctionsKey: string
+  baseMarks: Mark[]
+  base: Piece[]
+  searchKey: string
+  full: Piece[]
+}
+
+function correctionsKey(corrections: Correction[]): string {
+  return corrections
+    .map((c) => [c.id, c.status, c.before, c.after, c.offset ?? ''].join('\u0001'))
+    .join('\u0002')
+}
+
+/**
+ * Per-segment cache of `pieces()`: returns the same array as long as the segment's text, the
+ * terms, its corrections and the search state are unchanged, so a re-render of the transcript
+ * (playback moving the active segment, a keystroke in another segment) neither rescans the text
+ * nor re-renders the rows whose highlights did not change. Search marks are layered on top of the
+ * cached term / correction marks; a segment without search hits keeps its base pieces.
+ */
+export class PiecesMemo {
+  private readonly entries = new Map<string, MemoEntry>()
+  private lastTerms: string[] | null = null
+  private lastTermsKey = ''
+
+  get(segmentId: string, inputs: PieceInputs): Piece[] {
+    const { text, terms, corrections, query, current } = inputs
+    if (terms !== this.lastTerms) {
+      this.lastTerms = terms
+      this.lastTermsKey = terms.join('\u0000')
+    }
+    const termsKey = this.lastTermsKey
+    const corrKey = correctionsKey(corrections)
+    let entry = this.entries.get(segmentId)
+    if (
+      !entry ||
+      entry.text !== text ||
+      entry.termsKey !== termsKey ||
+      entry.correctionsKey !== corrKey
+    ) {
+      const baseMarks = [...termMarks(text, terms), ...correctionMarks(text, corrections)]
+      const base = pieces(text, baseMarks)
+      entry = { text, termsKey, correctionsKey: corrKey, baseMarks, base, searchKey: '', full: base }
+      this.entries.set(segmentId, entry)
+    }
+    const searchKey = query ? `${query}\u0000${current ? `${current.start}:${current.end}` : ''}` : ''
+    if (!searchKey) return entry.base
+    if (entry.searchKey !== searchKey) {
+      const marks = searchMarks(text, query)
+      if (current) marks.push({ start: current.start, end: current.end, kind: 'current' })
+      entry.searchKey = searchKey
+      entry.full = marks.length ? pieces(text, [...entry.baseMarks, ...marks]) : entry.base
+    }
+    return entry.full
+  }
+
+  /** Forget segments that no longer exist (merged, another transcript). */
+  retain(ids: Iterable<string>): void {
+    const keep = new Set(ids)
+    for (const id of this.entries.keys()) if (!keep.has(id)) this.entries.delete(id)
+  }
+
+  clear(): void {
+    this.entries.clear()
+  }
+
+  get size(): number {
+    return this.entries.size
+  }
 }

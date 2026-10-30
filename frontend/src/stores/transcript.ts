@@ -17,7 +17,7 @@
  *   `saveState = 'error'`, and is retried on the next edit / flush() / retrySave().
  */
 import { defineStore } from 'pinia'
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, shallowRef, watch } from 'vue'
 
 import {
   ApiError,
@@ -34,6 +34,7 @@ import {
   revertTranscript,
   toApiError,
   updateSpeakers,
+  type DownloadProgress,
   type ExportOptions,
   type JobOut,
   type LlmSuggestionsOut,
@@ -86,8 +87,13 @@ export const useTranscriptStore = defineStore('transcript', () => {
   const loading = ref(false)
   const error = ref<ApiError | null>(null)
 
-  const audio = ref<Blob | null>(null)
+  /**
+   * The downloaded audio until the waveform has loaded it (`releaseAudio()`); wavesurfer then owns
+   * the bytes through its own object URL, so the store does not keep a second reference.
+   */
+  const audio = shallowRef<Blob | null>(null)
   const audioLoading = ref(false)
+  const audioProgress = ref<DownloadProgress | null>(null)
   const audioError = ref<ApiError | null>(null)
   const exporting = ref(false)
   let audioController: AbortController | null = null
@@ -216,17 +222,29 @@ export const useTranscriptStore = defineStore('transcript', () => {
     audioController = controller
     audioLoading.value = true
     audioError.value = null
+    audioProgress.value = null
     try {
-      const blob = (await fetchBlob(audioPath(uploadId), controller.signal)).blob
+      const { blob } = await fetchBlob(audioPath(uploadId), {
+        signal: controller.signal,
+        onProgress: (p) => {
+          if (audioController === controller) audioProgress.value = p
+        },
+      })
       if (audioController === controller) audio.value = blob
     } catch (e) {
       if (!isAbortError(e) && audioController === controller) audioError.value = toApiError(e)
     } finally {
       if (audioController === controller) {
         audioLoading.value = false
+        audioProgress.value = null
         audioController = null
       }
     }
+  }
+
+  /** The waveform player has loaded the audio: drop the store's reference to the Blob. */
+  function releaseAudio(blob: Blob): void {
+    if (audio.value === blob) audio.value = null
   }
 
   /**
@@ -342,6 +360,9 @@ export const useTranscriptStore = defineStore('transcript', () => {
         const err = toApiError(e)
         if (isCurrent(id)) {
           restoreEdits(edits)
+          // Show the restored text: a write queued behind a 409 fails after the reload already
+          // replaced the view, so without this the screen would differ from what a retry sends.
+          if (edits.length && transcript.value) transcript.value = withPending(transcript.value)
           saveState.value = 'error'
           saveError.value = err
           if (err.status === 409 && (conflicts.get(id) ?? 0) === epoch) {
@@ -527,6 +548,7 @@ export const useTranscriptStore = defineStore('transcript', () => {
     audio.value = null
     audioError.value = null
     audioLoading.value = false
+    audioProgress.value = null
     exporting.value = false
   }
 
@@ -555,6 +577,7 @@ export const useTranscriptStore = defineStore('transcript', () => {
     error,
     audio,
     audioLoading,
+    audioProgress,
     audioError,
     exporting,
     speakerMap,
@@ -565,6 +588,7 @@ export const useTranscriptStore = defineStore('transcript', () => {
     llmRunning,
     summaryRunning,
     load,
+    releaseAudio,
     exportAs,
     reset,
     applyOps,

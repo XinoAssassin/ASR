@@ -1,6 +1,9 @@
 /**
  * Typed helpers over the generated client: each returns the response data or throws ApiError.
- * Stores call these; components never talk to the backend directly.
+ * Anything that changes server state or is shared between pages goes through a store. The only
+ * direct calls from components are read-only lookups owned by that one component: the directory
+ * tree of DirectoryPicker (`listRoots` / `listDirs`) and the Settings page probing a backend URL
+ * before it is saved (`probeHealth`); a store around them would hold no state.
  */
 import { api, normalizeBackendUrl, type Schemas } from './client'
 import { errorFromResponse, toApiError, unwrap, unwrapVoid } from './errors'

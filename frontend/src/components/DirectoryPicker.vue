@@ -11,6 +11,7 @@ import { useI18n } from 'vue-i18n'
 
 import { listDirs, listRoots, type FsDir, type FsRoot } from '@/api'
 import { useApiErrors } from '@/composables/useApiErrors'
+import { rootOf } from '@/utils/paths'
 
 const model = defineModel<string>({ required: true })
 defineProps<{ recent: string[] }>()
@@ -38,7 +39,7 @@ async function loadRoots(): Promise<void> {
     roots.value = await listRoots()
     rootsError.value = null
     const current = model.value
-    const match = roots.value.find((r) => current && (current === r.path || current.startsWith(r.path)))
+    const match = rootOf(current, roots.value)
     const first = match ?? roots.value[0]
     if (first) {
       root.value = first.path
@@ -100,7 +101,7 @@ onMounted(() => void loadRoots())
 <template>
   <NSpace vertical data-testid="directory-picker">
     <NAlert v-if="rootsError" type="warning" :show-icon="false">
-      {{ t('upload.dir.rootsError') }}：{{ rootsError }}
+      {{ t('common.labelDetail', { label: t('upload.dir.rootsError'), detail: rootsError }) }}
     </NAlert>
     <NSpace v-else :wrap="false" align="center">
       <NSelect

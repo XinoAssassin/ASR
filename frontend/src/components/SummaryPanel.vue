@@ -6,7 +6,7 @@
 import { NAlert, NButton, NEmpty, NPopconfirm, NSpace, NText } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 
-import type { TranscriptSummary } from '@/api'
+import type { ActionItem, TranscriptSummary } from '@/api'
 import { formatDateTime } from '@/utils/format'
 
 defineProps<{
@@ -18,6 +18,16 @@ defineProps<{
 const emit = defineEmits<{ generate: []; remove: [] }>()
 
 const { t, locale } = useI18n()
+
+/** "Owner: X · Due: Y" with the locale's punctuation. */
+function whoLine(a: ActionItem): string {
+  return [
+    a.owner && t('common.labelDetail', { label: t('summary.owner'), detail: a.owner }),
+    a.due && t('common.labelDetail', { label: t('summary.due'), detail: a.due }),
+  ]
+    .filter(Boolean)
+    .join(' · ')
+}
 </script>
 
 <template>
@@ -67,9 +77,7 @@ const { t, locale } = useI18n()
           <li v-for="(a, i) in summary.action_items" :key="i">
             <span>{{ a.task }}</span>
             <NText v-if="a.owner || a.due" depth="3" class="who">
-              {{ [a.owner && `${t('summary.owner')}：${a.owner}`, a.due && `${t('summary.due')}：${a.due}`]
-                .filter(Boolean)
-                .join(' · ') }}
+              {{ whoLine(a) }}
             </NText>
           </li>
         </ul>

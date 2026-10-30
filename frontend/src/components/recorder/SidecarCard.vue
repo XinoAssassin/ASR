@@ -73,7 +73,7 @@ async function save(): Promise<boolean> {
     await sidecar.saveConfig(current())
     return true
   } catch (e) {
-    message.error(`${t('recorder.sidecar.saveFailed')}：${(e as Error).message}`)
+    message.error(t('common.labelDetail', { label: t('recorder.sidecar.saveFailed'), detail: (e as Error).message }))
     return false
   }
 }
@@ -93,7 +93,7 @@ async function onStart(): Promise<void> {
     const result = await sidecar.start()
     if (result.state === 'running') message.success(t('recorder.sidecar.started'))
   } catch (e) {
-    message.error(`${t('recorder.sidecar.startFailed')}：${(e as Error).message}`)
+    message.error(t('common.labelDetail', { label: t('recorder.sidecar.startFailed'), detail: (e as Error).message }))
   }
 }
 
@@ -101,7 +101,7 @@ async function onStop(): Promise<void> {
   try {
     await sidecar.stop()
   } catch (e) {
-    message.error(`${t('recorder.sidecar.stopFailed')}：${(e as Error).message}`)
+    message.error(t('common.labelDetail', { label: t('recorder.sidecar.stopFailed'), detail: (e as Error).message }))
   }
 }
 
@@ -110,7 +110,7 @@ async function onUse(): Promise<void> {
     const url = await sidecar.useAsBackend()
     message.success(t('recorder.sidecar.used', { url }))
   } catch (e) {
-    message.error(`${t('recorder.sidecar.useFailed')}：${(e as Error).message}`)
+    message.error(t('common.labelDetail', { label: t('recorder.sidecar.useFailed'), detail: (e as Error).message }))
   }
 }
 

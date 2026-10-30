@@ -2,9 +2,13 @@
 /**
  * wavesurfer.js waveform + transport controls. Audio arrives as a Blob (fetched with the API key
  * header, D6); one coloured region per transcript segment (regions plugin, read-only).
+ *
+ * `loaded` fires once wavesurfer has the audio: it plays from its own object URL (revoked by
+ * wavesurfer on reload / destroy), so the parent may drop its Blob then. A `blob` prop going back
+ * to null therefore keeps what is loaded; a new transcript remounts the player.
  */
 import { NButton, NSlider, NSpace, NText } from 'naive-ui'
-import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import WaveSurfer from 'wavesurfer.js'
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js'
@@ -23,6 +27,7 @@ const emit = defineEmits<{
   time: [seconds: number]
   playing: [value: boolean]
   ready: [duration: number]
+  loaded: [blob: Blob]
   error: [message: string]
 }>()
 
@@ -37,8 +42,8 @@ const playing = ref(false)
 const currentTime = ref(0)
 const duration = ref(0)
 const zoom = ref(0)
-/** The Blob currently loaded (null = nothing); `ready` events without one are ignored. */
-let loadedBlob: Blob | null = null
+/** Number of loads started (0 = nothing loaded yet; `ready` before that is ignored). No Blob ref is kept. */
+let loadSeq = 0
 /** A seek requested before the audio was ready; applied on `ready`. */
 let pendingSeek: { seconds: number; play: boolean } | null = null
 
@@ -66,20 +71,15 @@ function renderRegions(): void {
 
 async function load(blob: Blob | null): Promise<void> {
   const instance = ws.value
-  if (!instance) return
+  if (!instance || !blob) return
   ready.value = false
   duration.value = 0
   currentTime.value = 0
-  const previous = loadedBlob
-  loadedBlob = blob
-  if (!blob) {
-    // empty() emits a zero-length `ready`; only needed when something was loaded before.
-    if (previous) instance.empty()
-    return
-  }
+  const seq = ++loadSeq
   loading.value = true
   try {
     await instance.loadBlob(blob)
+    if (seq === loadSeq) emit('loaded', blob)
   } catch (e) {
     if (!(e instanceof DOMException && e.name === 'AbortError')) {
       emit('error', e instanceof Error ? e.message : String(e))
@@ -106,7 +106,7 @@ onMounted(() => {
     plugins: [plugin],
   })
   instance.on('ready', (d) => {
-    if (!loadedBlob) return
+    if (!loadSeq) return
     duration.value = d
     ready.value = true
     renderRegions()
@@ -153,7 +153,14 @@ watch(
   () => props.blob,
   (blob) => void load(blob),
 )
-watch(() => props.regions, renderRegions)
+/**
+ * Regions change only with segment times / speakers, not with text: every accepted save replaces
+ * the `regions` array, so re-render only when this key differs (computed keeps the old string).
+ */
+const regionsKey = computed(() =>
+  props.regions.map((r) => `${r.id}\u0001${r.start}\u0001${r.end}\u0001${r.color}`).join('\u0002'),
+)
+watch(regionsKey, renderRegions)
 watch(zoom, (v) => {
   if (ready.value) ws.value?.zoom(v)
 })

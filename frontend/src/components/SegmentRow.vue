@@ -4,6 +4,9 @@
  * by the store), split at the caret, merge with the next segment, reassign the speaker.
  * Highlights are rendered as plain spans from `pieces` (no v-html). While a split / merge is in
  * flight (`busy`) both are ignored, so a double-click on "merge" cannot merge twice.
+ * The row is focusable (Tab; Enter edits it) but leaves Space / arrows to the page shortcuts
+ * (`data-global-keys`). Props are kept referentially stable by the parent, so a row re-renders
+ * only when its own segment / highlights / state change.
  */
 import { NButton, NDropdown, NInput, NTag, NText, type DropdownOption } from 'naive-ui'
 import { computed, nextTick, ref, watch } from 'vue'
@@ -12,7 +15,7 @@ import { useI18n } from 'vue-i18n'
 import type { Segment, Speaker } from '@/api'
 import { formatTimestamp } from '@/utils/format'
 import type { Piece } from '@/utils/highlight'
-import { isImeKey, splitOffset } from './interaction'
+import { isImeKey, splitOffset, syncedDraft } from './interaction'
 
 const props = defineProps<{
   segment: Segment
@@ -42,22 +45,29 @@ const emit = defineEmits<{
 const { t } = useI18n()
 const input = ref<InstanceType<typeof NInput> | null>(null)
 const draft = ref(props.segment.text)
+/** Last text sent up with `text`; the store echoes it back as `segment.text`. */
+let lastEmitted: string | null = null
 
 watch(
   () => props.segment.text,
   (text) => {
-    if (!props.editing) draft.value = text
+    draft.value = syncedDraft({ editing: props.editing, text, draft: draft.value, lastEmitted })
   },
 )
 
 watch(
   () => props.editing,
   async (on) => {
+    lastEmitted = null
     if (!on) return
     draft.value = props.segment.text
     await nextTick()
     input.value?.focus()
   },
+)
+
+const timeRange = computed(
+  () => `${formatTimestamp(props.segment.start)} – ${formatTimestamp(props.segment.end)}`,
 )
 
 const speakerOptions = computed<DropdownOption[]>(() => [
@@ -73,7 +83,17 @@ function onSpeaker(key: string | number): void {
 
 function onInput(value: string): void {
   draft.value = value
+  lastEmitted = value
   emit('text', value)
+}
+
+/** Enter on the focused row itself (not on a button inside it) edits this segment. */
+function onRowKeydown(e: KeyboardEvent): void {
+  if (e.target !== e.currentTarget || props.editing || isImeKey(e)) return
+  if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault()
+    emit('startEdit')
+  }
 }
 
 function splitHere(): void {
@@ -118,17 +138,31 @@ function onPieceClick(p: Piece, e: MouseEvent): void {
     data-testid="transcript-segment"
     :data-segment-id="segment.id"
     :data-active="active ? 'true' : 'false'"
+    tabindex="0"
+    role="group"
+    data-global-keys
+    :aria-label="`${speaker.name} ${timeRange}`"
     @click="!editing && emit('seek')"
     @dblclick="emit('startEdit')"
+    @keydown="onRowKeydown"
   >
     <div class="segment-meta">
       <NDropdown trigger="click" :options="speakerOptions" @select="onSpeaker">
-        <span class="speaker-chip" data-testid="segment-speaker" @click.stop @dblclick.stop>{{
-          speaker.name
-        }}</span>
+        <span
+          class="speaker-chip"
+          role="button"
+          tabindex="0"
+          :aria-label="t('proofread.changeSpeaker', { name: speaker.name })"
+          data-testid="segment-speaker"
+          @click.stop
+          @dblclick.stop
+          @keydown.enter.prevent="($event.currentTarget as HTMLElement).click()"
+          @keydown.space.prevent="($event.currentTarget as HTMLElement).click()"
+          >{{ speaker.name }}</span
+        >
       </NDropdown>
       <NText depth="3" class="ts">
-        {{ formatTimestamp(segment.start) }} – {{ formatTimestamp(segment.end) }}
+        {{ timeRange }}
       </NText>
       <NTag v-if="segment.edited" size="tiny" :bordered="false">{{ t('transcript.edited') }}</NTag>
       <span class="actions" @click.stop @dblclick.stop>
@@ -219,9 +253,15 @@ function onPieceClick(p: Piece, e: MouseEvent): void {
 }
 
 .segment:hover .actions,
+.segment:focus-within .actions,
 .segment.editing .actions,
 .segment.active .actions {
   opacity: 1;
+}
+
+.segment:focus-visible {
+  outline: 2px solid #2080f0;
+  outline-offset: 1px;
 }
 
 .speaker-chip {

@@ -1,6 +1,8 @@
 /** Transcript search: case-insensitive literal matches across segments, in display order. */
 import type { Segment, Term } from '@/api/endpoints'
 
+import { literalPattern } from './highlight'
+
 export interface Match {
   segmentId: string
   start: number
@@ -8,15 +10,14 @@ export interface Match {
 }
 
 export function findMatches(segments: Segment[], query: string): Match[] {
-  const q = query.trim().toLowerCase()
+  const q = query.trim()
   if (!q) return []
+  const pattern = literalPattern(q)
   const out: Match[] = []
   for (const seg of segments) {
-    const text = seg.text.toLowerCase()
-    let i = text.indexOf(q)
-    while (i >= 0) {
-      out.push({ segmentId: seg.id, start: i, end: i + q.length })
-      i = text.indexOf(q, i + q.length)
+    for (const m of seg.text.matchAll(pattern)) {
+      if (!m[0]) break
+      out.push({ segmentId: seg.id, start: m.index, end: m.index + m[0].length })
     }
   }
   return out

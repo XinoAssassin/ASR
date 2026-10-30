@@ -22,14 +22,12 @@ import JobOptionsForm from '@/components/JobOptionsForm.vue'
 import ProbeCard from '@/components/ProbeCard.vue'
 import SourceTips from '@/components/SourceTips.vue'
 import { isImeKey, speakerCountMissing } from '@/components/interaction'
-import { createJob } from '@/api'
 import { useApiErrors } from '@/composables/useApiErrors'
 import { useSettingsStore } from '@/stores/settings'
 import { useTermSetsStore } from '@/stores/termSets'
 import { useUploadsStore, type QueueItem } from '@/stores/uploads'
 import { ACCEPT_ATTRIBUTE, ACCEPTED_EXTENSIONS } from '@/utils/audio'
 import { formatBytes } from '@/utils/format'
-import { buildJobCreate } from '@/utils/jobForm'
 import { parseTerms } from '@/utils/terms'
 
 const { t } = useI18n()
@@ -49,7 +47,7 @@ function addFiles(list: FileList | null | undefined): void {
   if (!list?.length) return
   const rejected = uploads.addFiles(Array.from(list))
   if (rejected.length) {
-    message.warning(t('upload.files.rejected', { names: rejected.join('、') }), { duration: 6000 })
+    message.warning(t('upload.files.rejected', { names: rejected.join(t('common.enumSep')) }), { duration: 6000 })
   }
 }
 
@@ -118,39 +116,20 @@ async function register(): Promise<void> {
 // --- job creation -----------------------------------------------------------------------------
 
 const termsParsed = computed(() => parseTerms(uploads.jobForm.extraTerms))
-const submitting = ref(false)
 const canStart = computed(
   () =>
     uploads.ready.length > 0 &&
-    !submitting.value &&
+    !uploads.submitting &&
     !uploads.uploading &&
     termsParsed.value.errors.length === 0 &&
     !speakerCountMissing(uploads.jobForm),
 )
 
 async function startJobs(): Promise<void> {
-  submitting.value = true
-  const submitted: string[] = []
-  try {
-    for (const entry of uploads.ready) {
-      const body = buildJobCreate(
-        uploads.jobForm,
-        { uploadId: entry.upload.id, channels: entry.channels, streamIndex: entry.streamIndex },
-        termsParsed.value.terms,
-      )
-      try {
-        await createJob(body)
-        submitted.push(entry.upload.id)
-      } catch (e) {
-        notify(e, t('upload.start.failed', { name: entry.upload.original_name }))
-      }
-    }
-  } finally {
-    submitting.value = false
-  }
-  if (submitted.length) {
-    uploads.clearSubmitted(submitted)
-    message.success(t('upload.start.done', { n: submitted.length }))
+  const { submitted, failures } = await uploads.startJobs(termsParsed.value.terms)
+  for (const f of failures) notify(f.error, t('upload.start.failed', { name: f.name }))
+  if (submitted) {
+    message.success(t('upload.start.done', { n: submitted }))
     if (!uploads.ready.length) void router.push({ name: 'jobs' })
   }
 }
@@ -183,6 +162,10 @@ onMounted(() => {
         class="drop-zone"
         :class="{ dragging }"
         data-testid="drop-zone"
+        role="button"
+        tabindex="0"
+        @keydown.enter.prevent="fileInput?.click()"
+        @keydown.space.prevent="fileInput?.click()"
         @dragover.prevent="dragging = true"
         @dragleave.prevent="dragging = false"
         @drop.prevent="onDrop"
@@ -194,6 +177,8 @@ onMounted(() => {
           multiple
           :accept="ACCEPT_ATTRIBUTE"
           class="file-input"
+          tabindex="-1"
+          aria-hidden="true"
           data-testid="file-input"
           @change="onInputChange"
           @click.stop
@@ -326,7 +311,7 @@ onMounted(() => {
           type="primary"
           size="large"
           :disabled="!canStart"
-          :loading="submitting"
+          :loading="uploads.submitting"
           data-testid="start-job-button"
           @click="startJobs"
         >
@@ -355,6 +340,7 @@ onMounted(() => {
 }
 
 .drop-zone:hover,
+.drop-zone:focus-visible,
 .drop-zone.dragging {
   border-color: #18a058;
   background-color: rgba(24, 160, 88, 0.06);

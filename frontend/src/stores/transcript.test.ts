@@ -244,6 +244,22 @@ describe('transcript store: text edits', () => {
     expect(store.saveState).toBe('saved')
   })
 
+  it('shows text restored from a write queued behind a 409 (screen = what a retry sends)', async () => {
+    const store = await loaded()
+    applyOnServer('A', [{ op: 'edit_text', segment_id: 's1', text: 'elsewhere' }])
+    store.editText('s0', 'one')
+    const first = store.flush() // PATCH 1: will get the 409
+    store.editText('s1', 'two')
+    const second = store.flush() // PATCH 2: queued behind it, fails after the reload
+    await expect(first).rejects.toMatchObject({ status: 409 })
+    await expect(second).rejects.toMatchObject({ status: 409 })
+    expect(store.transcript!.segments.map((s) => s.text)).toEqual(['one', 'two'])
+    expect(store.hasUnsavedChanges).toBe(true)
+    await store.retrySave()
+    expect(server.get('A')!.segments.map((s) => s.text)).toEqual(['one', 'two'])
+    expect(store.saveState).toBe('saved')
+  })
+
   it('drops ops queued before a 409 instead of applying them to the reloaded version', async () => {
     const store = await loaded()
     applyOnServer('A', [{ op: 'edit_text', segment_id: 's1', text: 'elsewhere' }])
@@ -355,8 +371,8 @@ describe('transcript store: switching and leaving', () => {
   it('reset() aborts the audio download', async () => {
     api.getJob.mockResolvedValue({ id: 'job-A', upload_id: 'u1', options: { terms: [] } })
     let audioSignal: AbortSignal | undefined
-    api.fetchBlob.mockImplementation((_p: string, signal: AbortSignal) => {
-      audioSignal = signal
+    api.fetchBlob.mockImplementation((_p: string, options: { signal: AbortSignal }) => {
+      audioSignal = options.signal
       return new Promise(() => undefined)
     })
     const store = await loaded('A')
@@ -364,6 +380,31 @@ describe('transcript store: switching and leaving', () => {
     store.reset()
     expect(audioSignal!.aborted).toBe(true)
     expect(store.audioLoading).toBe(false)
+  })
+})
+
+describe('transcript store: audio', () => {
+  it('reports download progress and drops the Blob once the player has it', async () => {
+    api.getJob.mockResolvedValue({ id: 'job-A', upload_id: 'u1', options: { terms: [] } })
+    const body = deferred<{ blob: Blob; filename: null }>()
+    let progress: ((p: { loaded: number; total: number | null }) => void) | undefined
+    api.fetchBlob.mockImplementation((_p: string, options: { onProgress: typeof progress }) => {
+      progress = options.onProgress
+      return body.promise
+    })
+    const store = await loaded('A')
+    progress!({ loaded: 50, total: 200 })
+    expect(store.audioProgress).toEqual({ loaded: 50, total: 200 })
+    const blob = new Blob(['x'])
+    body.resolve({ blob, filename: null })
+    await settle()
+    expect(store.audio).toBe(blob)
+    expect(store.audioLoading).toBe(false)
+    expect(store.audioProgress).toBeNull()
+    store.releaseAudio(new Blob(['other'])) // a stale player cannot drop a newer download
+    expect(store.audio).toBe(blob)
+    store.releaseAudio(blob)
+    expect(store.audio).toBeNull()
   })
 })
 

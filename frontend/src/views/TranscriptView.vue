@@ -5,6 +5,11 @@
  * replace, term highlighting, correction review with "add as alias", opt-in LLM suggestions,
  * revert and export. Shortcuts: Space play/pause, ←/→ previous/next segment, Enter edit the
  * current segment, Esc stop editing, Ctrl+Enter split at the caret, Ctrl+F search.
+ *
+ * The dialogue is a virtual list (NVirtualList): only the rows in view are mounted, so hour-long
+ * transcripts stay responsive. Highlight pieces are memoised per segment (`PiecesMemo`), which
+ * keeps every row's props referentially stable: playback moving the active segment or a
+ * keystroke re-renders only the rows that actually changed.
  */
 import {
   NAlert,
@@ -14,11 +19,13 @@ import {
   NEmpty,
   NInput,
   NPopconfirm,
+  NProgress,
   NSpace,
   NSpin,
   NSwitch,
   NTag,
   NText,
+  NVirtualList,
   useDialog,
   useMessage,
 } from 'naive-ui'
@@ -51,8 +58,8 @@ import WaveformPlayer, { type WaveRegion } from '@/components/WaveformPlayer.vue
 import { useApiErrors } from '@/composables/useApiErrors'
 import { useTermSetsStore } from '@/stores/termSets'
 import { useTranscriptStore } from '@/stores/transcript'
-import { formatDateTime, formatDuration } from '@/utils/format'
-import { correctionMarks, pieces, searchMarks, termMarks, type Mark, type Piece } from '@/utils/highlight'
+import { formatBytes, formatDateTime, formatDuration } from '@/utils/format'
+import { PiecesMemo, type Piece } from '@/utils/highlight'
 import { findMatches } from '@/utils/search'
 import { findActiveSegment } from '@/utils/segments'
 
@@ -66,7 +73,7 @@ const store = useTranscriptStore()
 const termSets = useTermSetsStore()
 
 const player = ref<InstanceType<typeof WaveformPlayer> | null>(null)
-const listEl = ref<HTMLElement | null>(null)
+const list = ref<InstanceType<typeof NVirtualList> | null>(null)
 const searchInput = ref<InstanceType<typeof NInput> | null>(null)
 const currentTime = ref(0)
 const playing = ref(false)
@@ -110,7 +117,13 @@ const speakerList = computed(() => {
 
 const hasAudioSource = computed(() => !!store.job?.upload_id)
 const corrections = computed<Correction[]>(() => store.transcript?.corrections ?? [])
-const segmentTexts = computed(() => Object.fromEntries(segments.value.map((s) => [s.id, s.text])))
+/** Texts of the segments that have corrections (all the corrections panel needs). */
+const segmentTexts = computed(() => {
+  const ids = new Set(corrections.value.map((c) => c.segment_id))
+  const out: Record<string, string> = {}
+  for (const s of segments.value) if (ids.has(s.id)) out[s.id] = s.text
+  return out
+})
 
 function speakerOf(id: string): Speaker {
   return store.speakerMap.get(id) ?? { id, name: id, color: '#888888' }
@@ -157,6 +170,8 @@ async function replaceAll(): Promise<void> {
   const find = query.value.trim()
   if (!find) return
   const n = matches.value.length
+  // A replace changes text under an open editor; close it like split / merge do.
+  editingId.value = null
   try {
     // Case-insensitive, like the search that counted and highlighted the matches.
     await store.applyOps([{ op: 'replace', find, replace: replacement.value, ignore_case: true }])
@@ -174,26 +189,59 @@ const correctionsBySegment = computed(() => {
   return map
 })
 
+const NO_CORRECTIONS: Correction[] = []
+const piecesMemo = new PiecesMemo()
+const trimmedQuery = computed(() => query.value.trim())
+
+// Forget merged-away segments; everything when another transcript is shown.
+watch(
+  () => store.transcript?.id,
+  () => piecesMemo.clear(),
+)
+watch(segments, (segs) => piecesMemo.retain(segs.map((s) => s.id)))
+
+/** Called only for the rows in view; returns the same array while nothing changed for `seg`. */
 function piecesFor(seg: Segment): Piece[] {
-  const marks: Mark[] = [
-    ...termMarks(seg.text, store.terms),
-    ...correctionMarks(seg.text, correctionsBySegment.value.get(seg.id) ?? []),
-  ]
-  const q = query.value.trim()
-  if (q) {
-    marks.push(...searchMarks(seg.text, q))
-    const m = currentMatch.value
-    if (m && m.segmentId === seg.id) marks.push({ start: m.start, end: m.end, kind: 'current' })
-  }
-  return pieces(seg.text, marks)
+  const m = currentMatch.value
+  return piecesMemo.get(seg.id, {
+    text: seg.text,
+    terms: store.terms,
+    corrections: correctionsBySegment.value.get(seg.id) ?? NO_CORRECTIONS,
+    query: trimmedQuery.value,
+    current: m && m.segmentId === seg.id ? m : null,
+  })
 }
 
 // --- navigation ---------------------------------------------------------------------------------
 
+function rowElement(segmentId: string): HTMLElement | null {
+  return (
+    list.value
+      ?.getScrollContainer()
+      ?.querySelector<HTMLElement>(`[data-segment-id="${CSS.escape(segmentId)}"]`) ?? null
+  )
+}
+
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()))
+}
+
+/**
+ * Bring a segment to the middle of the list. A row outside the rendered window is not in the DOM:
+ * jump the virtual list to it first, then centre it once it has been rendered and measured.
+ */
 async function scrollTo(segmentId: string): Promise<void> {
   await nextTick()
-  const el = listEl.value?.querySelector<HTMLElement>(`[data-segment-id="${CSS.escape(segmentId)}"]`)
-  el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  let el = rowElement(segmentId)
+  let behavior: ScrollBehavior = 'smooth'
+  if (!el) {
+    list.value?.scrollTo({ key: segmentId, debounce: false })
+    await nextTick()
+    await nextFrame()
+    el = rowElement(segmentId)
+    behavior = 'auto'
+  }
+  el?.scrollIntoView({ block: 'center', behavior })
 }
 
 function seekTo(seg: Segment): void {
@@ -262,6 +310,8 @@ async function retrySave(): Promise<void> {
 }
 
 function startEdit(seg: Segment): void {
+  // A split / merge in flight may remove this segment: typing into it would be dropped silently.
+  if (structuralPending.value) return
   if (editingId.value && editingId.value !== seg.id) void store.flush()
   editingId.value = seg.id
 }
@@ -438,6 +488,23 @@ async function doExport(format: ExportFormat): Promise<void> {
   }
 }
 
+/** Estimated (minimum) row height for the virtual list; real heights are measured. */
+const ROW_MIN_HEIGHT = 60
+
+const audioPercent = computed(() => {
+  const p = store.audioProgress
+  return p?.total ? Math.min(100, Math.floor((p.loaded / p.total) * 100)) : null
+})
+
+const audioProgressText = computed(() => {
+  const p = store.audioProgress
+  if (!p || !p.loaded) return t('transcript.audioLoading')
+  const loaded = formatBytes(p.loaded)
+  return p.total
+    ? t('transcript.audioProgress', { loaded, total: formatBytes(p.total) })
+    : t('transcript.audioProgressUnknown', { loaded })
+})
+
 const SAVE_TYPE = { idle: 'default', saving: 'info', saved: 'success', error: 'error' } as const
 
 watch(
@@ -534,16 +601,29 @@ onBeforeUnmount(() => {
           </NAlert>
           <template v-else>
             <NAlert v-if="store.audioError" type="warning" :show-icon="false" class="gap">
-              {{ t('transcript.audioFailed') }}：{{ describe(store.audioError) }}
+              {{ t('common.labelDetail', { label: t('transcript.audioFailed'), detail: describe(store.audioError) }) }}
             </NAlert>
             <NAlert v-if="playerError" type="warning" :show-icon="false" class="gap">
-              {{ t('transcript.audioFailed') }}：{{ playerError }}
+              {{ t('common.labelDetail', { label: t('transcript.audioFailed'), detail: playerError }) }}
             </NAlert>
-            <NSpin :show="store.audioLoading" :description="t('transcript.audioLoading')">
+            <NSpin :show="store.audioLoading">
+              <template #description>
+                <div class="audio-progress" data-testid="audio-progress">
+                  <div>{{ audioProgressText }}</div>
+                  <NProgress
+                    v-if="audioPercent !== null"
+                    type="line"
+                    :percentage="audioPercent"
+                    :show-indicator="false"
+                    :height="4"
+                  />
+                </div>
+              </template>
               <WaveformPlayer
                 ref="player"
                 :blob="store.audio"
                 :regions="regions"
+                @loaded="(b: Blob) => store.releaseAudio(b)"
                 @time="(s: number) => (currentTime = s)"
                 @playing="(v: boolean) => (playing = v)"
                 @error="(m: string) => (playerError = m)"
@@ -590,8 +670,20 @@ onBeforeUnmount(() => {
               />
               <NText depth="3" data-testid="search-count">{{ matchCountText }}</NText>
               <NButtonGroup size="small">
-                <NButton :disabled="!matches.length" @click="stepMatch(-1)">↑</NButton>
-                <NButton :disabled="!matches.length" @click="stepMatch(1)">↓</NButton>
+                <NButton
+                  :disabled="!matches.length"
+                  :aria-label="t('proofread.prevMatch')"
+                  :title="t('proofread.prevMatch')"
+                  data-testid="search-prev"
+                  @click="stepMatch(-1)"
+                >↑</NButton>
+                <NButton
+                  :disabled="!matches.length"
+                  :aria-label="t('proofread.nextMatch')"
+                  :title="t('proofread.nextMatch')"
+                  data-testid="search-next"
+                  @click="stepMatch(1)"
+                >↓</NButton>
               </NButtonGroup>
               <NInput
                 v-model:value="replacement"
@@ -629,7 +721,7 @@ onBeforeUnmount(() => {
                   {{
                     saveConflict
                       ? t('proofread.conflictReloaded')
-                      : `${t('proofread.saveFailed')}：${describe(store.saveError)}`
+                      : t('common.labelDetail', { label: t('proofread.saveFailed'), detail: describe(store.saveError) })
                   }}
                 </span>
                 <NButton size="small" :loading="retrying" data-testid="save-retry" @click="retrySave">
@@ -639,29 +731,40 @@ onBeforeUnmount(() => {
             </NAlert>
             <NText depth="3" class="hint">{{ t('proofread.shortcuts') }}</NText>
             <NEmpty v-if="!segments.length" :description="t('transcript.empty')" />
-            <div v-else ref="listEl" class="dialogue" data-testid="transcript-segments">
-              <SegmentRow
-                v-for="(seg, i) in segments"
-                :key="seg.id"
-                :segment="seg"
-                :speaker="speakerOf(seg.speaker_id)"
-                :speakers="store.transcript.speakers"
-                :pieces="piecesFor(seg)"
-                :active="seg.id === activeId"
-                :editing="seg.id === editingId"
-                :is-last="i === segments.length - 1"
-                :busy="structuralPending"
-                @seek="seekTo(seg)"
-                @start-edit="startEdit(seg)"
-                @stop-edit="stopEdit"
-                @text="(v: string) => store.editText(seg.id, v)"
-                @split="(at: number) => split(seg, at)"
-                @merge="mergeNext(seg)"
-                @set-speaker="(sid: string) => setSpeaker(seg, sid)"
-                @new-speaker="newSpeakerFor(seg)"
-                @focus-correction="focusCorrection"
-              />
-            </div>
+            <NVirtualList
+              v-else
+              ref="list"
+              class="dialogue"
+              data-testid="transcript-segments"
+              :items="segments"
+              key-field="id"
+              :item-size="ROW_MIN_HEIGHT"
+              item-resizable
+            >
+              <template #default="{ item, index }: { item: Segment; index: number }">
+                <div :key="item.id" class="row">
+                  <SegmentRow
+                    :segment="item"
+                    :speaker="speakerOf(item.speaker_id)"
+                    :speakers="store.transcript.speakers"
+                    :pieces="piecesFor(item)"
+                    :active="item.id === activeId"
+                    :editing="item.id === editingId"
+                    :is-last="index === segments.length - 1"
+                    :busy="structuralPending"
+                    @seek="seekTo(item)"
+                    @start-edit="startEdit(item)"
+                    @stop-edit="stopEdit"
+                    @text="(v: string) => store.editText(item.id, v)"
+                    @split="(at: number) => split(item, at)"
+                    @merge="mergeNext(item)"
+                    @set-speaker="(sid: string) => setSpeaker(item, sid)"
+                    @new-speaker="newSpeakerFor(item)"
+                    @focus-correction="focusCorrection"
+                  />
+                </div>
+              </template>
+            </NVirtualList>
           </NCard>
 
           <div class="side">
@@ -798,10 +901,15 @@ onBeforeUnmount(() => {
 
 .dialogue {
   max-height: 65vh;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding-right: 4px;
+}
+
+/* Spacing inside the measured row (a flex gap would not be part of the item height). */
+.row {
+  padding: 0 4px 4px 0;
+}
+
+.audio-progress {
+  min-width: 200px;
+  text-align: center;
 }
 </style>

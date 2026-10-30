@@ -1,14 +1,18 @@
 /**
  * Two kinds of settings: browser-local (backend URL override, X-API-Key — localStorage) and
- * server-side (`GET/PUT /api/settings`; the DashScope key is write-only and comes back masked).
+ * server-side (`GET/PUT /api/settings`; the DashScope key is write-only and comes back masked),
+ * plus the local model list shown on the Settings page (downloads only on explicit request, rule 6).
  */
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
 import {
+  backendOrigin,
+  downloadLocalModel as requestModelDownload,
   getApiKey,
   getBackendUrlOverride,
   getSettings,
+  listLocalModels,
   readStorage,
   setApiKey as persistApiKey,
   setBackendUrl as persistBackendUrl,
@@ -18,6 +22,7 @@ import {
   writeStorage,
   type ApiError,
   type ConnectionTestResult,
+  type LocalModelOut,
   type ProviderName,
   type SettingsOut,
   type SettingsUpdate,
@@ -48,6 +53,10 @@ export const useSettingsStore = defineStore('settings', () => {
   const testing = ref(false)
   const lastMaxMb = ref<number | null>(storedMaxMb())
 
+  const localModels = ref<LocalModelOut[]>([])
+  const localModelsError = ref<ApiError | null>(null)
+  const anyDownloading = computed(() => localModels.value.some((m) => m.status === 'downloading'))
+
   /** Server default provider (settings table, else ASR_PROVIDER_DEFAULT). */
   const defaultProvider = computed<ProviderName>(() => server.value?.provider_default ?? 'cloud')
   const cloudMaxFileSizeMb = computed(() => lastMaxMb.value ?? DEFAULT_CLOUD_MAX_FILE_SIZE_MB)
@@ -62,6 +71,21 @@ export const useSettingsStore = defineStore('settings', () => {
     } finally {
       loading.value = false
     }
+  }
+
+  async function loadLocalModels(): Promise<void> {
+    try {
+      localModels.value = await listLocalModels()
+      localModelsError.value = null
+    } catch (e) {
+      localModelsError.value = toApiError(e)
+    }
+  }
+
+  /** Start a model download (explicit user action); throws ApiError. Refreshes the list. */
+  async function downloadLocalModel(key: string, mirror: boolean): Promise<void> {
+    await requestModelDownload(key, mirror)
+    await loadLocalModels()
   }
 
   /** Throws ApiError so the caller can show it. */
@@ -91,9 +115,26 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
-  /** Throws BackendUrlError (nothing saved) for a non-http(s) URL; `gpu:8000` gets `http://`. */
-  function setBackendUrl(url: string): void {
+  /**
+   * Whether saving `url` would send requests to another origin while an API key is stored: the
+   * key was meant for the current backend, so the Settings page offers to clear it first.
+   * Throws BackendUrlError for an invalid URL.
+   */
+  function keyAtRisk(url: string): boolean {
+    if (!apiKey.value) return false
+    return backendOrigin(url) !== backendOrigin(backendUrl.value)
+  }
+
+  /**
+   * Throws BackendUrlError (nothing saved) for a non-http(s) URL; `gpu:8000` gets `http://`.
+   * `clearApiKey` forgets the stored key in the same step (pointing at another host).
+   */
+  function setBackendUrl(url: string, options: { clearApiKey?: boolean } = {}): void {
     persistBackendUrl(url)
+    if (options.clearApiKey) {
+      persistApiKey(null)
+      apiKey.value = ''
+    }
     backendUrl.value = getBackendUrlOverride()
     server.value = null
     // A 401 from the previous backend says nothing about this one.
@@ -107,6 +148,10 @@ export const useSettingsStore = defineStore('settings', () => {
     health.clearUnauthorized()
   }
 
+  function clearApiKey(): void {
+    setApiKey('')
+  }
+
   return {
     backendUrl,
     apiKey,
@@ -118,10 +163,17 @@ export const useSettingsStore = defineStore('settings', () => {
     testing,
     defaultProvider,
     cloudMaxFileSizeMb,
+    localModels,
+    localModelsError,
+    anyDownloading,
     load,
+    loadLocalModels,
+    downloadLocalModel,
     save,
     testCloud,
+    keyAtRisk,
     setBackendUrl,
     setApiKey,
+    clearApiKey,
   }
 })

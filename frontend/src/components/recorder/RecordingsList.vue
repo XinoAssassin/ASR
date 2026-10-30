@@ -35,7 +35,7 @@ async function upload(rec: Recording): Promise<void> {
     await recorder.upload(rec.id)
     message.success(t('recorder.list.queued'))
   } catch (e) {
-    message.error(`${t('recorder.list.failed')}：${(e as Error).message}`)
+    message.error(t('common.labelDetail', { label: t('recorder.list.failed'), detail: (e as Error).message }))
   }
 }
 
@@ -43,7 +43,7 @@ async function reveal(rec: Recording): Promise<void> {
   try {
     await recorder.reveal(rec.id)
   } catch (e) {
-    message.error(`${t('recorder.list.failed')}：${(e as Error).message}`)
+    message.error(t('common.labelDetail', { label: t('recorder.list.failed'), detail: (e as Error).message }))
   }
 }
 

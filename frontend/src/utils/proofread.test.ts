@@ -2,7 +2,15 @@ import { describe, expect, it } from 'vitest'
 
 import type { Correction, Segment } from '@/api/endpoints'
 
-import { correctionContext, correctionMarks, pieces, searchMarks, termMarks } from './highlight'
+import {
+  correctionContext,
+  correctionMarks,
+  occurrences,
+  pieces,
+  PiecesMemo,
+  searchMarks,
+  termMarks,
+} from './highlight'
 import { findMatches, withAlias } from './search'
 
 const corr = (over: Partial<Correction>): Correction =>
@@ -73,6 +81,20 @@ describe('search and aliases', () => {
     expect(findMatches([seg('a', 'x')], '  ')).toEqual([])
   })
 
+  it('keeps indices right where lower-casing changes the length, and treats the query literally', () => {
+    // 'İ'.toLowerCase() is two code units: mapping lower-cased indices back used to shift marks.
+    const text = 'İİ abc ABC'
+    expect(occurrences(text, 'abc')).toEqual([
+      { start: 3, end: 6 },
+      { start: 7, end: 10 },
+    ])
+    expect(searchMarks(text, 'ABC').map((m) => text.slice(m.start, m.end))).toEqual(['abc', 'ABC'])
+    expect(findMatches([seg('a', 'İİ abc')], 'abc')).toEqual([{ segmentId: 'a', start: 3, end: 6 }])
+    expect(occurrences('a.b a+b (x)', 'a+b')).toEqual([{ start: 4, end: 7 }])
+    expect(occurrences('a.b a+b (x)', '(x)')).toEqual([{ start: 8, end: 11 }])
+    expect(occurrences('Ab ab', 'ab', false)).toEqual([{ start: 3, end: 5 }])
+  })
+
   it('adds an alias to an existing term or creates the term', () => {
     const terms = [{ term: 'Townfall', weight: 4, aliases: ['汤泡'], blacklist: [] }]
     expect(withAlias(terms, 'townfall', '汤炮')[0]!.aliases).toEqual(['汤泡', '汤炮'])
@@ -83,5 +105,43 @@ describe('search and aliases', () => {
       aliases: ['基金岭'],
       blacklist: [],
     })
+  })
+})
+
+describe('PiecesMemo', () => {
+  const base = { terms: ['Townfall'], corrections: [] as Correction[], query: '', current: null }
+
+  it('returns the same array while the inputs are unchanged', () => {
+    const memo = new PiecesMemo()
+    const a = memo.get('s', { ...base, text: '玩Townfall' })
+    expect(a.map((p) => p.kinds)).toEqual([[], ['term']])
+    // a fresh but equal terms array / corrections array does not invalidate
+    expect(memo.get('s', { ...base, terms: ['Townfall'], corrections: [], text: '玩Townfall' })).toBe(a)
+    expect(memo.get('s', { ...base, text: '玩Townfall!' })).not.toBe(a)
+  })
+
+  it('layers search marks on top and keeps base pieces for segments without hits', () => {
+    const memo = new PiecesMemo()
+    const plain = memo.get('s', { ...base, text: '玩Townfall' })
+    expect(memo.get('s', { ...base, text: '玩Townfall', query: 'zzz' })).toBe(plain)
+    const hit = memo.get('s', { ...base, text: '玩Townfall', query: 'town' })
+    expect(hit.find((p) => p.kinds.includes('search'))?.text).toBe('Town')
+    expect(memo.get('s', { ...base, text: '玩Townfall', query: 'town' })).toBe(hit)
+    const current = memo.get('s', { ...base, text: '玩Townfall', query: 'town', current: { start: 1, end: 5 } })
+    expect(current).not.toBe(hit)
+    expect(current.find((p) => p.kinds.includes('current'))?.text).toBe('Town')
+    expect(memo.get('s', { ...base, text: '玩Townfall' })).toBe(plain)
+  })
+
+  it('invalidates on a correction change and forgets removed segments', () => {
+    const memo = new PiecesMemo()
+    const text = 'Townfall很好玩'
+    const c = corr({ segment_id: 's', status: 'suggested', before: '很好玩', after: '真好玩', offset: 8 })
+    const a = memo.get('s', { ...base, text, corrections: [c] })
+    expect(memo.get('s', { ...base, text, corrections: [{ ...c }] })).toBe(a)
+    expect(memo.get('s', { ...base, text, corrections: [{ ...c, status: 'rejected' }] })).not.toBe(a)
+    memo.get('t', { ...base, text: 'x' })
+    memo.retain(['t'])
+    expect(memo.size).toBe(1)
   })
 })

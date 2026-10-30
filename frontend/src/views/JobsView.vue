@@ -11,6 +11,7 @@ import {
   NTag,
   NText,
   NTooltip,
+  type ButtonProps,
   type DataTableColumns,
   useDialog,
   useMessage,
@@ -74,6 +75,11 @@ async function run(action: () => Promise<void>, context: string): Promise<void> 
 
 function confirmDelete(job: JobOut): void {
   const deleteAudio = ref(false)
+  // Extra attributes fall through to the button element; ButtonProps does not list data-*.
+  const confirmButton: ButtonProps & { 'data-testid': string } = {
+    type: 'error',
+    'data-testid': 'delete-confirm',
+  }
   dialog.warning({
     title: t('jobs.deleteTitle'),
     content: () =>
@@ -93,7 +99,7 @@ function confirmDelete(job: JobOut): void {
       ]),
     positiveText: t('common.delete'),
     negativeText: t('common.cancel'),
-    positiveButtonProps: { type: 'error', 'data-testid': 'delete-confirm' } as never,
+    positiveButtonProps: confirmButton,
     onPositiveClick: async () => {
       try {
         await jobs.remove(job.id, deleteAudio.value)

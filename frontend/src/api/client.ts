@@ -182,6 +182,16 @@ export function setBackendUrl(url: string | null): void {
   api = createApiClient()
 }
 
+/**
+ * Origin (`scheme://host:port`) requests go to for a backend URL as stored ('' = this page's
+ * origin, or the desktop default). Throws BackendUrlError for a URL `setBackendUrl` would reject.
+ */
+export function backendOrigin(url: string | null): string {
+  const effective = normalizeBackendUrl(url) || getDefaultBackendUrl()
+  const base = typeof window !== 'undefined' && window.location ? window.location.href : 'http://localhost/'
+  return new URL(effective || '/', base).origin
+}
+
 /** The localStorage override, normalised (empty when config.js / same origin applies). */
 export function getBackendUrlOverride(): string {
   return safeBackendUrl(readStorage(STORAGE_KEYS.backendUrl))

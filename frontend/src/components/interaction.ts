@@ -30,7 +30,8 @@ export function isImeKey(e: Pick<KeyLike, 'isComposing' | 'keyCode'>): boolean {
 
 /**
  * Elements that handle keys themselves: text fields, buttons, links, ARIA widgets, anything
- * focusable via Tab, and Naive UI's select / dropdown / popselect menus.
+ * focusable via Tab (except containers marked `data-global-keys`, such as a focused transcript
+ * segment, which keep Space / arrows for the page), and Naive UI's select / dropdown menus.
  */
 export const INTERACTIVE_SELECTOR = [
   'input',
@@ -51,7 +52,7 @@ export const INTERACTIVE_SELECTOR = [
   '[role="menu"]',
   '[role="menuitem"]',
   '[role="tab"]',
-  '[tabindex]:not([tabindex="-1"])',
+  '[tabindex]:not([tabindex="-1"]):not([data-global-keys])',
   '.n-base-selection',
   '.n-base-select-menu',
   '.n-dropdown-menu',
@@ -152,4 +153,22 @@ export function splitOffset(text: string, selectionStart: number | null | undefi
   if (selectionStart == null || selectionStart < 0) return null
   const at = utf16ToCodePoint(text, selectionStart)
   return at > 0 && at < codePointLength(text) ? at : null
+}
+
+// --- inline editor -----------------------------------------------------------------------------
+
+/**
+ * Editor text after the segment's text changed underneath it. While editing, the store echoes
+ * each keystroke back (`text === lastEmitted`): keep the draft. Any other text is a change made
+ * elsewhere (replace all, an accepted correction, a 409 reload): show it, or the next keystroke
+ * would send the stale draft and silently undo it.
+ */
+export function syncedDraft(state: {
+  editing: boolean
+  text: string
+  draft: string
+  lastEmitted: string | null
+}): string {
+  if (!state.editing || state.text !== state.lastEmitted) return state.text
+  return state.draft
 }

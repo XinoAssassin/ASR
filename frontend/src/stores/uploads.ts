@@ -7,6 +7,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
 import {
+  createJob,
   isAbortError,
   readStorage,
   registerUpload,
@@ -15,11 +16,12 @@ import {
   writeStorage,
   type ApiError,
   type ChannelsOption,
+  type Term,
   type UploadOut,
   type UploadSession,
 } from '@/api'
 import { isAcceptedFile } from '@/utils/audio'
-import { defaultJobForm, type JobFormState } from '@/utils/jobForm'
+import { buildJobCreate, defaultJobForm, type JobFormState } from '@/utils/jobForm'
 
 const RECENT_DIRS_KEY = 'asr.recentDirs'
 const LAST_DIR_KEY = 'asr.lastTargetDir'
@@ -42,6 +44,11 @@ export interface QueueItem {
 
 /** Statuses that "Upload" (re)starts; `pendingCount` counts exactly these. */
 const STARTABLE: readonly QueueStatus[] = ['pending', 'error', 'cancelled']
+
+export interface JobStartFailure {
+  name: string
+  error: ApiError
+}
 
 export interface ReadyUpload {
   upload: UploadOut
@@ -212,6 +219,38 @@ export const useUploadsStore = defineStore('uploads', () => {
     queue.value = queue.value.filter((i) => i.status !== 'done')
   }
 
+  const submitting = ref(false)
+
+  /**
+   * Create one job per ready upload with the shared form (+ `terms` parsed from the extra-terms
+   * box). Submitted uploads leave the ready list; failures stay there and are returned.
+   */
+  async function startJobs(terms: Term[]): Promise<{ submitted: number; failures: JobStartFailure[] }> {
+    if (submitting.value) return { submitted: 0, failures: [] }
+    submitting.value = true
+    const submitted: string[] = []
+    const failures: JobStartFailure[] = []
+    try {
+      for (const entry of [...ready.value]) {
+        const body = buildJobCreate(
+          jobForm.value,
+          { uploadId: entry.upload.id, channels: entry.channels, streamIndex: entry.streamIndex },
+          terms,
+        )
+        try {
+          await createJob(body)
+          submitted.push(entry.upload.id)
+        } catch (e) {
+          failures.push({ name: entry.upload.original_name, error: toApiError(e) })
+        }
+      }
+    } finally {
+      submitting.value = false
+    }
+    if (submitted.length) clearSubmitted(submitted)
+    return { submitted: submitted.length, failures }
+  }
+
   return {
     targetDir,
     recentDirs,
@@ -230,5 +269,7 @@ export const useUploadsStore = defineStore('uploads', () => {
     register,
     removeReady,
     clearSubmitted,
+    submitting,
+    startJobs,
   }
 })

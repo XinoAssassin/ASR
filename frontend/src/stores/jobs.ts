@@ -9,7 +9,6 @@ import { computed, ref } from 'vue'
 
 import {
   cancelJob,
-  createJob,
   deleteJob,
   getUpload,
   isTerminal,
@@ -18,7 +17,6 @@ import {
   toApiError,
   watchJob,
   type ApiError,
-  type JobCreate,
   type JobOut,
   type JobStatus,
   type JobStream,
@@ -40,6 +38,11 @@ export const useJobsStore = defineStore('jobs', () => {
   const uploads = ref<Record<string, UploadOut | null>>({})
 
   const streams = new Map<string, JobStream>()
+  /**
+   * Jobs whose stream failed for good (401, 404, a proxy answering HTML): refreshed by polling
+   * the list instead of reopening a stream that would fail the same way.
+   */
+  const failed = new Set<string>()
   let pollTimer: ReturnType<typeof setInterval> | null = null
   let active = false
   /** Incremented per list request; only the latest one may write the list. */
@@ -97,23 +100,31 @@ export const useJobsStore = defineStore('jobs', () => {
     streams.delete(jobId)
   }
 
+  function streamFailed(jobId: string): void {
+    stopStream(jobId)
+    failed.add(jobId)
+    if (active) syncLive()
+  }
+
   /** Open / close streams so that they match the non-terminal jobs on this page. */
   function syncLive(): void {
     const live = items.value.filter((j) => !isTerminal(j.status)).map((j) => j.id)
     for (const id of [...streams.keys()]) if (!live.includes(id)) stopStream(id)
+    for (const id of [...failed]) if (!live.includes(id)) failed.delete(id)
     for (const id of live) {
       if (streams.size >= MAX_STREAMS) break
-      if (streams.has(id)) continue
+      if (streams.has(id) || failed.has(id)) continue
       const stream = watchJob(id, {
         onJob: (job) => {
           upsert(job)
           if (isTerminal(job.status)) stopStream(job.id)
         },
-        onError: () => stopStream(id),
+        onError: () => streamFailed(id),
       })
       streams.set(id, stream)
-      stream.done.catch(() => stopStream(id))
+      stream.done.catch(() => streamFailed(id))
     }
+    // Over the stream cap, or a stream that failed: those jobs are kept current by polling.
     const overflow = live.some((id) => !streams.has(id))
     if (overflow && !pollTimer) pollTimer = setInterval(() => void load(), POLL_MS)
     if (!overflow && pollTimer) {
@@ -132,6 +143,7 @@ export const useJobsStore = defineStore('jobs', () => {
   function stopLive(): void {
     active = false
     for (const id of [...streams.keys()]) stopStream(id)
+    failed.clear() // a new visit tries the streams again
     if (pollTimer) clearInterval(pollTimer)
     pollTimer = null
   }
@@ -151,10 +163,6 @@ export const useJobsStore = defineStore('jobs', () => {
     status.value = s
     page.value = 1
     await load()
-  }
-
-  async function create(body: JobCreate): Promise<JobOut> {
-    return createJob(body)
   }
 
   async function cancel(jobId: string): Promise<void> {
@@ -189,7 +197,6 @@ export const useJobsStore = defineStore('jobs', () => {
     setPage,
     setPageSize,
     setStatus,
-    create,
     cancel,
     retry,
     remove,

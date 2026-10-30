@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  syncedDraft,
   INTERACTIVE_SELECTOR,
   clampMatchIndex,
   isImeKey,
@@ -34,7 +35,7 @@ describe('isImeKey', () => {
 
 describe('isInteractiveTarget', () => {
   it('covers Naive selects / menus and tabbable widgets', () => {
-    for (const part of ['.n-base-selection', '.n-dropdown-menu', '[tabindex]:not([tabindex="-1"])']) {
+    for (const part of ['.n-base-selection', '.n-dropdown-menu', '[tabindex]:not([tabindex="-1"]):not([data-global-keys])']) {
       expect(INTERACTIVE_SELECTOR.split(', ')).toContain(part)
       expect(isInteractiveTarget(el([part]))).toBe(true)
     }
@@ -140,5 +141,23 @@ describe('isPopupOpen', () => {
       isPopupOpen(root([[1, 'n-base-select-menu fade-in-scale-up-transition-leave-active']]) as never),
     ).toBe(false)
     expect(isPopupOpen(root([[0, 'n-popconfirm'], [1, 'n-dropdown-menu']]) as never)).toBe(true)
+  })
+})
+
+describe('syncedDraft', () => {
+  const base = { editing: true, text: 'abc', draft: 'abc', lastEmitted: 'abc' }
+
+  it('keeps the draft while the store echoes the typed text back', () => {
+    expect(syncedDraft({ ...base, draft: 'abcd', text: 'abc', lastEmitted: 'abc' })).toBe('abcd')
+    expect(syncedDraft({ ...base, draft: 'abcd', text: 'abcd', lastEmitted: 'abcd' })).toBe('abcd')
+  })
+
+  it('takes a change made elsewhere while the editor is open (replace all, review, 409 reload)', () => {
+    expect(syncedDraft({ ...base, draft: 'abc', text: 'XYZ', lastEmitted: 'abc' })).toBe('XYZ')
+    expect(syncedDraft({ ...base, draft: 'abc', text: 'XYZ', lastEmitted: null })).toBe('XYZ')
+  })
+
+  it('always follows the segment when not editing', () => {
+    expect(syncedDraft({ ...base, editing: false, draft: 'old', text: 'new', lastEmitted: 'new' })).toBe('new')
   })
 })

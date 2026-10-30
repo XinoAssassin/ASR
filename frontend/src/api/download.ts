@@ -13,7 +13,42 @@ export interface BlobResult {
   filename: string | null
 }
 
-export async function fetchBlob(path: string, signal?: AbortSignal): Promise<BlobResult> {
+export interface DownloadProgress {
+  loaded: number
+  /** From Content-Length; null when the server did not send one. */
+  total: number | null
+}
+
+export interface FetchBlobOptions {
+  signal?: AbortSignal
+  /** Called as the body arrives (read through `response.body`, so progress can be shown). */
+  onProgress?: (progress: DownloadProgress) => void
+}
+
+async function readBody(response: Response, onProgress: FetchBlobOptions['onProgress']): Promise<Blob> {
+  const type = response.headers.get('content-type') ?? ''
+  if (!onProgress || !response.body) return response.blob()
+  const length = Number(response.headers.get('content-length'))
+  const total = Number.isFinite(length) && length > 0 ? length : null
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let loaded = 0
+  onProgress({ loaded, total })
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    chunks.push(value)
+    loaded += value.byteLength
+    onProgress({ loaded, total })
+  }
+  return new Blob(chunks as BlobPart[], { type })
+}
+
+export async function fetchBlob(
+  path: string,
+  options: AbortSignal | FetchBlobOptions = {},
+): Promise<BlobResult> {
+  const { signal, onProgress } = options instanceof AbortSignal ? { signal: options } : options
   let response: Response
   try {
     response = await fetch(apiUrl(path), { headers: authHeaders(), signal })
@@ -25,7 +60,12 @@ export async function fetchBlob(path: string, signal?: AbortSignal): Promise<Blo
     throw await errorFromResponse(response)
   }
   notifyAuthorized()
-  const blob = await response.blob()
+  let blob: Blob
+  try {
+    blob = await readBody(response, onProgress)
+  } catch (e) {
+    throw toApiError(e)
+  }
   return {
     blob,
     filename: parseContentDispositionFilename(response.headers.get('content-disposition')),

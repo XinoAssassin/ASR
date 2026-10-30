@@ -14,6 +14,7 @@ function stubWindow(extra: Record<string, unknown> = {}, stored: Record<string, 
 
 stubWindow() // client.ts builds its typed client at import time
 const {
+  backendOrigin,
   getBackendUrl,
   getBackendUrlOverride,
   getDefaultBackendUrl,
@@ -110,5 +111,17 @@ describe('authorized notifications', () => {
     notifyAuthorized()
     expect(n).toBe(2)
     off()
+  })
+})
+
+describe('backendOrigin', () => {
+  it('resolves the effective backend origin (empty = this page / config.js)', () => {
+    stubWindow({ location: { href: 'http://spa.local:5173/settings' } })
+    expect(backendOrigin('')).toBe('http://spa.local:5173')
+    expect(backendOrigin('gpu:8000')).toBe('http://gpu:8000')
+    expect(backendOrigin('https://asr.example.com/base/')).toBe('https://asr.example.com')
+    stubWindow({ location: { href: 'http://spa.local/' }, __ASR_CONFIG__: { backendUrl: 'http://cfg:9000' } })
+    expect(backendOrigin(null)).toBe('http://cfg:9000')
+    expect(() => backendOrigin('ftp://x')).toThrow(BackendUrlError)
   })
 })

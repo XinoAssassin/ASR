@@ -6,6 +6,7 @@ import type { UploadSession } from '@/api'
 const api = vi.hoisted(() => ({
   uploadFileChunked: vi.fn(),
   registerUpload: vi.fn(),
+  createJob: vi.fn(),
 }))
 
 vi.mock('@/api', async () => {
@@ -85,5 +86,29 @@ describe('uploads store', () => {
     store.addFiles([wav()])
     expect(store.queue).toHaveLength(1)
     expect(store.queue[0]!.status).toBe('pending')
+  })
+})
+
+describe('uploads store: starting jobs', () => {
+  it('creates one job per ready upload, keeps the failed ones ready and reports them', async () => {
+    const store = useUploadsStore()
+    const upload = (id: string) => ({ id, original_name: `${id}.wav` }) as never
+    store.ready = [
+      { upload: upload('u1'), source: 'uploaded', channels: 'auto', streamIndex: 0 },
+      { upload: upload('u2'), source: 'uploaded', channels: 'auto', streamIndex: 0 },
+    ] as never
+    api.createJob.mockReset()
+    api.createJob.mockImplementationOnce(async () => ({ id: 'j1' }))
+    api.createJob.mockImplementationOnce(async () => {
+      throw new Error('boom')
+    })
+    const result = await store.startJobs([{ term: 'Qwen', weight: 3, aliases: [], blacklist: [] }])
+    expect(result.submitted).toBe(1)
+    expect(result.failures.map((f) => f.name)).toEqual(['u2.wav'])
+    expect(store.ready.map((r) => r.upload.id)).toEqual(['u2'])
+    expect(store.submitting).toBe(false)
+    const body = api.createJob.mock.calls[0]![0] as { upload_id: string; extra_terms: unknown[] }
+    expect(body.upload_id).toBe('u1')
+    expect(body.extra_terms).toHaveLength(1)
   })
 })

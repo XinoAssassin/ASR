@@ -29,7 +29,7 @@ const props = defineProps<{ termSets: TermSetOut[]; termSetsError: string | null
 const { t } = useI18n()
 
 const termSetOptions = computed(() =>
-  props.termSets.map((s) => ({ label: `${s.name}（${s.terms.length}）`, value: s.id })),
+  props.termSets.map((s) => ({ label: t('common.withNote', { text: s.name, note: s.terms.length }), value: s.id })),
 )
 
 const parsed = computed(() => parseTerms(form.value.extraTerms))

@@ -11,7 +11,7 @@ export function useApiErrors() {
   function describe(e: unknown): string {
     const err = toApiError(e)
     const withDetail = (key: string): string =>
-      err.detail ? `${t(key)}：${err.detail}` : t(key)
+      err.detail ? t('common.labelDetail', { label: t(key), detail: err.detail }) : t(key)
     switch (err.status) {
       case 0:
         return t('errors.network')
@@ -41,7 +41,7 @@ export function useApiErrors() {
   function notify(e: unknown, context?: string): void {
     if (isAbortError(e)) return
     const text = describe(e)
-    message.error(context ? `${context}：${text}` : text, { duration: 6000, closable: true })
+    message.error(context ? t('common.labelDetail', { label: context, detail: text }) : text, { duration: 6000, closable: true })
   }
 
   return { describe, notify }
