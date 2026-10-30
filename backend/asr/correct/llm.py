@@ -2,9 +2,11 @@
 
 Opt-in and never auto-applied: the model sees batches of <= 20 consecutive segments with the
 term glossary (pinyin for Chinese terms) and context, must return the same segment ids, and may only
-fix mis-heard words. A segment whose suggestion changes more than ``MAX_EDIT_RATIO`` of its text is
-discarded; edits that write a glossary term do not count towards that limit. Each changed span
-becomes a ``Correction(source="llm", status="suggested")``.
+fix mis-heard words. The rewrite is diffed on tokens (whole Latin words, single CJK characters,
+whitespace runs); each change weighs ``max(len(before), len(after))`` code points, and a segment
+whose changes exceed ``MAX_EDIT_RATIO`` of its text is discarded. Only a change that writes a
+glossary term (its ``after`` is the term, give or take ``TERM_SLACK`` characters) is exempt. Each
+changed span becomes a ``Correction(source="llm", status="suggested")``.
 
 Transport: DashScope OpenAI-compatible chat (``{endpoint}/compatible-mode/v1/chat/completions``)
 with the same key and allow-listed endpoint as the cloud ASR provider.
@@ -14,6 +16,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import re
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -24,6 +27,7 @@ from asr.providers.cloud import is_allowed_endpoint
 
 BATCH_SIZE = 20
 MAX_EDIT_RATIO = 0.15
+TERM_SLACK = 2  # characters an exempt term change may carry besides the term itself
 DEFAULT_LLM_MODEL = "qwen-plus"
 
 SYSTEM_PROMPT = """你是会议转写的校对助手。输入是语音识别结果，按 id 给出若干句子。
@@ -51,65 +55,107 @@ def glossary(terms: Sequence[Term]) -> str:
     return "\n".join(lines)
 
 
-def edit_ratio(old: str, new: str) -> float:
-    return 1.0 - difflib.SequenceMatcher(None, old, new, autojunk=False).ratio()
+def _writes_term(after: str, names: Sequence[str]) -> bool:
+    """``after`` (whitespace-stripped) is a glossary term, give or take ``TERM_SLACK`` chars."""
+    text = after.strip().casefold()
+    return any(name in text and len(text) - len(name) <= TERM_SLACK for name in names)
 
 
 def unsanctioned_ratio(old: str, corrections: Sequence[Correction], terms: Sequence[Term]) -> float:
     """Share of ``old`` changed by edits that do *not* write a glossary term.
 
-    Replacing a mis-heard span with a term ("汤泡" -> "Townfall") is the point of the pass and is
-    exempt; anything else counts towards ``MAX_EDIT_RATIO``.
+    Each change weighs ``max(len(before), len(after))``, so insertions count in full. Replacing a
+    mis-heard span with a term ("汤泡" -> "Townfall") is the point of the pass and is exempt;
+    anything else counts towards ``MAX_EDIT_RATIO``.
     """
-    names = [t.term.casefold() for t in terms if t.term]
+    names = [t.term.strip().casefold() for t in terms if t.term.strip()]
     changed = sum(
-        max(len(c.before), 1)
-        for c in corrections
-        if not any(name in c.after.casefold() for name in names)
+        max(len(c.before), len(c.after), 1) for c in corrections if not _writes_term(c.after, names)
     )
     return changed / max(len(old), 1)
+
+
+# Latin words (letters / digits, with "-" or "." inside), whitespace runs, any other single char.
+_TOKEN = re.compile(r"[0-9A-Za-zÀ-ɏ](?:[0-9A-Za-zÀ-ɏ.\-]*[0-9A-Za-zÀ-ɏ])?|\s+|.", re.DOTALL)
+
+
+def _tokens(text: str) -> list[str]:
+    return _TOKEN.findall(text)
 
 
 def _squash(text: str) -> str:
     return "".join(text.split())
 
 
-def _trim_padding(before: str, after: str) -> str:
-    """Drop whitespace the model put around a replacement when the original had none there."""
-    if not before[:1].isspace():
-        after = after.lstrip()
-    if not before[-1:].isspace():
-        after = after.rstrip()
+def _latin(ch: str) -> bool:
+    return ch.isascii() and ch.isalnum()
+
+
+def _trim(old: str, i1: int, i2: int, after: str) -> str:
+    """Drop whitespace the model put at the edges of a replacement for ``old[i1:i2]``.
+
+    Edge whitespace is kept when ``before`` had it there too, or when it is needed to separate
+    two Latin words and the neighbouring original text has no space there.
+    """
+    before = old[i1:i2]
+    core = after.strip()
+    if not core:
+        return after
+    if after[:1].isspace() and not before[:1].isspace():
+        left = old[i1 - 1 : i1]
+        if left.isspace() or not (_latin(left) and _latin(core[0])):
+            after = after.lstrip()
+    if after[-1:].isspace() and not before[-1:].isspace():
+        right = old[i2 : i2 + 1]
+        if right.isspace() or not (_latin(right) and _latin(core[-1])):
+            after = after.rstrip()
     return after
 
 
 def diff_corrections(segment_id: str, old: str, new: str) -> list[Correction]:
-    """Changed spans of ``old`` -> ``new``; edits separated by <= 1 equal char are joined.
+    """Changed spans of ``old`` -> ``new``, diffed on tokens (whole Latin words, single CJK
+    characters, whitespace runs); edits separated by <= 1 equal token are joined.
 
-    Whitespace-only edits are dropped (models like to space out Latin words in Chinese text).
+    Whitespace shared by both ends of a span is left out of it; whitespace-only edits are dropped
+    (models like to space out Latin words in Chinese text).
     """
+    a, b = _tokens(old), _tokens(new)
+    a_pos = [0]
+    for t in a:
+        a_pos.append(a_pos[-1] + len(t))
+    b_pos = [0]
+    for t in b:
+        b_pos.append(b_pos[-1] + len(t))
     spans: list[list[int]] = []
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
-        None, old, new, autojunk=False
-    ).get_opcodes():
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
         if tag == "equal":
             continue
         if spans and i1 - spans[-1][1] <= 1:
             spans[-1][1], spans[-1][3] = i2, j2
         else:
             spans.append([i1, i2, j1, j2])
-    return [
-        Correction(
-            segment_id=segment_id,
-            source="llm",
-            before=old[i1:i2],
-            after=_trim_padding(old[i1:i2], new[j1:j2]),
-            offset=i1,
-            status="suggested",
+    out = []
+    for i1, i2, j1, j2 in spans:
+        # Whitespace tokens both sides start / end with are context, not part of the change.
+        while i1 < i2 and j1 < j2 and a[i1] == b[j1] and a[i1].isspace():
+            i1, j1 = i1 + 1, j1 + 1
+        while i1 < i2 and j1 < j2 and a[i2 - 1] == b[j2 - 1] and a[i2 - 1].isspace():
+            i2, j2 = i2 - 1, j2 - 1
+        c1, c2 = a_pos[i1], a_pos[i2]
+        before, after = old[c1:c2], new[b_pos[j1] : b_pos[j2]]
+        if _squash(before) == _squash(after):
+            continue
+        out.append(
+            Correction(
+                segment_id=segment_id,
+                source="llm",
+                before=before,
+                after=_trim(old, c1, c2, after),
+                offset=c1,
+                status="suggested",
+            )
         )
-        for i1, i2, j1, j2 in spans
-        if _squash(old[i1:i2]) != _squash(new[j1:j2])
-    ]
+    return out
 
 
 def chat_url(api_key: str, endpoint: str) -> str:

@@ -121,3 +121,22 @@ def test_render_alias_and_bad_format(transcript: Transcript) -> None:
     assert render is write
     with pytest.raises(ValueError, match="unsupported"):
         write(transcript, "docx")  # type: ignore[arg-type]
+
+
+def test_speaker_names_with_line_breaks_stay_on_one_line() -> None:
+    t = Transcript(
+        provider="cloud",
+        speakers=[
+            Speaker(
+                id="SPEAKER_00", name="张三\n\n2\n00:00:00,000 --> 00:00:09,000", color="#1f77b4"
+            )
+        ],
+        segments=[Segment(id="a", speaker_id="SPEAKER_00", start=0.0, end=1.0, text="你好")],
+    )
+    assert (
+        write(t, "txt") == "[00:00:00.0 - 00:00:01.0] 张三 2 00:00:00,000 --> 00:00:09,000: 你好\n"
+    )
+    assert write(t, "srt").count("\n") == 3  # index, span, one text line
+    vtt = write(t, "vtt")
+    assert "<v 张三 2 00:00:00,000 --&gt; 00:00:09,000>你好" in vtt
+    assert vtt.count("\n") == 4

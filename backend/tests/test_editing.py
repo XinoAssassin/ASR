@@ -8,8 +8,9 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from asr.correct import correct_segments
 from asr.editing import EditError, EditState
-from asr.providers.base import Correction, Segment, Speaker, Word
+from asr.providers.base import Correction, CorrectionOptions, Segment, Speaker, Term, Word
 from server.config import EnvSettings
 from tests.conftest import EnvFactory
 from tests.test_jobs import FakeProvider, add_upload, install, wait_status
@@ -96,7 +97,9 @@ def test_merge_speakers() -> None:
 
 
 def test_review_correction() -> None:
-    applied = Correction(id="c1", segment_id="a", source="term", before="汤泡", after="Townfall")
+    applied = Correction(
+        id="c1", segment_id="a", source="term", before="汤泡", after="Townfall", offset=0
+    )
     suggested = Correction(
         id="c2",
         segment_id="a",
@@ -110,11 +113,151 @@ def test_review_correction() -> None:
     st.original_text["a"] = "汤泡很好玩"
     st.review_correction("c2", "accept")
     assert st.segments[0].text == "Townfall真好玩"
+    assert st.corrections[0].offset == 0  # before the accepted change: unmoved
     st.review_correction("c1", "reject")
     assert st.segments[0].text == "汤泡真好玩"
     assert [c.status for c in st.corrections] == ["rejected", "accepted"]
     with pytest.raises(EditError, match="already reviewed"):
         st.review_correction("c1", "accept")
+
+
+def _corrected(text: str, terms: list[Term] | None = None) -> EditState:
+    """State of one segment ``a`` after the [5b] L1 pass over ``text``."""
+    raw = [seg("a", 0.0, 1.0, text)]
+    out, corrections = correct_segments(raw, terms or [], CorrectionOptions())
+    st = state(*out, corrections=corrections)
+    st.original_text["a"] = text
+    return st
+
+
+def test_reject_repetition_restores_at_its_offset() -> None:
+    raw = "这个问题我觉得这个这个这个这个这个很好"
+    st = _corrected(raw)
+    assert st.segments[0].text == "这个问题我觉得这个很好"
+    (c,) = st.corrections
+    assert c.offset == 7
+    st.review_correction(c.id, "reject")
+    assert st.segments[0].text == raw and not st.segments[0].edited
+
+
+def test_reject_term_restores_the_corrected_occurrence_only() -> None:
+    raw = "Kubernetes 和库伯内特斯"
+    st = _corrected(raw, [Term(term="Kubernetes", aliases=["库伯内特斯"])])
+    assert st.segments[0].text == "Kubernetes 和Kubernetes"
+    (c,) = st.corrections
+    assert c.offset == 12
+    st.review_correction(c.id, "reject")
+    assert st.segments[0].text == raw
+
+
+def test_review_is_strict_about_offset() -> None:
+    wrong = Correction(
+        id="c1", segment_id="a", source="term", before="汤泡", after="Townfall", offset=3
+    )
+    missing = Correction(id="c2", segment_id="a", source="term", before="汤泡", after="Townfall")
+    st = state(seg("a", 0, 1, "Townfall说Townfall"), corrections=[wrong, missing])
+    for cid in ("c1", "c2"):
+        with pytest.raises(EditError, match="no longer matches"):
+            st.review_correction(cid, "reject")
+    assert st.segments[0].text == "Townfall说Townfall"
+    assert [c.status for c in st.corrections] == ["applied", "applied"]
+    st.review_correction("c2", "accept")  # status-only decisions still work
+    assert st.corrections[1].status == "accepted"
+
+
+def test_text_edits_shift_correction_offsets() -> None:
+    c = Correction(id="c", segment_id="a", source="term", before="汤泡", after="Townfall", offset=9)
+    st = state(seg("a", 0, 1, "Townfall说Townfall"), corrections=[c])
+    st.edit_text("a", "嗯，Townfall说Townfall")  # insertion before the correction
+    assert st.corrections[0].offset == 11
+    st.replace("说", "讲了")  # one char longer, before it again
+    assert st.corrections[0].offset == 12
+    st.edit_text("a", "嗯，Townfall讲了Townfall。")  # after it: unmoved
+    assert st.corrections[0].offset == 12
+    st.review_correction("c", "reject")
+    assert st.segments[0].text == "嗯，Townfall讲了汤泡。"
+
+
+def test_accept_shifts_other_suggestions() -> None:
+    first = Correction(
+        id="c1", segment_id="a", source="llm", before="汤泡", after="Townfall", offset=0
+    )
+    second = Correction(
+        id="c2",
+        segment_id="a",
+        source="llm",
+        before="酷",
+        after="cool",
+        offset=3,
+        status="suggested",
+    )
+    first = first.model_copy(update={"status": "suggested"})
+    st = state(seg("a", 0, 1, "汤泡很酷，酷"), corrections=[first, second])
+    st.review_correction("c1", "accept")
+    assert st.corrections[1].offset == 9
+    st.review_correction("c2", "accept")
+    assert st.segments[0].text == "Townfall很cool，酷"
+
+
+def test_edit_inside_a_correction_makes_it_unreviewable() -> None:
+    c = Correction(id="c", segment_id="a", source="term", before="汤泡", after="Townfall", offset=2)
+    st = state(seg("a", 0, 1, "就是Townfall吧"), corrections=[c])
+    st.edit_text("a", "就是Townfell吧")
+    assert st.corrections[0].offset is None
+    with pytest.raises(EditError, match="no longer matches"):
+        st.review_correction("c", "reject")
+    assert st.segments[0].text == "就是Townfell吧"
+
+
+def test_replace_ignore_case_counts_real_matches() -> None:
+    c = Correction(
+        id="c", segment_id="a", source="term", before="酷伯", after="Kubernetes", offset=18
+    )
+    st = state(seg("a", 0, 1, "Townfall townfall Kubernetes"), corrections=[c])
+    assert st.replace("townfall", "x") == 1  # case-sensitive by default
+    assert st.corrections[0].offset == 11
+    assert st.replace("TOWNFALL", "T", ignore_case=True) == 1
+    assert st.replace("X", "T", ignore_case=True) == 1
+    assert st.segments[0].text == "T T Kubernetes"
+    assert st.corrections[0].offset == 4
+    st.review_correction("c", "reject")
+    assert st.segments[0].text == "T T 酷伯"
+
+
+def test_split_moves_corrections_and_drops_straddling_offsets() -> None:
+    right = Correction(id="r", segment_id="a", source="term", before="酷伯", after="Kube", offset=9)
+    straddle = Correction(
+        id="s", segment_id="a", source="repetition", before="好好好好好好", after="好好", offset=5
+    )
+    left = Correction(id="l", segment_id="a", source="term", before="汤泡", after="Town", offset=0)
+    st = state(seg("a", 0, 10, "Town很好好吗 Kube棒"), corrections=[right, straddle, left])
+    new_id = st.split("a", 6)  # "Town很好" | "好吗 Kube棒"
+    assert [s.text for s in st.segments] == ["Town很好", "好吗 Kube棒"]
+    by_id = {c.id: c for c in st.corrections}
+    assert (by_id["r"].segment_id, by_id["r"].offset) == (new_id, 3)
+    assert (by_id["l"].segment_id, by_id["l"].offset) == ("a", 0)
+    assert by_id["s"].offset is None
+    st.review_correction("r", "reject")
+    assert st.segments[1].text == "好吗 酷伯棒"
+    with pytest.raises(EditError, match="no longer matches"):
+        st.review_correction("s", "reject")
+    with pytest.raises(EditError, match="both sides"):
+        st.split("a", -2)  # code-point index must lie inside the text
+
+
+def test_split_offset_is_a_code_point_index() -> None:
+    st = state(seg("a", 0, 1, "😀好的"))  # one code point, two UTF-16 units
+    st.split("a", 1)
+    assert [s.text for s in st.segments] == ["😀", "好的"]
+
+
+def test_merge_rebases_second_segment_corrections() -> None:
+    c = Correction(id="c", segment_id="b", source="term", before="汤泡", after="Townfall", offset=1)
+    st = state(seg("a", 0, 1, "hello"), seg("b", 1, 2, "玩Townfall"), corrections=[c])
+    st.merge("a")
+    assert (st.corrections[0].segment_id, st.corrections[0].offset) == ("a", 6)
+    st.review_correction("c", "reject")
+    assert st.segments[0].text == "hello玩汤泡"
 
 
 # ---------------------------------------------------------------------------------- route

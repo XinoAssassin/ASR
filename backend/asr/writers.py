@@ -102,7 +102,8 @@ def write(
     names = {s.id: s.name for s in transcript.speakers}
 
     def name(seg: Segment) -> str:
-        return names.get(seg.speaker_id, seg.speaker_id)
+        # A display name with line breaks would break the line / cue structure of every format.
+        return _one_line(names.get(seg.speaker_id, seg.speaker_id))
 
     if fmt == "txt":
         lines = []

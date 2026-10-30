@@ -130,3 +130,29 @@ def test_merge_segments() -> None:
     assert len(chunks) == 4  # the 63.5 s segment is split into three ~21 s pieces
     assert all(e - s <= 25.0 + 1e-9 for s, e in chunks)
     assert chunks[-1][1] == 90.0
+
+
+@pytest.mark.timeout(10)
+def test_speaker_confusion_scales_to_many_labels() -> None:
+    from asr.eval.diarization import speaker_confusion
+
+    ref = [(i * 10.0, i * 10.0 + 10.0, f"r{i % 3}") for i in range(30)]
+    # 12 hypothesis labels (over-clustered): exhaustive permutations would never finish
+    hyp = [(i * 2.5, i * 2.5 + 2.5, f"h{i % 12}") for i in range(120)]
+    c = speaker_confusion(ref, hyp, step=0.1)
+    assert len(c.mapping) == 3 and set(c.mapping.values()) == {"r0", "r1", "r2"}
+    assert 0.0 < c.rate < 1.0
+
+
+def test_assignment_dp_matches_scipy() -> None:
+    import numpy as np
+
+    from asr.eval.diarization import _assignment_dp, best_assignment
+
+    rng = np.random.default_rng(0)
+    for shape in [(1, 1), (3, 5), (6, 2), (8, 8), (10, 4)]:
+        counts = rng.integers(0, 50, size=shape)
+        exact = best_assignment(counts)
+        dp = _assignment_dp(counts)
+        assert sum(counts[i, j] for i, j in dp) == sum(counts[i, j] for i, j in exact)
+        assert len({i for i, _ in dp}) == len(dp) and len({j for _, j in dp}) == len(dp)

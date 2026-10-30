@@ -215,20 +215,54 @@ AUDIO_SUFFIXES = frozenset(
 )
 
 
-def collect_inputs(paths: list[Path], recursive: bool) -> list[Path]:
-    """Files as given, plus audio/video files (by suffix) inside directories; sorted, deduped."""
-    found: dict[Path, None] = {}
+def collect_inputs(paths: list[Path], recursive: bool) -> list[tuple[Path, Path]]:
+    """Files as given, plus audio/video files (by suffix) inside directories; sorted, deduped.
+
+    Each file comes with its path relative to the directory it was found in (just its name for
+    files given directly), which ``--out-dir`` mirrors.
+    """
+    found: dict[Path, Path] = {}
     for path in paths:
         if path.is_dir():
             pattern = "**/*" if recursive else "*"
             for child in sorted(path.glob(pattern)):
                 if child.is_file() and child.suffix.lower() in AUDIO_SUFFIXES:
-                    found[child.resolve()] = None
+                    found.setdefault(child.resolve(), child.relative_to(path))
         elif path.is_file():
-            found[path.resolve()] = None
+            found.setdefault(path.resolve(), Path(path.name))
         else:
             err.print(f"[yellow]warning:[/yellow] skipped, not found: {path}")
-    return list(found)
+    return list(found.items())
+
+
+def batch_targets(
+    files: list[tuple[Path, Path]], fmts: list[str], out_dir: Path | None
+) -> dict[Path, list[Path]]:
+    """Output paths per input: next to the input, or mirrored under ``out_dir``.
+
+    Inputs sharing a stem in the same output directory (``talk.wav`` + ``talk.mp4``) are written
+    as ``talk.wav.txt`` / ``talk.mp4.txt``. Raises ``ValueError`` naming two inputs that would
+    still write the same file (compared case-insensitively, as on Windows / macOS).
+    """
+    dest = {
+        src: (out_dir / rel.parent if out_dir is not None else src.parent) for src, rel in files
+    }
+    stems: dict[tuple[str, str], int] = {}
+    for src, _ in files:
+        key = (str(dest[src]).casefold(), src.stem.casefold())
+        stems[key] = stems.get(key, 0) + 1
+    targets: dict[Path, list[Path]] = {}
+    owner: dict[str, Path] = {}
+    for src, _ in files:
+        shared = stems[(str(dest[src]).casefold(), src.stem.casefold())] > 1
+        base = src.name if shared else src.stem
+        outs = [dest[src] / f"{base}.{fmt}" for fmt in fmts]
+        for out in outs:
+            other = owner.setdefault(str(out).casefold(), src)
+            if other != src:
+                raise ValueError(f"{other} and {src} would both write {out}")
+        targets[src] = outs
+    return targets
 
 
 @app.command()
@@ -270,11 +304,17 @@ def batch(
     from asr import writers
     from asr.terms import merge_terms, parse_terms
 
-    files = collect_inputs(inputs, recursive)
-    if not files:
+    found = collect_inputs(inputs, recursive)
+    if not found:
         err.print("[red]error:[/red] no audio files found")
         raise typer.Exit(2)
     fmts = [f.value for f in formats] if formats else ["txt", "json"]
+    try:
+        outputs = batch_targets(found, fmts, out_dir)
+    except ValueError as exc:
+        err.print(f"[red]error:[/red] output name collision: {exc}", soft_wrap=True)
+        raise typer.Exit(2) from None
+    files = [src for src, _ in found]
 
     term_list = [parse_term(t) for t in terms or []]
     if terms_file is not None:
@@ -300,18 +340,12 @@ def batch(
         _local_builder(False, asr_model, device) if provider is Provider.local else _cloud_builder()
     )
 
-    def targets(src: Path) -> list[Path]:
-        base = (out_dir or src.parent) / src.stem
-        return [base.with_name(f"{base.name}.{fmt}") for fmt in fmts]
-
-    if out_dir is not None:
-        out_dir.mkdir(parents=True, exist_ok=True)
     done = skipped = 0
     failed: list[tuple[Path, str]] = []
     with tempfile.TemporaryDirectory(prefix="asr-batch-") as work_root:
         chosen = build(Path(work_root))
         for index, src in enumerate(files, start=1):
-            outs = targets(src)
+            outs = outputs[src]
             if not overwrite and all(o.exists() for o in outs):
                 skipped += 1
                 err.print(f"[{index}/{len(files)}] skip (outputs exist): {src.name}")
@@ -321,26 +355,34 @@ def batch(
             try:
                 transcript = chosen.transcribe(AudioSource(path=src), options, lambda _e: None)
                 transcript = _post_correct(transcript, options)
-            except ProviderError as exc:
-                failed.append((src, str(exc)))
-                err.print(f"  [red]failed:[/red] {exc}")
-                continue
+                for out, fmt in zip(outs, fmts, strict=True):
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    out.write_text(writers.write(transcript, fmt), encoding="utf-8")
             except (JobCancelled, KeyboardInterrupt):
                 err.print("[yellow]cancelled[/yellow]")
                 raise typer.Exit(130) from None
-            for out, fmt in zip(outs, fmts, strict=True):
-                out.write_text(writers.write(transcript, fmt), encoding="utf-8")
+            except Exception as exc:  # one bad file must not end the batch
+                message = str(exc) if isinstance(exc, ProviderError) else _describe(exc)
+                failed.append((src, message))
+                err.print(f"  [red]failed:[/red] {message}", soft_wrap=True)
+                continue
             done += 1
             elapsed = time.monotonic() - started
+            audio = "?" if transcript.duration is None else f"{transcript.duration:.0f}"
             err.print(
                 f"  {len(transcript.segments)} segments, {len(transcript.speakers)} speakers, "
-                f"{transcript.duration:.0f} s audio in {elapsed:.0f} s → {outs[0].parent}"
+                f"{audio} s audio in {elapsed:.0f} s → {outs[0].parent}"
             )
     err.print(f"done: {done} transcribed, {skipped} skipped, {len(failed)} failed")
     for src, message in failed:
         err.print(f"  failed: {src}: {message}", soft_wrap=True)
     if failed:
         raise typer.Exit(1)
+
+
+def _describe(exc: BaseException) -> str:
+    text = str(exc).strip()
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
 def _cloud_builder() -> Callable[[Path], TranscriptionProvider]:

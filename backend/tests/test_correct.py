@@ -29,12 +29,22 @@ def seg(i: int, text: str) -> Segment:
         ("哈哈哈哈哈哈哈哈哈哈", "哈哈哈"),
         ("Townfall，Townfall，Townfall，Townfall，Townfall，好", "Townfall，好"),
         ("我们我们我们我们我们我们一起", "我们一起"),
+        ("这个问题我觉得这个这个这个这个这个很好", "这个问题我觉得这个很好"),
+        # numbers are data: never collapsed
+        ("预算100000000元", "预算100000000元"),
+        ("手机号13800000000", "手机号13800000000"),
+        ("编号1212121212121212", "编号1212121212121212"),
+        # runs of punctuation / whitespace are left alone
+        ("。。。。。。。。。。", "。。。。。。。。。。"),
+        ("等一下          好", "等一下          好"),
     ],
 )
 def test_collapse_repetitions(text: str, expected: str) -> None:
     out, edits = collapse_repetitions(text)
     assert out == expected
     assert bool(edits) == (text != expected)
+    for offset, _, after in edits:
+        assert out[offset : offset + len(after)] == after
 
 
 def test_hotword_lines() -> None:
@@ -69,8 +79,41 @@ def test_correct_segments_records_edits_and_keeps_input() -> None:
         ("seg_00000", "repetition", "Townfall，"),
         ("seg_00001", "term", "Townfall"),
     ]
+    assert [c.offset for c in corrections] == [0, 0]
     off = CorrectionOptions(terms=False, repetition=False)
     assert correct_segments(raw, terms, off) == (raw, [])
+
+
+def test_correct_segments_offsets_point_into_the_final_text() -> None:
+    terms = [
+        Term(term="Kubernetes", aliases=["库伯内特斯"]),
+        Term(term="Townfall", aliases=["汤泡"]),
+    ]
+    raw = [
+        seg(0, "Kubernetes 和库伯内特斯，哈哈哈哈哈哈哈哈哈哈，汤泡汤泡汤泡汤泡汤泡好"),
+        seg(1, "汤泡和汤泡面，汤泡"),
+    ]
+    out, corrections = correct_segments(raw, terms, CorrectionOptions())
+    texts = {s.id: s.text for s in out}
+    assert texts["seg_00000"] == "Kubernetes 和Kubernetes，哈哈哈，Townfall好"
+    for c in corrections:
+        text = texts[c.segment_id]
+        assert c.offset is not None and text[c.offset : c.offset + len(c.after)] == c.after
+    first = [(c.source, c.before, c.after, c.offset) for c in corrections[:3]]
+    assert first == [
+        ("term", "库伯内特斯", "Kubernetes", 12),
+        ("repetition", "哈哈哈哈哈哈哈哈哈哈", "哈哈哈", 23),
+        # a term fix inside a collapsed repetition becomes one correction
+        ("repetition", "汤泡汤泡汤泡汤泡汤泡", "Townfall", 27),
+    ]
+    # rebuilding the raw text from the corrections, right to left, gives the input back
+    for s_raw, s_out in zip(raw, out, strict=True):
+        text = s_out.text
+        mine = [c for c in corrections if c.segment_id == s_raw.id]
+        for c in sorted(mine, key=lambda c: -(c.offset or 0)):
+            assert c.offset is not None
+            text = text[: c.offset] + c.before + text[c.offset + len(c.after) :]
+        assert text == s_raw.text
 
 
 # ------------------------------------------------------------------------------- server path
