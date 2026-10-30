@@ -22,10 +22,10 @@ from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 from typer.testing import CliRunner
 
+from asr import finalize as finalize_module
 from asr.providers.base import Correction
 from asr.summarize import TranscriptSummary
 from server import db as db_module
-from server import jobs as jobs_module
 from server import storage
 from server.app import create_app
 from server.body_limit import MAX_JSON_BODY
@@ -33,6 +33,7 @@ from server.config import EnvSettings
 from server.db import Database
 from server.routes import transcripts as transcripts_route
 from tests.conftest import EnvFactory
+from tests.fs_helpers import symlink_or_skip
 from tests.test_audio_fixtures import wav_bytes
 from tests.test_jobs import DASHSCOPE_KEY, FakeProvider, add_upload, install, wait_for, wait_status
 
@@ -96,6 +97,8 @@ def _serve(monkeypatch: pytest.MonkeyPatch, args: list[str]) -> tuple[Any, list[
 
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(uvicorn, "run", lambda app, **kw: calls.append({"app": app, **kw}))
+    # Root handlers bound to CliRunner's (then closed) stderr would outlive the test.
+    monkeypatch.setattr("server.logging_setup.configure_logging", lambda *a, **kw: None)
     return CliRunner().invoke(server_cli.app, ["serve", *args]), calls
 
 
@@ -140,14 +143,14 @@ def test_compose_opts_in_only_with_loopback_publish() -> None:
 @pytest.fixture
 def slow_post_correct(monkeypatch: pytest.MonkeyPatch) -> tuple[threading.Event, threading.Event]:
     entered, release = threading.Event(), threading.Event()
-    real = jobs_module.correct_segments
+    real = finalize_module.correct_segments
 
     def slow(*args: Any, **kwargs: Any) -> Any:
         entered.set()
         assert release.wait(10)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(jobs_module, "correct_segments", slow)
+    monkeypatch.setattr(finalize_module, "correct_segments", slow)
     return entered, release
 
 
@@ -253,7 +256,7 @@ def test_move_into_cross_device_refuses_swapped_destination(
     def swap_dst(dst: Path) -> None:
         dst.unlink()
         if swap == "symlink":
-            dst.symlink_to(victim)
+            symlink_or_skip(dst, victim)
         else:
             os.link(victim, dst)
 

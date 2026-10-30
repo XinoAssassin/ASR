@@ -13,7 +13,20 @@ An empty ``ASR_API_KEY`` disables the key check (single-machine use). Open mode 
 - the ``Host`` header must be a loopback name or listed in ``ASR_ALLOWED_HOSTS`` (DNS rebinding);
 - state-changing requests carrying an ``Origin`` that is neither in ``ASR_CORS_ORIGINS`` nor a
   loopback origin are refused (cross-site "simple" requests such as a multipart form POST bypass
-  CORS preflight; a page on another site can never send a loopback ``Origin``).
+  CORS preflight; a page on another site can never send a loopback ``Origin``);
+- requests carrying proxy headers (``Forwarded``, ``X-Forwarded-For``, ``X-Real-IP``, ``Via``)
+  are refused: a proxy relays other machines' requests, so it needs ``ASR_API_KEY``;
+- a peer without an address (Unix domain socket) is not trusted as loopback, since such sockets
+  are normally fronted by a proxy.
+
+What open mode does *not* protect against: anything on this machine that relays remote clients
+over a new loopback connection without proxy headers - ``nginx proxy_pass`` without
+``X-Forwarded-For``, ``netsh interface portproxy``, ``socat``, ``ssh -R``, ``pnpm dev --host``.
+Their requests arrive from 127.0.0.1 with a loopback ``Host`` and are indistinguishable from
+local ones. Any proxy or forwarder in front of the backend therefore requires ``ASR_API_KEY``.
+
+The key is compared as raw header bytes against its UTF-8 encoding (ASGI headers are bytes);
+browsers can only send ISO-8859-1 header values, so a usable key is printable ASCII.
 """
 
 import hmac
@@ -31,14 +44,26 @@ EXEMPT_PATHS: frozenset[str] = frozenset(
     {"/api/health", "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
 )
 LOOPBACK_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1", "::1"})
+PROXY_HEADERS: frozenset[bytes] = frozenset(
+    {b"forwarded", b"x-forwarded-for", b"x-real-ip", b"via"}
+)
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
-def _header(scope: Scope, name: bytes) -> str | None:
+def _raw_header(scope: Scope, name: bytes) -> bytes | None:
     for key, value in scope.get("headers", ()):
         if key == name:
-            return value.decode("latin-1")
+            return bytes(value)
     return None
+
+
+def _header(scope: Scope, name: bytes) -> str | None:
+    value = _raw_header(scope, name)
+    return None if value is None else value.decode("latin-1")
+
+
+def _has_proxy_headers(scope: Scope) -> bool:
+    return any(key in PROXY_HEADERS for key, _ in scope.get("headers", ()))
 
 
 def _is_loopback_origin(origin: str) -> bool:
@@ -62,8 +87,8 @@ def is_loopback_address(host: str) -> bool:
 
 def _peer_is_loopback(scope: Scope) -> bool:
     client = scope.get("client")
-    if client is None:  # Unix domain socket: the peer is on this machine
-        return True
+    if client is None:  # Unix domain socket: on this machine, but almost always a proxy's
+        return False
     return is_loopback_address(str(client[0]))
 
 
@@ -75,13 +100,21 @@ def host_name(host_header: str) -> str:
     return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
 
 
-def api_key_matches(provided: str | None, expected: SecretStr) -> bool:
-    """Constant-time comparison; ``False`` when nothing was provided."""
+def api_key_matches(provided: str | bytes | None, expected: SecretStr) -> bool:
+    """Constant-time comparison; ``False`` when nothing was provided.
+
+    ``provided`` is the raw header value (bytes) or text; both are compared as UTF-8 bytes, so a
+    non-ASCII key works for clients that send it UTF-8 encoded (decoding the header as latin-1
+    and re-encoding it as UTF-8 never matched)."""
     if provided is None:
         return False
-    return hmac.compare_digest(
-        provided.encode("utf-8"), expected.get_secret_value().encode("utf-8")
-    )
+    raw = provided.encode("utf-8") if isinstance(provided, str) else provided
+    return hmac.compare_digest(raw, expected.get_secret_value().encode("utf-8"))
+
+
+def is_browser_safe_key(key: str) -> bool:
+    """Printable ASCII only: what browsers (``fetch``) can put into an ``X-API-Key`` header."""
+    return all(" " <= ch <= "~" for ch in key)
 
 
 class ApiKeyMiddleware:
@@ -107,6 +140,14 @@ class ApiKeyMiddleware:
                 {
                     "detail": "API authentication is off, so only clients on this machine are "
                     "accepted; set ASR_API_KEY on the server"
+                },
+                status_code=403,
+            )
+        if _has_proxy_headers(scope):
+            return JSONResponse(
+                {
+                    "detail": "API authentication is off and this request came through a proxy; "
+                    "set ASR_API_KEY on the server to serve clients through a proxy"
                 },
                 status_code=403,
             )
@@ -145,7 +186,7 @@ class ApiKeyMiddleware:
             await self.app(scope, receive, send)
             return
 
-        provided = _header(scope, _HEADER_BYTES)
+        provided = _raw_header(scope, _HEADER_BYTES)
 
         if api_key_matches(provided, self.api_key):
             await self.app(scope, receive, send)

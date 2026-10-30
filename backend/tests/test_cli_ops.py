@@ -179,6 +179,10 @@ def test_serve_runs_one_uvicorn_worker_with_our_logging(
     assert refused.exit_code == 2 and "refusing to listen" in refused.output and not calls
     monkeypatch.setenv("ASR_ALLOW_UNAUTHENTICATED_NETWORK", "1")
     get_env.cache_clear()
+    refused = runner.invoke(server_cli.app, args)  # a proxy without a key: refused (m3)
+    assert refused.exit_code == 2 and "--forwarded-allow-ips" in refused.output and not calls
+    monkeypatch.setenv("ASR_API_KEY", "k" * 20)
+    get_env.cache_clear()
     result = runner.invoke(server_cli.app, args)
     assert result.exit_code == 0, result.output
     (call,) = calls
@@ -186,7 +190,6 @@ def test_serve_runs_one_uvicorn_worker_with_our_logging(
     assert (call["host"], call["port"], call["workers"]) == (LAN, 8123, 1)
     assert call["log_config"] is None
     assert call["proxy_headers"] is True and call["forwarded_allow_ips"] == "10.0.0.1"
-    assert "ASR_API_KEY is empty" in result.output  # LAN bind without a key
     assert (tmp_path / "logs" / "asr.log").exists()
 
 
@@ -259,3 +262,13 @@ def test_logging_text_format_and_levels(tmp_path, restore_root_logging):
         h.flush()
     text = log_file.read_text(encoding="utf-8")
     assert "loud" in text and "quiet" not in text and "WARNING" in text
+
+
+def test_debug_logging_keeps_sql_parameters_out(tmp_path, restore_root_logging):
+    """aiosqlite logs SQL parameters (settings secrets) at DEBUG; it must stay at WARNING."""
+    configure_logging("DEBUG", "text", tmp_path / "d.log")
+    logging.getLogger("aiosqlite").debug("executing %s", ("siyuan.token", "plain-secret-token"))
+    for h in logging.getLogger().handlers:
+        h.flush()
+    assert "plain-secret-token" not in (tmp_path / "d.log").read_text(encoding="utf-8")
+    assert logging.getLogger("httpx").level == logging.DEBUG  # other loggers still follow DEBUG

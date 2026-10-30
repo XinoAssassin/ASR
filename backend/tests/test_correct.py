@@ -180,12 +180,12 @@ async def test_correction_failure_keeps_raw_text(
     env: EnvSettings,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from server import jobs as jobs_module
+    from asr import finalize as finalize_module
 
     def boom(*_: object, **__: object) -> None:
         raise RuntimeError("corrector exploded")
 
-    monkeypatch.setattr(jobs_module, "correct_segments", boom)
+    monkeypatch.setattr(finalize_module, "correct_segments", boom)
     install(app, FakeProvider(result=_result("汤泡")))
     upload = await add_upload(app, env)
     job = (await client.post("/api/jobs", json={"upload_id": upload.id})).json()

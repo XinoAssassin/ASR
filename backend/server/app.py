@@ -3,12 +3,20 @@
 ``uvicorn server.app:app`` serves the module-level app built from the process environment.
 Tests call ``create_app(env)`` with an explicit ``EnvSettings`` and run the lifespan
 (``asgi_lifespan.LifespanManager``).
+
+The backend is a single process (job queue, SSE subscribers and run state live in memory; SQLite
+is the store): the lifespan takes an advisory lock on ``<ASR_DATA_DIR>/server.lock`` and refuses to
+start while another server holds it (docs/DEPLOYMENT.md, ARCH_REVIEW §4-d).
 """
 
+import contextlib
+import errno
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from pathlib import Path
+from typing import IO, Any
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -22,6 +30,7 @@ from server.body_limit import MAX_JSON_BODY, BodySizeLimitMiddleware
 from server.config import EnvSettings, apply_core_environ, ensure_dirs, get_env
 from server.db import Database
 from server.jobs import JobManager
+from server.logging_setup import SecretRedactingFilter, configure_logging
 from server.model_downloads import ModelDownloads
 from server.routes import ROUTERS
 
@@ -31,26 +40,132 @@ CORS_ALLOW_HEADERS = [API_KEY_HEADER, "Content-Type", "Range", "Last-Event-ID"]
 CORS_EXPOSE_HEADERS = ["Content-Range", "Accept-Ranges", "Content-Length", "Content-Disposition"]
 CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 
+LOCK_FILE = "server.lock"
+# errno values meaning "another handle holds the lock" (flock: EWOULDBLOCK; msvcrt: EACCES).
+_LOCK_HELD = frozenset({errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, errno.EDEADLK})
+
+
+class DataDirInUse(RuntimeError):
+    """Another server process already serves this ``ASR_DATA_DIR``."""
+
+
+class DataDirLock:
+    """Advisory, non-blocking exclusive lock on ``<data_dir>/server.lock``.
+
+    The OS drops it when the process exits (also on a crash or kill), so there is no stale-lock
+    cleanup. A filesystem without lock support only logs a warning: the guard is a safety net,
+    not a reason to refuse to run.
+    """
+
+    def __init__(self, data_dir: Path) -> None:
+        self.path = data_dir / LOCK_FILE
+        self._fh: IO[bytes] | None = None
+
+    def acquire(self) -> None:
+        fh = open(self.path, "a+b")  # noqa: SIM115 - held until release()
+        try:
+            _lock(fh)
+        except OSError as exc:
+            fh.close()
+            if exc.errno not in _LOCK_HELD:
+                log.warning("cannot lock %s (%s); single-process guard is off", self.path, exc)
+                return
+            raise DataDirInUse(
+                f"another ASR server is already running on ASR_DATA_DIR {self.path.parent} "
+                f"(lock file {self.path}). The backend must run as exactly one process: stop "
+                "the other one, or give this one its own ASR_DATA_DIR."
+            ) from None
+        fh.seek(0)
+        fh.truncate()
+        fh.write(f"{os.getpid()}\n".encode())
+        fh.flush()
+        self._fh = fh
+
+    def release(self) -> None:
+        fh, self._fh = self._fh, None
+        if fh is None:
+            return
+        with contextlib.suppress(OSError):  # closing drops the lock anyway
+            _unlock(fh)
+        fh.close()
+
+
+if os.name == "nt":
+    import msvcrt
+
+    def _lock(fh: IO[bytes]) -> None:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+
+    def _unlock(fh: IO[bytes]) -> None:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _lock(fh: IO[bytes]) -> None:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _unlock(fh: IO[bytes]) -> None:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+_UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+
+def ensure_log_redaction(env: EnvSettings, *, install: bool = False) -> None:
+    """Redact secrets from every log line however the app was launched (AGENTS rule 3).
+
+    ``asr serve`` installs the server handlers (with ``SecretRedactingFilter``) before uvicorn
+    starts. ``uvicorn server.app:app`` does not: there the root logger has no handlers, so with
+    ``install`` (the lifespan, i.e. only when actually serving) they are installed here. Either
+    way uvicorn's own handlers, any other root handler and Python's last-resort handler get the
+    filter. Idempotent.
+    """
+    root = logging.getLogger()
+    if install and not root.handlers:
+        configure_logging(env.log_level, env.log_format, env.log_file)
+    handlers = list(root.handlers)
+    if logging.lastResort is not None:
+        handlers.append(logging.lastResort)
+    for name in _UVICORN_LOGGERS:
+        handlers.extend(logging.getLogger(name).handlers)
+    for handler in handlers:
+        if not any(isinstance(f, SecretRedactingFilter) for f in handler.filters):
+            handler.addFilter(SecretRedactingFilter())
+
 
 def create_app(env: EnvSettings | None = None) -> FastAPI:
     env = env or get_env()
+    ensure_log_redaction(env)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # The core library reads ASR_DECODER / ASR_TORCH_THREADS / ASR_LOCAL_DTYPE from the
         # process env; keep them in sync with values that came from a .env file.
         apply_core_environ(env)
+        ensure_log_redaction(env, install=True)
         ensure_dirs(env)
-        db = await Database.open(env.db_path)
-        job_manager = JobManager(db=db, env=env)
-        app.state.db = db
-        app.state.job_manager = job_manager
+        lock = DataDirLock(env.data_dir)
         try:
-            await job_manager.start()
-            yield
+            lock.acquire()
+        except DataDirInUse as exc:
+            log.error("%s", exc)
+            raise
+        try:
+            db = await Database.open(env.db_path)
+            job_manager = JobManager(db=db, env=env)
+            app.state.db = db
+            app.state.job_manager = job_manager
+            try:
+                await job_manager.start()
+                yield
+            finally:
+                await job_manager.stop()
+                await db.close()
         finally:
-            await job_manager.stop()
-            await db.close()
+            lock.release()
 
     app = FastAPI(
         title="Multi-Speaker ASR",
@@ -88,8 +203,10 @@ def create_app(env: EnvSettings | None = None) -> FastAPI:
         else:
             log.warning(
                 "ASR_API_KEY is empty: API authentication is DISABLED. Only clients connecting "
-                "from this machine (loopback) with a loopback Host name%s are accepted; set "
-                "ASR_API_KEY to serve other machines.",
+                "from this machine (loopback) with a loopback Host name%s and no proxy headers "
+                "are accepted. A port forwarder or proxy on this machine (netsh portproxy, socat, "
+                "ssh -R, nginx without X-Forwarded-For) makes every client it serves look local: "
+                "set ASR_API_KEY before putting anything in front of this port.",
                 hosts,
             )
     app.add_exception_handler(RequestValidationError, _validation_error_handler)

@@ -31,8 +31,19 @@ Contents: [1 Topology](#1-topology) · [2 Backend](#2-backend) · [3 Frontend](#
   origin in `ASR_CORS_ORIGINS` and, because it is reachable from the network, require `ASR_API_KEY`.
 - Alternative: serve the SPA and proxy `/api/` from **one** origin ([§6.3](#63-single-origin-alternative)).
   Then no CORS is involved and `config.js` keeps `backendUrl: ""`.
-- `asr serve` always runs **one** worker process: the job queue and SSE subscribers live in it.
-  Scale up (bigger GPU), not out.
+- **The backend must run as exactly one process per `ASR_DATA_DIR`.** `asr serve` always starts
+  one worker; never run `uvicorn server.app:app --workers N`, gunicorn with several workers, or
+  several containers / replicas / hosts against the same data dir (a shared volume included).
+  Why: the job queue, the running jobs' cancel flags and live progress, and the SSE subscribers
+  are in-memory state of that process (a second process would never see them: cancel and SSE
+  break, and on start it marks the other process's running jobs "interrupted by restart"), the
+  local models are loaded once per process, and SQLite (`asr.db`, WAL) is a single-host,
+  single-writer store. The server enforces this: at startup it takes an advisory lock on
+  `ASR_DATA_DIR/server.lock`, and a second server on the same data dir refuses to start with
+  "another ASR server is already running on ASR_DATA_DIR ...". The OS releases the lock when the
+  process exits, crashes included, so there is no stale lock to delete (on a filesystem without
+  lock support the guard only logs a warning). Scale up (bigger GPU), not out;
+  a second instance needs its own `ASR_DATA_DIR` (and its own upload roots).
 
 Browser rules that shape the setup:
 
@@ -54,7 +65,7 @@ asr serve --host <addr> --port <port> [--forwarded-allow-ips <proxy-ip>]
 
 `asr serve` options: `--host` (default `127.0.0.1`; `0.0.0.0` for LAN, which requires `ASR_API_KEY`), `--port` (default 8000),
 `--forwarded-allow-ips` (comma-separated proxy addresses whose `X-Forwarded-For/-Proto` are
-trusted; omit when no proxy), `--reload` (development only). Shutdown drains for up to 30 s; a job
+trusted; omit when no proxy; requires `ASR_API_KEY`), `--reload` (development only). Shutdown drains for up to 30 s; a job
 still running is marked failed ("interrupted") at the next start and can be retried, queued jobs
 resume. `GET /api/health` needs no key and is the liveness probe.
 
@@ -224,20 +235,30 @@ band; they enter it once per browser in Settings → Connection, and once in the
 - Every route except `/api/health`, `/openapi.json`, `/docs`, `/redoc` requires the header
   `X-API-Key`; missing or wrong → `401`. The key is accepted from the header only, never from a
   query string.
-- With the key empty, the backend accepts only clients connecting **from this machine** (the TCP
-  peer must be a loopback address — a `Host: localhost` header alone proves nothing), only
-  `Host: localhost / 127.0.0.1 / [::1]` (plus `ASR_ALLOWED_HOSTS`), and refuses state-changing
-  requests whose `Origin` is neither loopback nor in `ASR_CORS_ORIGINS` (D24); the app logs a
-  warning. `asr serve --host 0.0.0.0` (or any non-loopback address) **refuses to start** without a
-  key. This mode is for one machine.
+- **Open mode** (key empty) is for one machine. The backend then accepts only clients connecting
+  **from this machine** (the TCP peer must be a loopback address — a `Host: localhost` header
+  alone proves nothing; a Unix-socket peer does not count), only
+  `Host: localhost / 127.0.0.1 / [::1]` (plus `ASR_ALLOWED_HOSTS`), no request carrying proxy
+  headers (`Forwarded`, `X-Forwarded-For`, `X-Real-IP`, `Via` → `403`), and refuses
+  state-changing requests whose `Origin` is neither loopback nor in `ASR_CORS_ORIGINS` (D24); the
+  app logs a warning. `asr serve --host 0.0.0.0` (or any non-loopback address) and
+  `asr serve --forwarded-allow-ips …` **refuse to start** without a key.
+- What open mode **cannot** detect: a program on the same host that relays other machines'
+  requests over a fresh loopback connection without proxy headers — `nginx` with a bare
+  `proxy_pass http://127.0.0.1:8000` (its default upstream `Host` is `127.0.0.1:8000`, which
+  passes), `netsh interface portproxy` (the usual Windows/WSL LAN recipe), `socat`, `ssh -R`,
+  `pnpm dev --host`. To the backend those requests look exactly like local ones, so every client
+  that reaches the forwarder controls the API. **Any proxy or port forwarder in front of the
+  backend requires `ASR_API_KEY`.**
 - `ASR_ALLOW_UNAUTHENTICATED_NETWORK=1` lifts the peer check and the bind refusal. It exists for
   Docker, where every request arrives from the bridge gateway rather than 127.0.0.1:
   `docker-compose.yml` sets it because it publishes the port on `127.0.0.1` only. It is **only safe
   behind such a loopback-only publish**: with `ASR_BIND_ADDR=0.0.0.0` set `ASR_API_KEY` (and
   optionally `ASR_ALLOW_UNAUTHENTICATED_NETWORK=0`). The image on its own (`docker run -p ...`
   without a key) refuses to start.
-- JSON request bodies are capped at **2 MB** (`413`); the upload routes (`/api/uploads*`) keep
-  their own limits (2 GiB per file, exact 8 MiB parts).
+- JSON request bodies are capped at **2 MB** (`413`), the upload `init` / `register` calls
+  included; the two routes that carry file bytes keep their own limits (`POST /api/uploads`:
+  2 GiB per file; `PUT /api/uploads/{id}/parts/{n}`: exact 8 MiB parts).
 - `ASR_CORS_ORIGINS` must list **every origin that serves the SPA**, exactly as the browser shows it
   (scheme, host, port; no trailing path): e.g.
   `https://asr-ui.example.com,http://192.168.1.10:8080`. Preflights from other origins get `400`
@@ -265,9 +286,11 @@ band; they enter it once per browser in Settings → Connection, and once in the
 - `X-Forwarded-For / -Proto / -Host` set, paired with
   `asr serve --host 127.0.0.1 --forwarded-allow-ips 127.0.0.1` so the access log shows client IPs.
 
-Behind a proxy the `Host` header is the public name and (with `--forwarded-allow-ips`) the peer is
-the real client, so auth-off mode rejects everything (403) — keep `ASR_API_KEY` set rather than
-listing the name in `ASR_ALLOWED_HOSTS` and opting in with `ASR_ALLOW_UNAUTHENTICATED_NETWORK`.
+A proxy needs `ASR_API_KEY`: `asr serve --forwarded-allow-ips …` refuses to start without one, and
+open mode answers `403` to any request carrying `X-Forwarded-For` / `Forwarded` / `X-Real-IP` /
+`Via`. Do not work around it with `ASR_ALLOWED_HOSTS` plus `ASR_ALLOW_UNAUTHENTICATED_NETWORK`,
+and do not strip the forwarding headers: a proxy that sends none is still a proxy
+([§5](#5-access-control-api-key-cors-hosts)).
 
 Other proxies (Caddy, Traefik, IIS ARR) need the same three things: no response buffering for SSE,
 large request bodies, long read timeouts.
@@ -369,7 +392,9 @@ asr batch a.m4a b.wav --asr-model seaco-paraformer --device cpu --terms "CUDA" -
 - uvicorn access lines (`uvicorn.access`) show the client address — the real one only with
   `--forwarded-allow-ips` behind a proxy.
 - Every handler redacts URL query strings (signed result URLs), bearer tokens and `sk-` keys
-  (D47). The `X-API-Key` header is never logged.
+  (D47). The `X-API-Key` header is never logged. This also holds for a plain
+  `uvicorn server.app:app` run: the app installs the same handlers when none are configured and
+  adds the redaction filter to uvicorn's own handlers.
 
 ## 11. Backup and upgrade
 

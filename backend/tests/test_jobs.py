@@ -494,3 +494,76 @@ async def test_default_factory_is_used_and_missing_key_fails(
     assert stored is not None and stored.status == "failed"
     assert stored.error == jobs_module.MISSING_KEY
     assert not seen
+
+
+# ------------------------------------------------- server review n4 / n5 (late cancel, work dirs)
+async def test_cancel_after_release_reports_the_final_state(
+    app: FastAPI, client: httpx.AsyncClient, env: EnvSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel landing after the run was released (only the succeeded write is left) waits for
+    that write instead of answering 200 "running" for a job that then succeeds."""
+    db: Database = app.state.db
+    manager: JobManager = app.state.job_manager
+    real_insert = db.insert_transcript
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_insert(*a: Any, **kw: Any) -> Any:
+        entered.set()
+        await release.wait()
+        return await real_insert(*a, **kw)
+
+    monkeypatch.setattr(db, "insert_transcript", slow_insert)
+    install(app, FakeProvider())
+    upload = await add_upload(app, env)
+    job = (await client.post("/api/jobs", json={"upload_id": upload.id})).json()
+    await asyncio.wait_for(entered.wait(), 10)
+    assert not manager.is_running(job["id"])  # released: no cancel flag to set any more
+    cancel = asyncio.create_task(client.post(f"/api/jobs/{job['id']}/cancel"))
+    await asyncio.sleep(0.1)
+    assert not cancel.done()  # waits for the final write
+    release.set()
+    resp = await asyncio.wait_for(cancel, 10)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "succeeded"
+    assert (await client.get(f"/api/jobs/{job['id']}")).json()["status"] == "succeeded"
+
+
+async def test_start_removes_stale_work_dirs(env: EnvSettings) -> None:
+    stale = env.data_dir / "work" / "crashed-job"
+    stale.mkdir(parents=True)
+    (stale / "chunk.wav").write_bytes(b"x")
+    app = create_app(env)
+    async with LifespanManager(app):
+        assert not (env.data_dir / "work").exists()
+
+
+class _SilentProvider(FakeProvider):
+    """Blocks without calling ``progress`` (like a long model call), then writes to its work dir."""
+
+    def transcribe(
+        self, source: AudioSource, options: JobOptions, progress: ProgressCallback
+    ) -> Transcript:
+        progress(ProgressEvent(stage="recognizing", progress=0.5))
+        self.started.set()
+        assert self.release.wait(10)
+        (self.work_dirs[-1] / "late-write.bin").write_bytes(b"still writing")
+        return self.result
+
+
+async def test_stop_keeps_the_work_dir_of_a_live_provider_thread(env: EnvSettings) -> None:
+    provider = _SilentProvider()
+    app = create_app(env)
+    async with LifespanManager(app):
+        install(app, provider)
+        upload = await add_upload(app, env)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as c:
+            job = (await c.post("/api/jobs", json={"upload_id": upload.id})).json()
+        await wait_for(provider.started.is_set)
+    work_dir = env.data_dir / "work" / job["id"]
+    assert work_dir.is_dir()  # not removed under the running thread
+    provider.release.set()
+    await wait_for(lambda: (work_dir / "late-write.bin").exists())
+    async with LifespanManager(create_app(env)):  # the next start cleans it up
+        assert not work_dir.exists()

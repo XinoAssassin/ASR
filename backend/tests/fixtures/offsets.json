@@ -1,0 +1,845 @@
+{
+  "_doc": "Cross-layer offset fixture (ARCH_REVIEW 4-e). Shape documented in backend/tests/test_offsets_fixture.py. Positions are code points (Python str indices, the API convention, D57); *_utf16 fields are the matching JavaScript string indices.",
+  "version": 1,
+  "initial": {
+    "speakers": [
+      {
+        "id": "SPEAKER_00",
+        "name": "SPEAKER_00",
+        "color": "#1f77b4"
+      },
+      {
+        "id": "SPEAKER_01",
+        "name": "SPEAKER_01",
+        "color": "#ff7f0e"
+      }
+    ],
+    "segments": [
+      {
+        "id": "s0",
+        "speaker_id": "SPEAKER_00",
+        "start": 0.0,
+        "end": 4.0,
+        "text": "大家好😀今天聊 Kubernetes 和 Tomcat。"
+      },
+      {
+        "id": "s1",
+        "speaker_id": "SPEAKER_01",
+        "start": 4.0,
+        "end": 8.0,
+        "text": "👍好的，我先说 kubernetes 部署，再说 KUBERNETES 监控。"
+      },
+      {
+        "id": "s2",
+        "speaker_id": "SPEAKER_00",
+        "start": 8.0,
+        "end": 10.0,
+        "text": "𠀀字测试 emoji 🎉 结束"
+      }
+    ],
+    "corrections": [
+      {
+        "id": "c1",
+        "segment_id": "s0",
+        "source": "term",
+        "before": "汤猫",
+        "after": "Tomcat",
+        "status": "applied",
+        "offset": 21,
+        "offset_utf16": 22
+      },
+      {
+        "id": "c2",
+        "segment_id": "s1",
+        "source": "llm",
+        "before": "kubernetes",
+        "after": "Kubernetes",
+        "status": "suggested",
+        "offset": 8,
+        "offset_utf16": 9
+      },
+      {
+        "id": "c3",
+        "segment_id": "s2",
+        "source": "term",
+        "before": "依码子",
+        "after": "emoji",
+        "status": "applied",
+        "offset": 5,
+        "offset_utf16": 6
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "split_after_emoji",
+      "description": "Split right after an astral emoji; the correction moves to the new segment.",
+      "ops": [
+        {
+          "op": "split",
+          "segment_id": "s0",
+          "at": 4
+        }
+      ],
+      "expect": {
+        "segments": [
+          {
+            "id": "s0",
+            "text": "大家好😀",
+            "edited": true
+          },
+          {
+            "id": "s0-1",
+            "text": "今天聊 Kubernetes 和 Tomcat。",
+            "edited": true
+          },
+          {
+            "id": "s1",
+            "text": "👍好的，我先说 kubernetes 部署，再说 KUBERNETES 监控。",
+            "edited": false
+          },
+          {
+            "id": "s2",
+            "text": "𠀀字测试 emoji 🎉 结束",
+            "edited": false
+          }
+        ],
+        "corrections": [
+          {
+            "id": "c1",
+            "segment_id": "s0-1",
+            "status": "applied",
+            "offset": 17,
+            "offset_utf16": 17
+          },
+          {
+            "id": "c2",
+            "segment_id": "s1",
+            "status": "suggested",
+            "offset": 8,
+            "offset_utf16": 9
+          },
+          {
+            "id": "c3",
+            "segment_id": "s2",
+            "status": "applied",
+            "offset": 5,
+            "offset_utf16": 6
+          }
+        ]
+      }
+    },
+    {
+      "name": "split_drops_whitespace",
+      "description": "Split at a space: whitespace around the split point is dropped.",
+      "ops": [
+        {
+          "op": "split",
+          "segment_id": "s0",
+          "at": 7
+        }
+      ],
+      "expect": {
+        "segments": [
+          {
+            "id": "s0",
+            "text": "大家好😀今天聊",
+            "edited": true
+          },
+          {
+            "id": "s0-1",
+            "text": "Kubernetes 和 Tomcat。",
+            "edited": true
+          },
+          {
+            "id": "s1",
+            "text": "👍好的，我先说 kubernetes 部署，再说 KUBERNETES 监控。",
+            "edited": false
+          },
+          {
+            "id": "s2",
+            "text": "𠀀字测试 emoji 🎉 结束",
+            "edited": false
+          }
+        ],
+        "corrections": [
+          {
+            "id": "c1",
+            "segment_id": "s0-1",
+            "status": "applied",
+            "offset": 13,
+            "offset_utf16": 13
+          },
+          {
+            "id": "c2",
+            "segment_id": "s1",
+            "status": "suggested",
+            "offset": 8,
+            "offset_utf16": 9
+          },
+          {
+            "id": "c3",
+            "segment_id": "s2",
+            "status": "applied",
+            "offset": 5,
+            "offset_utf16": 6
+          }
+        ]
+      }
+    },
+    {
+      "name": "split_straddling_correction",
+      "description": "A split inside a corrected span loses that correction's offset.",
+      "ops": [
+        {
+          "op": "split",
+          "segment_id": "s0",
+          "at": 24
+        }
+      ],
+      "expect": {
+        "segments": [
+          {
+            "id": "s0",
+            "text": "大家好😀今天聊 Kubernetes 和 Tom",
+            "edited": true
+          },
+          {
+            "id": "s0-1",
+            "text": "cat。",
+            "edited": true
+          },
+          {
+            "id": "s1",
+            "text": "👍好的，我先说 kubernetes 部署，再说 KUBERNETES 监控。",
+            "edited": false
+          },
+          {
+            "id": "s2",
+            "text": "𠀀字测试 emoji 🎉 结束",
+            "edited": false
+          }
+        ],
+        "corrections": [
+          {
+            "id": "c1",
+            "segment_id": "s0",
+            "status": "applied",
+            "offset": null,
+            "offset_utf16": null
+          },
+          {
+            "id": "c2",
+            "segment_id": "s1",
+            "status": "suggested",
+            "offset": 8,
+            "offset_utf16": 9
+          },
+          {
+            "id": "c3",
+            "segment_id": "s2",
+            "status": "applied",
+            "offset": 5,
+            "offset_utf16": 6
+          }
+        ]
+      }
+    },
+    {
+      "name": "split_astral_cjk",
+      "description": "Split after a CJK Extension B character (a surrogate pair in UTF-16).",
+      "ops": [
+        {
+          "op": "split",
+          "segment_id": "s2",
+          "at": 2
+        }
+      ],
+      "expect": {
+        "segments": [
+          {
+            "id": "s0",
+            "text": "大家好😀今天聊 Kubernetes 和 Tomcat。",
+            "edited": false
+          },
+          {
+            "id": "s1",
+            "text": "👍好的，我先说 kubernetes 部署，再说 KUBERNETES 监控。",
+            "edited": false
+          },
+          {
+            "id": "s2",
+            "text": "𠀀字",
+            "edited": true
+          },
+          {
+            "id": "s2-1",
+            "text": "测试 emoji 🎉 结束",
+            "edited": true
+          }
+        ],
+        "corrections": [
+          {
+            "id": "c1",
+            "segment_id": "s0",
+            "status": "applied",
+            "offset": 21,
+            "offset_utf16": 22
+          },
+          {
+            "id": "c2",
+            "segment_id": "s1",
+            "status": "suggested",
+            "offset": 8,
+            "offset_utf16": 9
+          },
+          {
+            "id": "c3",
+            "segment_id": "s2-1",
+            "status": "applied",
+            "offset": 3,
+            "offset_utf16": 3
+          }
+        ]
+      }
+    },
+    {
+      "name": "replace_ignore_case",
+      "description": "Case-insensitive replace in every segment; offsets after a match shift, an overlapped correction loses its offset.",
+      "ops": [
+        {
+          "op": "replace",
+          "find": "kubernetes",
+          "replace": "K8s",
+          "ignore_case": true
+        }
+      ],
+      "expect": {
+        "segments": [
+          {
+            "id": "s0",
+            "text": "大家好😀今天聊 K8s 和 Tomcat。",
+            "edited": true
+          },
+          {
+            "id": "s1",
+            "text": "👍好的，我先说 K8s 部署，再说 K8s 监控。",
+            "edited": true
+          },
+          {
+            "id": "s2",
+            "text": "𠀀字测试 emoji 🎉 结束",
+            "edited": false
+          }
+        ],
+        "corrections": [
+          {
+            "id": "c1",
+            "segment_id": "s0",
+            "status": "applied",
+            "offset": 14,
+            "offset_utf16": 15
+          },
+          {
+            "id": "c2",
+            "segment_id": "s1",
+            "status": "suggested",
+            "offset": null,
+            "offset_utf16": null
+          },
+          {
+            "id": "c3",
+            "segment_id": "s2",
+            "status": "applied",
+            "offset": 5,
+            "offset_utf16": 6
+          }
+        ]
+      }
+    },
+    {
+      "name": "replace_case_sensitive",
+      "description": "Case-sensitive replace only touches the exact spelling.",
+      "ops": [
+        {
+          "op": "replace",
+          "find": "kubernetes",
+          "replace": "K8s",
+          "ignore_case": false
+        }
+      ],
+      "expect": {
+        "segments": [
+          {
+            "id": "s0",
+            "text": "大家好😀今天聊 Kubernetes 和 Tomcat。",
+            "edited": false
+          },
+          {
+            "id": "s1",
+            "text": "👍好的，我先说 K8s 部署，再说 KUBERNETES 监控。",
+            "edited": true
+          },
+          {
+            "id": "s2",
+            "text": "𠀀字测试 emoji 🎉 结束",
+            "edited": false
+          }
+        ],
+        "corrections": [
+          {
+            "id": "c1",
+            "segment_id": "s0",
+            "status": "applied",
+            "offset": 21,
+            "offset_utf16": 22
+          },
+          {
+            "id": "c2",
+            "segment_id": "s1",
+            "status": "suggested",
+            "offset": null,
+            "offset_utf16": null
+          },
+          {
+            "id": "c3",
+            "segment_id": "s2",
+            "status": "applied",
+            "offset": 5,
+            "offset_utf16": 6
+          }
+        ]
+      }
+    },
+    {
+      "name": "replace_before_emoji_correction",
+      "description": "Replacing text before a correction (with an emoji in between) shifts its offset by the code-point delta.",
+      "ops": [
+        {
+          "op": "replace",
+          "find": "𠀀字",
+          "replace": "汉字🙂",
+          "ignore_case": false
+        }
+      ],
+      "expect": {
+        "segments": [
+          {
+            "id": "s0",
+            "text": "大家好😀今天聊 Kubernetes 和 Tomcat。",
+            "edited": false
+          },
+          {
+            "id": "s1",
+            "text": "👍好的，我先说 kubernetes 部署，再说 KUBERNETES 监控。",
+            "edited": false
+          },
+          {
+            "id": "s2",
+            "text": "汉字🙂测试 emoji 🎉 结束",
+            "edited": true
+          }
+        ],
+        "corrections": [
+          {
+            "id": "c1",
+            "segment_id": "s0",
+            "status": "applied",
+            "offset": 21,
+            "offset_utf16": 22
+          },
+          {
+            "id": "c2",
+            "segment_id": "s1",
+            "status": "suggested",
+            "offset": 8,
+            "offset_utf16": 9
+          },
+          {
+            "id": "c3",
+            "segment_id": "s2",
+            "status": "applied",
+            "offset": 6,
+            "offset_utf16": 7
+          }
+        ]
+      }
+    },
+    {
+      "name": "reject_applied",
+      "description": "Rejecting an applied correction restores `before` at its offset.",
+      "ops": [
+        {
+          "op": "review_correction",
+          "correction_id": "c1",
+          "decision": "reject"
+        }
+      ],
+      "expect": {
+        "segments": [
+          {
+            "id": "s0",
+            "text": "大家好😀今天聊 Kubernetes 和 汤猫。",
+            "edited": true
+          },
+          {
+            "id": "s1",
+            "text": "👍好的，我先说 kubernetes 部署，再说 KUBERNETES 监控。",
+            "edited": false
+          },
+          {
+            "id": "s2",
+            "text": "𠀀字测试 emoji 🎉 结束",
+            "edited": false
+          }
+        ],
+        "corrections": [
+          {
+            "id": "c1",
+            "segment_id": "s0",
+            "status": "rejected",
+            "offset": 21,
+            "offset_utf16": 22
+          },
+          {
+            "id": "c2",
+            "segment_id": "s1",
+            "status": "suggested",
+            "offset": 8,
+            "offset_utf16": 9
+          },
+          {
+            "id": "c3",
+            "segment_id": "s2",
+            "status": "applied",
+            "offset": 5,
+            "offset_utf16": 6
+          }
+        ]
+      }
+    },
+    {
+      "name": "accept_suggested",
+      "description": "Accepting a suggested correction writes `after` at its offset; later corrections in the segment are unaffected.",
+      "ops": [
+        {
+          "op": "review_correction",
+          "correction_id": "c2",
+          "decision": "accept"
+        }
+      ],
+      "expect": {
+        "segments": [
+          {
+            "id": "s0",
+            "text": "大家好😀今天聊 Kubernetes 和 Tomcat。",
+            "edited": false
+          },
+          {
+            "id": "s1",
+            "text": "👍好的，我先说 Kubernetes 部署，再说 KUBERNETES 监控。",
+            "edited": true
+          },
+          {
+            "id": "s2",
+            "text": "𠀀字测试 emoji 🎉 结束",
+            "edited": false
+          }
+        ],
+        "corrections": [
+          {
+            "id": "c1",
+            "segment_id": "s0",
+            "status": "applied",
+            "offset": 21,
+            "offset_utf16": 22
+          },
+          {
+            "id": "c2",
+            "segment_id": "s1",
+            "status": "accepted",
+            "offset": 8,
+            "offset_utf16": 9
+          },
+          {
+            "id": "c3",
+            "segment_id": "s2",
+            "status": "applied",
+            "offset": 5,
+            "offset_utf16": 6
+          }
+        ]
+      }
+    },
+    {
+      "name": "accept_applied_status_only",
+      "description": "Accepting an applied correction only changes its status.",
+      "ops": [
+        {
+          "op": "review_correction",
+          "correction_id": "c1",
+          "decision": "accept"
+        }
+      ],
+      "expect": {
+        "segments": [
+          {
+            "id": "s0",
+            "text": "大家好😀今天聊 Kubernetes 和 Tomcat。",
+            "edited": false
+          },
+          {
+            "id": "s1",
+            "text": "👍好的，我先说 kubernetes 部署，再说 KUBERNETES 监控。",
+            "edited": false
+          },
+          {
+            "id": "s2",
+            "text": "𠀀字测试 emoji 🎉 结束",
+            "edited": false
+          }
+        ],
+        "corrections": [
+          {
+            "id": "c1",
+            "segment_id": "s0",
+            "status": "accepted",
+            "offset": 21,
+            "offset_utf16": 22
+          },
+          {
+            "id": "c2",
+            "segment_id": "s1",
+            "status": "suggested",
+            "offset": 8,
+            "offset_utf16": 9
+          },
+          {
+            "id": "c3",
+            "segment_id": "s2",
+            "status": "applied",
+            "offset": 5,
+            "offset_utf16": 6
+          }
+        ]
+      }
+    },
+    {
+      "name": "edit_then_reject",
+      "description": "An edit before the correction (adding an emoji) rebases its offset; the reject then applies at the new place.",
+      "ops": [
+        {
+          "op": "edit_text",
+          "segment_id": "s0",
+          "text": "大家好😀😀今天聊 Kubernetes 和 Tomcat。"
+        },
+        {
+          "op": "review_correction",
+          "correction_id": "c1",
+          "decision": "reject"
+        }
+      ],
+      "expect": {
+        "segments": [
+          {
+            "id": "s0",
+            "text": "大家好😀😀今天聊 Kubernetes 和 汤猫。",
+            "edited": true
+          },
+          {
+            "id": "s1",
+            "text": "👍好的，我先说 kubernetes 部署，再说 KUBERNETES 监控。",
+            "edited": false
+          },
+          {
+            "id": "s2",
+            "text": "𠀀字测试 emoji 🎉 结束",
+            "edited": false
+          }
+        ],
+        "corrections": [
+          {
+            "id": "c1",
+            "segment_id": "s0",
+            "status": "rejected",
+            "offset": 22,
+            "offset_utf16": 24
+          },
+          {
+            "id": "c2",
+            "segment_id": "s1",
+            "status": "suggested",
+            "offset": 8,
+            "offset_utf16": 9
+          },
+          {
+            "id": "c3",
+            "segment_id": "s2",
+            "status": "applied",
+            "offset": 5,
+            "offset_utf16": 6
+          }
+        ]
+      }
+    },
+    {
+      "name": "split_then_reject",
+      "description": "Review after a split applies in the new segment at the rebased offset.",
+      "ops": [
+        {
+          "op": "split",
+          "segment_id": "s0",
+          "at": 4
+        },
+        {
+          "op": "review_correction",
+          "correction_id": "c1",
+          "decision": "reject"
+        }
+      ],
+      "expect": {
+        "segments": [
+          {
+            "id": "s0",
+            "text": "大家好😀",
+            "edited": true
+          },
+          {
+            "id": "s0-1",
+            "text": "今天聊 Kubernetes 和 汤猫。",
+            "edited": true
+          },
+          {
+            "id": "s1",
+            "text": "👍好的，我先说 kubernetes 部署，再说 KUBERNETES 监控。",
+            "edited": false
+          },
+          {
+            "id": "s2",
+            "text": "𠀀字测试 emoji 🎉 结束",
+            "edited": false
+          }
+        ],
+        "corrections": [
+          {
+            "id": "c1",
+            "segment_id": "s0-1",
+            "status": "rejected",
+            "offset": 17,
+            "offset_utf16": 17
+          },
+          {
+            "id": "c2",
+            "segment_id": "s1",
+            "status": "suggested",
+            "offset": 8,
+            "offset_utf16": 9
+          },
+          {
+            "id": "c3",
+            "segment_id": "s2",
+            "status": "applied",
+            "offset": 5,
+            "offset_utf16": 6
+          }
+        ]
+      }
+    },
+    {
+      "name": "reject_shrinks_then_split",
+      "description": "Rejecting changes the length (emoji -> 依码子); a later split uses code points of the new text.",
+      "ops": [
+        {
+          "op": "review_correction",
+          "correction_id": "c3",
+          "decision": "reject"
+        },
+        {
+          "op": "split",
+          "segment_id": "s2",
+          "at": 8
+        }
+      ],
+      "expect": {
+        "segments": [
+          {
+            "id": "s0",
+            "text": "大家好😀今天聊 Kubernetes 和 Tomcat。",
+            "edited": false
+          },
+          {
+            "id": "s1",
+            "text": "👍好的，我先说 kubernetes 部署，再说 KUBERNETES 监控。",
+            "edited": false
+          },
+          {
+            "id": "s2",
+            "text": "𠀀字测试 依码子",
+            "edited": true
+          },
+          {
+            "id": "s2-1",
+            "text": "🎉 结束",
+            "edited": true
+          }
+        ],
+        "corrections": [
+          {
+            "id": "c1",
+            "segment_id": "s0",
+            "status": "applied",
+            "offset": 21,
+            "offset_utf16": 22
+          },
+          {
+            "id": "c2",
+            "segment_id": "s1",
+            "status": "suggested",
+            "offset": 8,
+            "offset_utf16": 9
+          },
+          {
+            "id": "c3",
+            "segment_id": "s2",
+            "status": "rejected",
+            "offset": 5,
+            "offset_utf16": 6
+          }
+        ]
+      }
+    },
+    {
+      "name": "edit_over_correction_conflicts",
+      "description": "Editing the corrected span drops its offset; rejecting it then fails and nothing is written.",
+      "ops": [
+        {
+          "op": "edit_text",
+          "segment_id": "s0",
+          "text": "大家好😀今天聊 Kubernetes 和 TomCat。"
+        },
+        {
+          "op": "review_correction",
+          "correction_id": "c1",
+          "decision": "reject"
+        }
+      ],
+      "expect": {
+        "error": "correction no longer matches the text"
+      }
+    }
+  ],
+  "positions": [
+    {
+      "text": "大家好😀今天聊 Kubernetes 和 Tomcat。",
+      "pairs": [[0, 0], [1, 1], [2, 2], [3, 3], [5, 4], [6, 5], [7, 6], [8, 7], [9, 8], [10, 9], [11, 10], [12, 11], [13, 12], [14, 13], [15, 14], [16, 15], [17, 16], [18, 17], [19, 18], [20, 19], [21, 20], [22, 21], [23, 22], [24, 23], [25, 24], [26, 25], [27, 26], [28, 27], [29, 28]]
+    },
+    {
+      "text": "👍好的，我先说 kubernetes 部署，再说 KUBERNETES 监控。",
+      "pairs": [[0, 0], [2, 1], [3, 2], [4, 3], [5, 4], [6, 5], [7, 6], [8, 7], [9, 8], [10, 9], [11, 10], [12, 11], [13, 12], [14, 13], [15, 14], [16, 15], [17, 16], [18, 17], [19, 18], [20, 19], [21, 20], [22, 21], [23, 22], [24, 23], [25, 24], [26, 25], [27, 26], [28, 27], [29, 28], [30, 29], [31, 30], [32, 31], [33, 32], [34, 33], [35, 34], [36, 35], [37, 36], [38, 37], [39, 38], [40, 39]]
+    },
+    {
+      "text": "𠀀字测试 emoji 🎉 结束",
+      "pairs": [[0, 0], [2, 1], [3, 2], [4, 3], [5, 4], [6, 5], [7, 6], [8, 7], [9, 8], [10, 9], [11, 10], [12, 11], [14, 12], [15, 13], [16, 14], [17, 15]]
+    }
+  ]
+}

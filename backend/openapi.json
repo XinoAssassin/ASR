@@ -78,6 +78,22 @@
             "title": "Api Key Set",
             "type": "boolean"
           },
+          "api_key_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "env",
+                  "settings"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the effective DashScope key comes from: `settings` (the override set via PUT), `env` (DASHSCOPE_API_KEY; clearing the override falls back to it), or null.",
+            "title": "Api Key Source"
+          },
           "endpoint": {
             "title": "Endpoint",
             "type": "string"
@@ -320,6 +336,122 @@
           "text"
         ],
         "title": "EditTextOp",
+        "type": "object"
+      },
+      "EnvironmentOut": {
+        "description": "Read-only facts from the server environment (ARCH_REVIEW §4-f). Not updatable via\n``PUT /api/settings``; changed by editing the env / ``.env`` and restarting. No secrets.",
+        "properties": {
+          "allow_unauthenticated_network": {
+            "description": "ASR_ALLOW_UNAUTHENTICATED_NETWORK.",
+            "title": "Allow Unauthenticated Network",
+            "type": "boolean"
+          },
+          "allowed_hosts": {
+            "description": "ASR_ALLOWED_HOSTS.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Hosts",
+            "type": "array"
+          },
+          "api_key_required": {
+            "description": "ASR_API_KEY is set (the key itself never is).",
+            "title": "Api Key Required",
+            "type": "boolean"
+          },
+          "cors_origins": {
+            "description": "ASR_CORS_ORIGINS.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Cors Origins",
+            "type": "array"
+          },
+          "data_dir": {
+            "description": "ASR_DATA_DIR (resolved).",
+            "title": "Data Dir",
+            "type": "string"
+          },
+          "decoder": {
+            "description": "ASR_DECODER.",
+            "title": "Decoder",
+            "type": "string"
+          },
+          "llm_model": {
+            "description": "ASR_LLM_MODEL (L3 suggestions / summary).",
+            "title": "Llm Model",
+            "type": "string"
+          },
+          "local_dtype": {
+            "description": "ASR_LOCAL_DTYPE.",
+            "title": "Local Dtype",
+            "type": "string"
+          },
+          "log_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "ASR_LOG_FILE.",
+            "title": "Log File"
+          },
+          "log_format": {
+            "description": "ASR_LOG_FORMAT.",
+            "title": "Log Format",
+            "type": "string"
+          },
+          "log_level": {
+            "description": "ASR_LOG_LEVEL.",
+            "title": "Log Level",
+            "type": "string"
+          },
+          "model_cache_dir": {
+            "description": "ASR_MODEL_CACHE_DIR (resolved).",
+            "title": "Model Cache Dir",
+            "type": "string"
+          },
+          "torch_threads": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "ASR_TORCH_THREADS; null = automatic.",
+            "title": "Torch Threads"
+          },
+          "upload_roots": {
+            "description": "ASR_UPLOAD_ROOTS (resolved).",
+            "items": {
+              "type": "string"
+            },
+            "title": "Upload Roots",
+            "type": "array"
+          }
+        },
+        "required": [
+          "api_key_required",
+          "allow_unauthenticated_network",
+          "cors_origins",
+          "allowed_hosts",
+          "upload_roots",
+          "data_dir",
+          "model_cache_dir",
+          "decoder",
+          "torch_threads",
+          "local_dtype",
+          "llm_model",
+          "log_level",
+          "log_format",
+          "log_file"
+        ],
+        "title": "EnvironmentOut",
         "type": "object"
       },
       "FsDir": {
@@ -1366,6 +1498,17 @@
           "cloud": {
             "$ref": "#/components/schemas/CloudSettingsOut"
           },
+          "env_only": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Fields of this response that only the environment sets (dotted path -> variable name), for a 'set via environment' hint in the UI.",
+            "title": "Env Only",
+            "type": "object"
+          },
+          "environment": {
+            "$ref": "#/components/schemas/EnvironmentOut"
+          },
           "local": {
             "$ref": "#/components/schemas/LocalSettingsOut"
           },
@@ -1390,7 +1533,9 @@
           "api_key_required",
           "upload_roots",
           "local",
-          "cloud"
+          "cloud",
+          "environment",
+          "env_only"
         ],
         "title": "SettingsOut",
         "type": "object"
@@ -1435,6 +1580,279 @@
           }
         },
         "title": "SettingsUpdate",
+        "type": "object"
+      },
+      "SiYuanNotebookOut": {
+        "properties": {
+          "closed": {
+            "description": "Closed notebooks cannot receive documents.",
+            "title": "Closed",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "closed"
+        ],
+        "title": "SiYuanNotebookOut",
+        "type": "object"
+      },
+      "SiYuanPushIn": {
+        "properties": {
+          "locale": {
+            "default": "zh",
+            "enum": [
+              "zh",
+              "en"
+            ],
+            "title": "Locale",
+            "type": "string"
+          },
+          "merge_same_speaker": {
+            "default": false,
+            "title": "Merge Same Speaker",
+            "type": "boolean"
+          },
+          "notebook": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9]{14}-[0-9a-z]{7}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Notebook id; default from settings.",
+            "title": "Notebook"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Document path such as '/会议记录/周会'; default from `path_template`. An existing path gets a ' (2)' suffix.",
+            "title": "Path"
+          },
+          "timestamps": {
+            "default": true,
+            "title": "Timestamps",
+            "type": "boolean"
+          }
+        },
+        "title": "SiYuanPushIn",
+        "type": "object"
+      },
+      "SiYuanPushOut": {
+        "properties": {
+          "doc_id": {
+            "title": "Doc Id",
+            "type": "string"
+          },
+          "notebook": {
+            "title": "Notebook",
+            "type": "string"
+          },
+          "path": {
+            "description": "Path actually used (may carry a ' (n)' suffix).",
+            "title": "Path",
+            "type": "string"
+          },
+          "url": {
+            "description": "siyuan://blocks/<doc_id>, opens the document in SiYuan.",
+            "title": "Url",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "doc_id",
+          "notebook",
+          "path",
+          "url"
+        ],
+        "title": "SiYuanPushOut",
+        "type": "object"
+      },
+      "SiYuanSettingsOut": {
+        "properties": {
+          "endpoint": {
+            "description": "SiYuan kernel URL as reached from the backend host.",
+            "title": "Endpoint",
+            "type": "string"
+          },
+          "notebook": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Default notebook id, null if none chosen.",
+            "title": "Notebook"
+          },
+          "path_fields": {
+            "description": "Placeholders allowed in `path_template`.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Path Fields",
+            "type": "array"
+          },
+          "path_template": {
+            "description": "Document path; placeholders {title} {date} {time} {source} {provider}.",
+            "title": "Path Template",
+            "type": "string"
+          },
+          "token_masked": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "E.g. '****abcd'; never the full token.",
+            "title": "Token Masked"
+          },
+          "token_set": {
+            "title": "Token Set",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "endpoint",
+          "token_set",
+          "token_masked",
+          "notebook",
+          "path_template",
+          "path_fields"
+        ],
+        "title": "SiYuanSettingsOut",
+        "type": "object"
+      },
+      "SiYuanSettingsUpdate": {
+        "description": "Partial update; omitted fields are unchanged and ``\"\"`` resets a field to its default.\nChanging ``endpoint`` without sending ``token`` in the same request clears the stored token,\nso a saved token is never sent to a host it was not saved for.",
+        "properties": {
+          "endpoint": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "http(s) URL; default http://127.0.0.1:6806.",
+            "title": "Endpoint"
+          },
+          "notebook": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Notebook id or ''.",
+            "title": "Notebook"
+          },
+          "path_template": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path Template"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "format": "password",
+                "maxLength": 500,
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Write-only API token (SiYuan: Settings - About). '' clears it.",
+            "title": "Token"
+          }
+        },
+        "title": "SiYuanSettingsUpdate",
+        "type": "object"
+      },
+      "SiYuanTestOut": {
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "notebooks": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Number of notebooks visible.",
+            "title": "Notebooks"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "required": [
+          "ok",
+          "message"
+        ],
+        "title": "SiYuanTestOut",
         "type": "object"
       },
       "Speaker": {
@@ -2429,7 +2847,7 @@
     },
     "/api/jobs/{job_id}": {
       "delete": {
-        "description": "Cancels the job if active. With ``delete_audio`` the upload (record, stored file, browser\nMP3 cache) is removed too, unless another job still references it.",
+        "description": "Cancels the job if active. With ``delete_audio`` the upload (record, stored file, browser\nMP3 cache) is removed too, unless another job still references it. A running job is given\na few seconds to stop first; a stored file that still cannot be deleted (Windows: open\nelsewhere) is kept together with its upload record, and the job is deleted regardless.",
         "operationId": "delete_job_api_jobs__job_id__delete",
         "parameters": [
           {
@@ -2811,6 +3229,114 @@
         ]
       }
     },
+    "/api/siyuan/notebooks": {
+      "get": {
+        "operationId": "list_siyuan_notebooks_api_siyuan_notebooks_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SiYuanNotebookOut"
+                  },
+                  "title": "Response List Siyuan Notebooks Api Siyuan Notebooks Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Siyuan Notebooks",
+        "tags": [
+          "siyuan"
+        ]
+      }
+    },
+    "/api/siyuan/settings": {
+      "get": {
+        "operationId": "get_siyuan_settings_api_siyuan_settings_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiYuanSettingsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Siyuan Settings",
+        "tags": [
+          "siyuan"
+        ]
+      },
+      "put": {
+        "description": "Partial update; ``\"\"`` resets a field. ``token`` is write-only. A changed ``endpoint``\nwithout a ``token`` in the same request clears the stored token.",
+        "operationId": "update_siyuan_settings_api_siyuan_settings_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SiYuanSettingsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiYuanSettingsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Siyuan Settings",
+        "tags": [
+          "siyuan"
+        ]
+      }
+    },
+    "/api/siyuan/test": {
+      "post": {
+        "description": "Check the saved endpoint and token: kernel version and notebook list. Note that SiYuan\ndoes not check the token for loopback requests when it has no access authorization code.",
+        "operationId": "test_siyuan_api_siyuan_test_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiYuanTestOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Test Siyuan",
+        "tags": [
+          "siyuan"
+        ]
+      }
+    },
     "/api/term-sets": {
       "get": {
         "operationId": "list_term_sets_api_term_sets_get",
@@ -3140,6 +3666,7 @@
     },
     "/api/transcripts/{transcript_id}/export": {
       "get": {
+        "description": "Download the current segments as txt / srt / vtt / json / md. ``md`` is a Markdown note\n(front matter, summary if any, speaker table, transcript; docs/research/siyuan-export.md).",
         "operationId": "export_transcript_api_transcripts__transcript_id__export_get",
         "parameters": [
           {
@@ -3161,7 +3688,8 @@
                 "txt",
                 "srt",
                 "vtt",
-                "json"
+                "json",
+                "md"
               ],
               "title": "Format",
               "type": "string"
@@ -3186,6 +3714,22 @@
               "title": "Merge Same Speaker",
               "type": "boolean"
             }
+          },
+          {
+            "description": "Headings and labels of `md`; other formats ignore it.",
+            "in": "query",
+            "name": "locale",
+            "required": false,
+            "schema": {
+              "default": "zh",
+              "description": "Headings and labels of `md`; other formats ignore it.",
+              "enum": [
+                "zh",
+                "en"
+              ],
+              "title": "Locale",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -3197,6 +3741,11 @@
                 }
               },
               "application/x-subrip": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "text/markdown": {
                 "schema": {
                   "type": "string"
                 }
@@ -3317,6 +3866,58 @@
         "summary": "Revert Transcript",
         "tags": [
           "transcripts"
+        ]
+      }
+    },
+    "/api/transcripts/{transcript_id}/siyuan": {
+      "post": {
+        "description": "Create a SiYuan document from the current segments (SiYuan-flavoured Markdown: summary,\nspeaker table, one block per turn with ``custom-asr-speaker`` / ``-start`` / ``-end``\nattributes) and set ``custom-asr-*`` document attributes and tags. Every call creates a new\ndocument; an existing path gets a `` (2)`` suffix.",
+        "operationId": "push_to_siyuan_api_transcripts__transcript_id__siyuan_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transcript_id",
+            "required": true,
+            "schema": {
+              "title": "Transcript Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SiYuanPushIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiYuanPushOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Transcript not found."
+          },
+          "422": {
+            "description": "SiYuan not configured, no notebook, or an invalid path."
+          },
+          "502": {
+            "description": "SiYuan unreachable or refused the request."
+          }
+        },
+        "summary": "Push To Siyuan",
+        "tags": [
+          "siyuan"
         ]
       }
     },

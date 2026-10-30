@@ -15,6 +15,7 @@ from server import storage
 from server.config import EnvSettings
 from server.routes import uploads as uploads_route
 from tests.conftest import API_KEY, ClientFactory
+from tests.fs_helpers import symlink_or_skip
 from tests.test_audio_fixtures import correlated_stereo, wav_bytes, write_audio
 
 
@@ -350,7 +351,7 @@ async def test_register_outside_root(
     rel = "../private.wav"
     assert (await client.post("/api/uploads/register", json={"path": rel})).status_code == 403
     link = _root(env) / "link.wav"
-    link.symlink_to(outside)
+    symlink_or_skip(link, outside)
     assert (
         await client.post("/api/uploads/register", json={"path": "link.wav"})
     ).status_code == 403

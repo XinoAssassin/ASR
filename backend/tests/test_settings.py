@@ -65,6 +65,10 @@ def test_effective_settings_overlay(env: EnvSettings) -> None:
 
 async def test_get_defaults(client: httpx.AsyncClient, env: EnvSettings) -> None:
     body = (await client.get("/api/settings")).json()
+    # Env-only facts (ARCH_REVIEW §4-f) are covered in test_server_hardening.
+    environment, env_only = body.pop("environment"), body.pop("env_only")
+    assert environment["upload_roots"] == [str(r) for r in env.upload_roots]
+    assert env_only["upload_roots"] == "ASR_UPLOAD_ROOTS"
     assert body == {
         "provider_default": "cloud",
         "api_key_required": False,
@@ -81,6 +85,7 @@ async def test_get_defaults(client: httpx.AsyncClient, env: EnvSettings) -> None
             "file_transfer": "temp_upload",
             "api_key_set": False,
             "api_key_masked": None,
+            "api_key_source": None,
         },
     }
 

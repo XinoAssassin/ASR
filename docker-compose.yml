@@ -22,7 +22,8 @@ services:
       target: backend-cpu
     # Default command (Dockerfile): asr serve --host 0.0.0.0 --port 8000
     # Behind a reverse proxy that reaches the container from another address, trust its
-    # X-Forwarded-* headers (client IPs in the access log):
+    # X-Forwarded-* headers (client IPs in the access log). This needs ASR_API_KEY: asr serve
+    # refuses --forwarded-allow-ips without one.
     # command: ["asr", "serve", "--host", "0.0.0.0", "--port", "8000", "--forwarded-allow-ips", "172.16.0.0/12"]
     environment:
       ASR_DATA_DIR: /data

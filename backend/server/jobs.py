@@ -12,38 +12,40 @@ Design:
   every stage change / new external id) and publishes each write to SSE subscribers.
 - Cancel: a queued job flips to ``cancelled`` immediately (atomic transition); a running job gets
   its flag set and stops at the provider's next progress call.
-- Startup (D13): ``running`` -> failed "interrupted by restart"; ``queued`` jobs are re-enqueued.
+- Cancel after the run was released (only the ``succeeded`` / terminal write is left) waits briefly
+  for that write and returns the final row instead of answering "running".
+- Finishing a run (post-correction + transcript write) is ``server.finalize.TranscriptFinalizer``.
+- Startup (D13): ``running`` -> failed "interrupted by restart"; ``queued`` jobs are re-enqueued;
+  stale ``work/<job_id>`` dirs are removed before any worker starts. On stop the work dir of a
+  run whose provider thread may still be writing is left for that cleanup.
 """
 
 import asyncio
 import contextlib
 import logging
 import shutil
-import sqlite3
 import threading
 import time
 import traceback
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import asr.providers
-from asr.correct import correct_segments
 from asr.providers.base import (
     AudioSource,
-    Correction,
     JobCancelled,
     ProgressEvent,
     ProviderError,
-    Segment,
     Transcript,
     TranscriptionProvider,
 )
+from asr.providers.cloud.security import redact
 from server import storage
 from server.config import EffectiveSettings, EnvSettings, load_effective_settings
 from server.db import Database, utcnow
+from server.finalize import TranscriptFinalizer
 from server.schemas import JobOut, JobStatus
 
 log = logging.getLogger(__name__)
@@ -53,6 +55,7 @@ ACTIVE_STATUSES: frozenset[JobStatus] = frozenset({"queued", "running"})
 
 PROGRESS_WRITE_INTERVAL = 0.5  # seconds -> at most ~2 progress writes per second per job
 SUBSCRIBER_QUEUE_SIZE = 64
+FINISH_WAIT = 10.0  # seconds a late cancel waits for the final write of a released run
 
 GENERIC_FAILURE = "Internal error while running the job; see the server log."
 INTERRUPTED = "interrupted by restart"
@@ -109,6 +112,8 @@ class _Running:
     last_write: float = 0.0
     flush_handle: asyncio.TimerHandle | None = None
     pending: set[asyncio.Task[None]] = field(default_factory=set)
+    done: asyncio.Event = field(default_factory=asyncio.Event)
+    """Set once the run is over (terminal status written or abandoned)."""
 
 
 class JobManager:
@@ -128,6 +133,9 @@ class JobManager:
         self._queues: dict[str, asyncio.Queue[str]] = {}
         self._workers: list[asyncio.Task[None]] = []
         self._running: dict[str, _Running] = {}
+        # Runs past ``_settle``: no longer cancellable, final write still pending.
+        self._finishing: dict[str, _Running] = {}
+        self.finalizer = TranscriptFinalizer(db)
         self._subscribers: dict[str, set[asyncio.Queue[JobOut | None]]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stopping = False
@@ -138,6 +146,8 @@ class JobManager:
         self._loop = asyncio.get_running_loop()
         self._stopping = False
         self._queues = {"cloud": asyncio.Queue(), "local": asyncio.Queue()}
+        # Nothing runs yet: every work dir is left over from a crash or an interrupted stop.
+        await asyncio.to_thread(shutil.rmtree, self._work_root(), True)
 
         now = utcnow()
         for job in await self.db.list_jobs_by_status("running"):
@@ -226,6 +236,11 @@ class JobManager:
             if current is not None:
                 self._publish(current)
             return current
+        if state is not None or job_id in self._finishing:
+            # Too late to cancel: report how the run ends rather than "running".
+            done = (state or self._finishing[job_id]).done
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(done.wait(), FINISH_WAIT)
         return await self.db.get_job(job_id)
 
     async def retry(self, job_id: str) -> JobOut | None:
@@ -358,6 +373,7 @@ class JobManager:
                 return
             except Exception as exc:
                 trace = "".join(traceback.format_exception(exc))
+                trace = redact(trace, tuple(secrets), max_chars=None)
                 log.error("job %s failed unexpectedly:\n%s", job_id, _redact(trace, secrets))
                 await self._finish(state, status="failed", error=GENERIC_FAILURE)
                 return
@@ -370,7 +386,12 @@ class JobManager:
             state.finished = True
             if state.flush_handle is not None:
                 state.flush_handle.cancel()
-            await self._release(state)
+            try:
+                await self._release(state)
+            finally:
+                if self._finishing.get(job_id) is state:
+                    del self._finishing[job_id]
+                state.done.set()
 
     async def _execute(
         self, state: _Running, settings: EffectiveSettings, work_dir: Path
@@ -480,6 +501,7 @@ class JobManager:
         running, or its queue entry would be dropped as a duplicate.
         """
         state.finished = True
+        self._finishing[state.job.id] = state
         if state.flush_handle is not None:
             state.flush_handle.cancel()
             state.flush_handle = None
@@ -487,18 +509,26 @@ class JobManager:
             await asyncio.gather(*state.pending, return_exceptions=True)
         await self._release(state)
 
+    def _work_root(self) -> Path:
+        return self.env.data_dir / "work"
+
     def _work_dir(self, job_id: str) -> Path:
-        return self.env.data_dir / "work" / job_id
+        return self._work_root() / job_id
 
     async def _release(self, state: _Running) -> None:
-        """Forget the run and remove its work dir; idempotent, never touches a newer run."""
+        """Forget the run and remove its work dir; idempotent, never touches a newer run.
+
+        While stopping, the provider thread of a cancelled worker may still be writing to the
+        work dir, so it is left for the cleanup in the next ``start``.
+        """
         if state.released:
             return
         state.released = True
         job_id = state.job.id
         if self._running.get(job_id) is state:
             del self._running[job_id]
-        await asyncio.to_thread(shutil.rmtree, self._work_dir(job_id), True)
+        if not self._stopping:
+            await asyncio.to_thread(shutil.rmtree, self._work_dir(job_id), True)
 
     # ---------------------------------------------------------------------------- finish
     async def _finish(self, state: _Running, *, status: JobStatus, error: str | None) -> None:
@@ -521,74 +551,31 @@ class JobManager:
                 extra={"job_id": job.id, "status": status, "elapsed_s": _elapsed(job)},
             )
 
-    async def _post_correct(
-        self, job: JobOut, transcript: Transcript
-    ) -> tuple[list[Segment], list[Correction]]:
-        """[5b] correction for every provider; a failure keeps the raw text and adds a warning."""
-        opts = job.options.correction
-        if not (opts.terms or opts.repetition):
-            return list(transcript.segments), []
-        try:
-            return await asyncio.to_thread(
-                correct_segments, transcript.segments, job.options.terms, opts
-            )
-        except Exception:
-            log.exception("post-correction failed for job %s", job.id)
-            transcript.warnings.append("Automatic correction failed; showing raw text")
-            return list(transcript.segments), []
-
     async def _succeed(self, state: _Running, transcript: Transcript) -> None:
         # Post-correction can take a while; the run stays registered meanwhile so a cancel still
-        # finds its flag, and a delete is noticed before anything is stored.
-        segments, corrections = await self._post_correct(state.job, transcript)
+        # finds its flag, and a delete is noticed (by ``store``) before anything is stored.
+        result = await self.finalizer.prepare(state.job, transcript)
         if state.cancel.is_set():
             await self._finish(state, status="cancelled", error=None)
             return
         await self._settle(state)
         job_id = state.job.id
-        current = await self.db.get_job(job_id)
-        if current is None or current.status != "running":  # deleted meanwhile
-            return
-        transcript_id = uuid.uuid4().hex
-        try:
-            await self.db.insert_transcript(
-                transcript_id,
-                job_id,
-                transcript.model_copy(update={"segments": segments}),
-                original=transcript.segments,
-                corrections=corrections,
-            )
-        except sqlite3.IntegrityError:
-            if await self.db.get_job(job_id) is None:  # deleted between the check and the insert
-                return
-            raise
-        job = await self.db.transition_job(
-            job_id,
-            ("running",),
-            status="succeeded",
-            stage="done",
-            progress=1.0,
-            message=None,
-            error=None,
-            warnings=list(transcript.warnings),
-            cloud_task_id=state.job.cloud_task_id,
-            transcript_id=transcript_id,
-            finished_at=utcnow(),
-        )
+        job = await self.finalizer.store(state.job, result, cloud_task_id=state.job.cloud_task_id)
         if job is not None:
             self._publish(job)
             elapsed = _elapsed(job)
+            audio_s = transcript.duration or 0.0
             log.info(
                 "job %s succeeded: %d segments, %d speakers, %.1f s audio in %s s",
                 job_id,
-                len(segments),
+                len(result.segments),
                 len(transcript.speakers),
-                transcript.duration,
+                audio_s,
                 elapsed,
                 extra={
                     "job_id": job_id,
                     "status": "succeeded",
                     "elapsed_s": elapsed,
-                    "audio_s": round(transcript.duration, 1),
+                    "audio_s": round(audio_s, 1),
                 },
             )

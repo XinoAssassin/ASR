@@ -5,7 +5,7 @@ Secrets are returned masked only (rule 3); env-only values are not updatable (D7
 
 import logging
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.concurrency import run_in_threadpool
@@ -13,13 +13,21 @@ from fastapi.concurrency import run_in_threadpool
 from asr.providers import cloud as cloud_provider
 from asr.providers.local import models as local_models
 from server import config
-from server.config import EffectiveSettings, EnvSettings, load_effective_settings, mask_secret
+from server.config import (
+    EffectiveSettings,
+    EnvSettings,
+    effective_settings,
+    load_effective_settings,
+    mask_secret,
+)
+from server.db import Database
 from server.deps import DbDep, EnvDep, ModelDownloadsDep
 from server.jobs import MISSING_KEY
 from server.model_downloads import DownloadBusy, ModelDownloads
 from server.schemas import (
     CloudSettingsOut,
     ConnectionTestResult,
+    EnvironmentOut,
     LocalModelOut,
     LocalSettingsOut,
     SettingsOut,
@@ -34,7 +42,64 @@ _422 = status.HTTP_422_UNPROCESSABLE_CONTENT
 _KIND = {"asr": "asr", "align": "aligner", "vad": "vad", "diarize": "diarization"}
 
 
-def _settings_out(env: EnvSettings, eff: EffectiveSettings) -> SettingsOut:
+# Response fields only the environment sets (dotted path -> variable), for the UI (§4-f).
+ENV_ONLY_FIELDS: dict[str, str] = {
+    "api_key_required": "ASR_API_KEY",
+    "upload_roots": "ASR_UPLOAD_ROOTS",
+    "local.model_cache_dir": "ASR_MODEL_CACHE_DIR",
+    "environment.api_key_required": "ASR_API_KEY",
+    "environment.allow_unauthenticated_network": "ASR_ALLOW_UNAUTHENTICATED_NETWORK",
+    "environment.cors_origins": "ASR_CORS_ORIGINS",
+    "environment.allowed_hosts": "ASR_ALLOWED_HOSTS",
+    "environment.upload_roots": "ASR_UPLOAD_ROOTS",
+    "environment.data_dir": "ASR_DATA_DIR",
+    "environment.model_cache_dir": "ASR_MODEL_CACHE_DIR",
+    "environment.decoder": "ASR_DECODER",
+    "environment.torch_threads": "ASR_TORCH_THREADS",
+    "environment.local_dtype": "ASR_LOCAL_DTYPE",
+    "environment.llm_model": "ASR_LLM_MODEL",
+    "environment.log_level": "ASR_LOG_LEVEL",
+    "environment.log_format": "ASR_LOG_FORMAT",
+    "environment.log_file": "ASR_LOG_FILE",
+}
+
+
+def _environment_out(env: EnvSettings) -> EnvironmentOut:
+    return EnvironmentOut(
+        api_key_required=env.api_key_required,
+        allow_unauthenticated_network=env.allow_unauthenticated_network,
+        cors_origins=list(env.cors_origins),
+        allowed_hosts=list(env.allowed_hosts),
+        upload_roots=[str(r) for r in env.upload_roots],
+        data_dir=str(env.data_dir),
+        model_cache_dir=str(env.model_cache_dir),
+        decoder=env.decoder,
+        torch_threads=env.torch_threads,
+        local_dtype=env.local_dtype,
+        llm_model=env.llm_model,
+        log_level=env.log_level,
+        log_format=env.log_format,
+        log_file=None if env.log_file is None else str(env.log_file),
+    )
+
+
+def _api_key_source(
+    eff: EffectiveSettings, overrides: dict[str, str]
+) -> Literal["env", "settings"] | None:
+    if not eff.cloud_api_key_set:
+        return None
+    stored = overrides.get(config.SETTING_CLOUD_API_KEY)
+    return "settings" if stored and stored == eff.cloud_api_key.get_secret_value() else "env"
+
+
+async def _current(env: EnvSettings, db: Database) -> SettingsOut:
+    overrides = await db.get_settings()
+    return _settings_out(env, effective_settings(env, overrides), overrides)
+
+
+def _settings_out(
+    env: EnvSettings, eff: EffectiveSettings, overrides: dict[str, str]
+) -> SettingsOut:
     return SettingsOut(
         provider_default=eff.provider_default,
         api_key_required=env.api_key_required,
@@ -51,13 +116,16 @@ def _settings_out(env: EnvSettings, eff: EffectiveSettings) -> SettingsOut:
             file_transfer=eff.cloud_file_transfer,
             api_key_set=eff.cloud_api_key_set,
             api_key_masked=mask_secret(eff.cloud_api_key),
+            api_key_source=_api_key_source(eff, overrides),
         ),
+        environment=_environment_out(env),
+        env_only=dict(ENV_ONLY_FIELDS),
     )
 
 
 @router.get("", response_model=SettingsOut)
 async def get_settings(db: DbDep, env: EnvDep) -> SettingsOut:
-    return _settings_out(env, await load_effective_settings(env, db))
+    return await _current(env, db)
 
 
 @router.put("", response_model=SettingsOut)
@@ -77,7 +145,13 @@ async def update_settings(body: SettingsUpdate, db: DbDep, env: EnvDep) -> Setti
                 raise HTTPException(_422, f"unknown local ASR model {asr_model!r}")
             writes[config.SETTING_LOCAL_ASR_MODEL] = asr_model
         if body.local.diarize_model is not None:
-            writes[config.SETTING_LOCAL_DIARIZE_MODEL] = body.local.diarize_model.strip()
+            diarize_model = body.local.diarize_model.strip()
+            if diarize_model and (
+                diarize_model not in local_models.MODELS
+                or local_models.MODELS[diarize_model].kind != "diarize"
+            ):
+                raise HTTPException(_422, f"unknown local diarization model {diarize_model!r}")
+            writes[config.SETTING_LOCAL_DIARIZE_MODEL] = diarize_model
         if body.local.device is not None:
             writes[config.SETTING_LOCAL_DEVICE] = body.local.device
     if body.cloud is not None:
@@ -114,7 +188,7 @@ async def update_settings(body: SettingsUpdate, db: DbDep, env: EnvDep) -> Setti
             await db.delete_setting(key_name)
     if clear_key:
         await db.delete_setting(config.SETTING_CLOUD_API_KEY)
-    return _settings_out(env, await load_effective_settings(env, db))
+    return await _current(env, db)
 
 
 @router.post("/test-cloud", response_model=ConnectionTestResult)

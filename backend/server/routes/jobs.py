@@ -1,8 +1,10 @@
 """Jobs (PLAN §5.2). Owned by ``backend-jobs`` (M1)."""
 
 import asyncio
+import contextlib
 import logging
 import os
+import time
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -16,10 +18,11 @@ from asr.providers.base import JobOptions, LocalOptions, ProviderName, Term
 from asr.providers.local import models as local_models
 from asr.providers.local.pipeline import default_asr_model
 from asr.terms import merge_terms
+from server import storage
 from server.config import EffectiveSettings, EnvSettings, load_effective_settings
 from server.db import Database, utcnow
 from server.deps import DbDep, EnvDep, JobManagerDep
-from server.jobs import MISSING_KEY, TERMINAL_STATUSES
+from server.jobs import MISSING_KEY, TERMINAL_STATUSES, JobManager
 from server.schemas import JobCreate, JobList, JobOut, JobStatus
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -180,19 +183,19 @@ async def get_job(job_id: str, manager: JobManagerDep) -> JobOut:
     },
 )
 async def job_events(job_id: str, request: Request, manager: JobManagerDep) -> Response:
-    # Subscribe before reading the state so no change between the two is lost.
-    queue = manager.subscribe(job_id)
-    try:
-        initial = await manager.get_state(job_id)
-    except BaseException:
-        manager.unsubscribe(job_id, queue)
-        raise
-    if initial is None:
-        manager.unsubscribe(job_id, queue)
+    if await manager.get_state(job_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
 
     async def stream() -> AsyncIterator[dict[str, Any]]:
+        # Subscribe inside the generator, next to the ``finally`` that unsubscribes: Python never
+        # runs the ``finally`` of an async generator that was never started, so a subscription
+        # made in the handler leaked whenever the response was torn down before streaming.
+        # Subscribing before reading the state means no change between the two is lost.
+        queue = manager.subscribe(job_id)
         try:
+            initial = await manager.get_state(job_id)
+            if initial is None:  # deleted after the 404 check
+                return
             yield {"event": "job", "data": initial.model_dump_json()}
             if initial.status in TERMINAL_STATUSES:
                 return
@@ -238,28 +241,68 @@ async def retry_job(job_id: str, db: DbDep, manager: JobManagerDep) -> JobOut:
 
 
 def _inside_roots(path: Path, roots: list[Path]) -> bool:
+    """Strictly inside a root (rule 2, the same check as ``storage``; a root itself is not)."""
     try:
-        real = Path(os.path.realpath(path))
+        root = storage.containing_root(path, roots)
+        return root is not None and Path(os.path.realpath(path)) != root
     except OSError:
         return False
-    return any(real.is_relative_to(root) and real != root for root in roots)
+
+
+UNLINK_ATTEMPTS = 5
+UNLINK_RETRY_S = 0.2
+RUN_STOP_WAIT_S = 5.0
+
+
+def _unlink(path: Path, what: str, upload_id: str) -> bool:
+    """Remove ``path``; ``False`` (logged) if it stays. Windows refuses to delete a file that is
+    still open (a provider thread reading it, ``/api/audio`` streaming the MP3 cache), so a
+    ``PermissionError`` is retried briefly before giving up."""
+    for attempt in range(UNLINK_ATTEMPTS):
+        try:
+            path.unlink(missing_ok=True)
+            return True
+        except PermissionError:
+            if attempt + 1 < UNLINK_ATTEMPTS:
+                time.sleep(UNLINK_RETRY_S)
+        except OSError:
+            break
+    log.warning(
+        "could not delete the %s of upload %s; it is in use or not removable", what, upload_id
+    )
+    return False
 
 
 def _remove_audio_files(
     env: EnvSettings, upload_id: str, stored_path: str, *, registered: bool
-) -> None:
-    """Blocking file removal (run in a thread). Registered files belong to the user and stay."""
+) -> bool:
+    """Blocking file removal (run in a thread). Registered files belong to the user and stay.
+
+    Returns ``False`` when the stored file could not be deleted: the caller then keeps the
+    upload row, so the record still points at the file instead of orphaning it. The MP3 cache
+    is derived data; a cache file that cannot be removed is only logged."""
     cache_dir = env.data_dir / "cache" / "audio"
-    (cache_dir / f"{upload_id}.mp3").unlink(missing_ok=True)
-    for cached in cache_dir.glob(f"{upload_id}.s*.mp3"):  # other audio streams
-        cached.unlink(missing_ok=True)
-    path = Path(stored_path)
+    cached = [cache_dir / f"{upload_id}.mp3"]
+    with contextlib.suppress(OSError):
+        cached += list(cache_dir.glob(f"{upload_id}.s*.mp3"))  # other audio streams
+    for path in cached:
+        _unlink(path, "audio cache", upload_id)
     if registered:
-        return
+        return True
+    path = Path(stored_path)
     if _inside_roots(path, env.upload_roots) and path.is_file():
-        path.unlink(missing_ok=True)
-    else:
-        log.warning("not deleting upload %s: stored file is outside the upload roots", upload_id)
+        return _unlink(path, "stored file", upload_id)
+    log.warning("not deleting upload %s: stored file is outside the upload roots", upload_id)
+    return True
+
+
+async def _wait_until_stopped(manager: JobManager, job_id: str) -> None:
+    """Bounded wait for a cancelled run to let go of its input file (Windows cannot delete an
+    open file)."""
+    deadline = time.monotonic() + RUN_STOP_WAIT_S
+    # JobManager has no public "run released" event; poll its public state instead.
+    while manager.is_running(job_id) and time.monotonic() < deadline:  # noqa: ASYNC110
+        await asyncio.sleep(0.05)
 
 
 @router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
@@ -271,14 +314,18 @@ async def delete_job(
     delete_audio: Annotated[bool, Query(description="Also delete the uploaded file.")] = False,
 ) -> Response:
     """Cancels the job if active. With ``delete_audio`` the upload (record, stored file, browser
-    MP3 cache) is removed too, unless another job still references it."""
+    MP3 cache) is removed too, unless another job still references it. A running job is given
+    a few seconds to stop first; a stored file that still cannot be deleted (Windows: open
+    elsewhere) is kept together with its upload record, and the job is deleted regardless."""
     job = await _get_or_404(db, job_id)
     await manager.delete(job_id)
     if delete_audio and job.upload_id is not None:
         upload = await db.get_upload(job.upload_id)
         if upload is not None and await db.count_jobs_for_upload(upload.id) == 0:
-            await asyncio.to_thread(
+            await _wait_until_stopped(manager, job_id)
+            removed = await asyncio.to_thread(
                 _remove_audio_files, env, upload.id, upload.path, registered=upload.registered
             )
-            await db.delete_upload(upload.id)
+            if removed:
+                await db.delete_upload(upload.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

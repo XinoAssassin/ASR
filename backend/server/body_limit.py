@@ -2,10 +2,13 @@
 
 Every route except the upload routes takes a small JSON body, so anything larger than
 ``MAX_JSON_BODY`` is refused with 413 before it is buffered: by ``Content-Length`` up front, and
-by counting the streamed bytes for chunked / unannounced bodies. ``/api/uploads*`` keep their own
-limits (2 GiB file cap, exact part sizes).
+by counting the streamed bytes for chunked / unannounced bodies. Only the two routes that stream
+file bytes are exempt and keep their own limits: ``POST /api/uploads`` (2 GiB file cap) and
+``PUT /api/uploads/{session_id}/parts/{n}`` (exact part sizes). The JSON upload routes
+(``init``, ``register``) are capped like every other route.
 """
 
+import re
 from collections.abc import Sequence
 
 from starlette.exceptions import HTTPException
@@ -13,7 +16,11 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 MAX_JSON_BODY = 2 * 1024 * 1024  # bytes
-EXEMPT_PREFIXES: tuple[str, ...] = ("/api/uploads",)
+# (method, full-path pattern) of the routes whose body is a file, not JSON.
+EXEMPT_ROUTES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("POST", re.compile(r"/api/uploads")),
+    ("PUT", re.compile(r"/api/uploads/[^/]+/parts/[^/]+")),
+)
 _DETAIL = "request body too large (max 2 MB)"
 
 
@@ -25,8 +32,9 @@ class BodyTooLarge(HTTPException):
         super().__init__(status_code=413, detail=_DETAIL)
 
 
-def _exempt(path: str, prefixes: Sequence[str]) -> bool:
-    return any(path == p or path.startswith(f"{p}/") for p in prefixes)
+def _exempt(scope: Scope, routes: Sequence[tuple[str, re.Pattern[str]]]) -> bool:
+    method, path = scope.get("method"), scope["path"]
+    return any(method == m and pattern.fullmatch(path) for m, pattern in routes)
 
 
 class BodySizeLimitMiddleware:
@@ -35,14 +43,14 @@ class BodySizeLimitMiddleware:
         app: ASGIApp,
         *,
         max_bytes: int = MAX_JSON_BODY,
-        exempt_prefixes: Sequence[str] = EXEMPT_PREFIXES,
+        exempt_routes: Sequence[tuple[str, re.Pattern[str]]] = EXEMPT_ROUTES,
     ) -> None:
         self.app = app
         self.max_bytes = max_bytes
-        self.exempt_prefixes = tuple(exempt_prefixes)
+        self.exempt_routes = tuple(exempt_routes)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or _exempt(scope["path"], self.exempt_prefixes):
+        if scope["type"] != "http" or _exempt(scope, self.exempt_routes):
             await self.app(scope, receive, send)
             return
 

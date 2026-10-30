@@ -14,6 +14,7 @@ import pytest
 from server.config import EnvSettings
 from server.routes import fs as fs_route
 from tests.conftest import API_KEY, ClientFactory, EnvFactory
+from tests.fs_helpers import symlink_or_skip
 
 
 @pytest.fixture
@@ -73,8 +74,8 @@ async def test_dirs_sibling_prefix_and_symlinks(
     assert (await client.get("/api/fs/dirs", params={"path": str(sibling)})).status_code == 403
     outside = tmp_path / "outside"
     outside.mkdir()
-    (root / "escape").symlink_to(outside, target_is_directory=True)
-    (root / "to-media").symlink_to(env.upload_roots[1], target_is_directory=True)
+    symlink_or_skip(root / "escape", outside, target_is_directory=True)
+    symlink_or_skip(root / "to-media", env.upload_roots[1], target_is_directory=True)
     names = [d["name"] for d in (await client.get("/api/fs/dirs")).json()["dirs"]]
     assert "escape" not in names
     assert "to-media" in names

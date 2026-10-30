@@ -78,6 +78,22 @@ def _http(exc: storage.StorageError) -> HTTPException:
     return HTTPException(exc.status_code, str(exc))
 
 
+def _disk_full() -> HTTPException:
+    """507 for ``ENOSPC`` / ``EDQUOT`` while writing (the caller has removed its partial file)."""
+    return _http(storage.InsufficientStorageError(storage.DISK_FULL_DETAIL))
+
+
+async def _new_file(make: Any, *args: Any) -> tuple[FsPath, BinaryIO]:
+    try:
+        return await run_in_threadpool(make, *args)
+    except OSError as exc:
+        if storage.is_disk_full(exc):
+            raise _disk_full() from None
+        raise
+    except storage.StorageError as exc:
+        raise _http(exc) from exc
+
+
 async def _close_and_discard(fh: BinaryIO, path: FsPath) -> None:
     def _discard() -> None:
         with contextlib.suppress(OSError):
@@ -227,9 +243,15 @@ async def upload_file(request: Request, env: EnvDep, db: DbDep) -> UploadOut:
             status.HTTP_413_CONTENT_TOO_LARGE, "file exceeds the 2 GiB upload limit"
         )
 
+    if length and length.isdigit():
+        try:
+            await run_in_threadpool(storage.check_space_for_upload, env.data_dir, int(length))
+        except storage.StorageError as exc:
+            raise _http(exc) from exc
+
     receiver = _MultipartReceiver()
     parser = MultipartParser(boundary, receiver.callbacks())
-    tmp, fh = await run_in_threadpool(storage.new_temp_file, env.data_dir)
+    tmp, fh = await _new_file(storage.new_temp_file, env.data_dir)
     try:
         try:
             async for chunk in request.stream():
@@ -259,11 +281,14 @@ async def upload_file(request: Request, env: EnvDep, db: DbDep) -> UploadOut:
             target = await run_in_threadpool(
                 storage.resolve_target_dir, target_dir, env.upload_roots
             )
+            await run_in_threadpool(storage.check_space_for_move, tmp, target, receiver.file_size)
             stored = await run_in_threadpool(storage.move_into, tmp, target, receiver.filename)
         except storage.StorageError as exc:
             raise _http(exc) from exc
-    except BaseException:
+    except BaseException as exc:
         await _close_and_discard(fh, tmp)
+        if storage.is_disk_full(exc):
+            raise _disk_full() from None
         raise
     return await _register(
         db, stored, storage.display_name(receiver.filename), delete_on_failure=True
@@ -317,7 +342,7 @@ async def upload_part(
             f"part {n} must be {expected} bytes, got Content-Length {length}",
         )
 
-    tmp, fh = await run_in_threadpool(storage.open_part_writer, env.data_dir, session, n)
+    tmp, fh = await _new_file(storage.open_part_writer, env.data_dir, session, n)
     received = 0
     try:
         async for chunk in request.stream():
@@ -335,8 +360,10 @@ async def upload_part(
                 f"part {n} must be {expected} bytes, received {received}",
             )
         await run_in_threadpool(storage.commit_part, env.data_dir, session, n, tmp)
-    except BaseException:
+    except BaseException as exc:
         await _close_and_discard(fh, tmp)
+        if storage.is_disk_full(exc):
+            raise _disk_full() from None
         raise
     return UploadPartOut(n=n, size=received)
 

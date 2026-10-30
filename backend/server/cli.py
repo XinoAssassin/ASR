@@ -36,7 +36,10 @@ def serve(
     port: Annotated[int, typer.Option(min=1, max=65535)] = 8000,
     forwarded_allow_ips: Annotated[
         str | None,
-        typer.Option(help="Reverse-proxy addresses trusted for X-Forwarded-* (comma-separated)."),
+        typer.Option(
+            help="Reverse-proxy addresses trusted for X-Forwarded-* (comma-separated); "
+            "requires ASR_API_KEY."
+        ),
     ] = None,
     reload: Annotated[bool, typer.Option(help="Reload on code changes (development).")] = False,
 ) -> None:
@@ -44,7 +47,7 @@ def serve(
     import uvicorn
     from rich.markup import escape
 
-    from server.auth import is_loopback_address
+    from server.auth import is_browser_safe_key, is_loopback_address
     from server.config import ConfigError, get_env
     from server.logging_setup import configure_logging
 
@@ -53,16 +56,32 @@ def serve(
     except ConfigError as exc:
         err.print(f"[red]error:[/red] {exc}")
         raise typer.Exit(2) from None
-    if not is_loopback_address(host) and not env.api_key_required:
-        if not env.allow_unauthenticated_network:
-            err.print(
-                f"[red]error:[/red] refusing to listen on {escape(host)} with an empty "
-                "ASR_API_KEY: every client on the network would control the API. Set "
-                "ASR_API_KEY, bind 127.0.0.1, or - only when the port is published on loopback "
-                "alone (e.g. docker-compose's 127.0.0.1:8000:8000) - set "
-                "ASR_ALLOW_UNAUTHENTICATED_NETWORK=1."
-            )
-            raise typer.Exit(2)
+    if env.api_key_required and not is_browser_safe_key(env.api_key.get_secret_value()):
+        err.print(
+            "[yellow]warning:[/yellow] ASR_API_KEY contains characters other than printable "
+            "ASCII; browsers cannot send it, so the web UI will get 401. Use e.g. "
+            "secrets.token_urlsafe(32)."
+        )
+    open_network = not is_loopback_address(host) and not env.api_key_required
+    if open_network and not env.allow_unauthenticated_network:
+        err.print(
+            f"[red]error:[/red] refusing to listen on {escape(host)} with an empty "
+            "ASR_API_KEY: every client on the network would control the API. Set "
+            "ASR_API_KEY, bind 127.0.0.1, or - only when the port is published on loopback "
+            "alone (e.g. docker-compose's 127.0.0.1:8000:8000) - set "
+            "ASR_ALLOW_UNAUTHENTICATED_NETWORK=1."
+        )
+        raise typer.Exit(2)
+    if forwarded_allow_ips is not None and not env.api_key_required:
+        # A proxy relays other machines' requests; with auth off they would control the API.
+        # ASR_ALLOW_UNAUTHENTICATED_NETWORK does not cover this: it is for a loopback publish.
+        err.print(
+            "[red]error:[/red] refusing --forwarded-allow-ips with an empty ASR_API_KEY: a "
+            "reverse proxy in front of the backend serves other machines, so set ASR_API_KEY "
+            "(open mode only protects clients on this machine)."
+        )
+        raise typer.Exit(2)
+    if open_network:
         err.print(
             "[yellow]warning:[/yellow] ASR_API_KEY is empty and "
             "ASR_ALLOW_UNAUTHENTICATED_NETWORK is set: any client that reaches this port "

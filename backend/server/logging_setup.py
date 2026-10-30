@@ -108,3 +108,6 @@ def configure_logging(
     quiet = logging.DEBUG if level.upper() == "DEBUG" else logging.WARNING
     for name in ("httpx", "httpcore", "modelscope", "urllib3", "multipart"):
         logging.getLogger(name).setLevel(quiet)
+    # aiosqlite logs SQL parameters at DEBUG, and settings writes carry secrets (SiYuan token,
+    # DashScope key) that the pattern-based redaction cannot recognise: never below WARNING.
+    logging.getLogger("aiosqlite").setLevel(logging.WARNING)

@@ -9,7 +9,14 @@ Chunked-upload sessions live on disk under ``ASR_DATA_DIR/upload-sessions/{sessi
 (EXECUTION_LOG D18): a JSON manifest plus one file per received part. Everything here is
 blocking filesystem work; routes call it via ``run_in_threadpool``.
 
-Errors derive from ``StorageError`` and carry the HTTP status from EXECUTION_LOG §3.5.
+Errors derive from ``StorageError`` and carry the HTTP status from EXECUTION_LOG §3.5. A full
+disk (``ENOSPC`` / ``EDQUOT``) becomes ``InsufficientStorageError`` (507), never a bare 500.
+
+Disk budget of a chunked upload of ``size`` bytes (what ``complete_session`` really does): the
+parts (1x) and ``assembled.tmp`` (1x) coexist under ``ASR_DATA_DIR``, so that volume needs 2x.
+``move_into`` then renames the result into the target directory (no extra space) or, when the
+target is on another volume, copies it there (1x on that volume, 3x across both). ``init`` checks
+that budget plus what other active sessions still need; ``complete`` re-checks its own share.
 """
 
 from __future__ import annotations
@@ -24,9 +31,10 @@ import shutil
 import tempfile
 import time
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import BinaryIO
 
 from asr.audio.formats import is_accepted
@@ -41,6 +49,7 @@ SESSIONS_DIRNAME = "upload-sessions"
 TMP_DIRNAME = "tmp"
 MANIFEST = "session.json"
 COMPLETE_LOCK = "complete.lock"
+ASSEMBLED = "assembled.tmp"
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")  # secrets.token_urlsafe(24)
 MAX_FILENAME_BYTES = 200  # leaves room for " (NNNN)" below the usual 255-byte limit
 MAX_COLLISIONS = 10_000
@@ -115,16 +124,63 @@ class InsufficientStorageError(StorageError):
     status_code = 507
 
 
+DISK_FULL_DETAIL = "not enough free disk space on the server for this upload"
+_DISK_FULL_ERRNOS = frozenset(
+    code for code in (errno.ENOSPC, getattr(errno, "EDQUOT", None)) if code is not None
+)
+_DISK_FULL_WINERRORS = frozenset({39, 112})  # ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL
+
+
+def is_disk_full(exc: BaseException) -> bool:
+    """``exc`` reports a full disk or an exhausted quota."""
+    return isinstance(exc, OSError) and (
+        exc.errno in _DISK_FULL_ERRNOS or getattr(exc, "winerror", None) in _DISK_FULL_WINERRORS
+    )
+
+
+@contextlib.contextmanager
+def disk_full_as_507() -> Iterator[None]:
+    """Turn a full-disk ``OSError`` raised in the block into ``InsufficientStorageError``.
+    The block is responsible for removing its partial files (it sees the ``OSError`` first)."""
+    try:
+        yield
+    except OSError as exc:
+        if is_disk_full(exc):
+            raise InsufficientStorageError(DISK_FULL_DETAIL) from None
+        raise
+
+
 # --------------------------------------------------------------------------------- path checks
 def _norm(path: str | os.PathLike[str]) -> str:
     return os.path.normcase(os.path.realpath(path))
 
 
-def _is_within(path: str, root: str) -> bool:
+def _is_within(path: str, root: str, mod: ModuleType = os.path) -> bool:
+    """``path`` equals or lies under ``root``; both already realpath'd and normcase'd.
+
+    ``mod`` is the path flavour (``os.path``; tests pass ``ntpath`` to check Windows path shapes
+    on any OS). A string prefix is never enough, and paths that cannot share a root (another
+    drive, UNC vs drive letter, a ``\\\\?\\`` prefix vs none, relative vs absolute) are outside.
+    """
+    path, root = _anchored(path, mod), _anchored(root, mod)
     try:
-        return os.path.commonpath([path, root]) == root
+        return mod.commonpath([path, root]) == root
     except ValueError:  # different drives on Windows, or mixed absolute / relative
         return False
+
+
+def _anchored(path: str, mod: ModuleType) -> str:
+    """A bare UNC share (``\\\\nas\\media``) is that share's root (``\\\\nas\\media\\``);
+    ``ntpath`` would otherwise call it relative and refuse every path under it."""
+    drive, rest = mod.splitdrive(path)
+    return drive + mod.sep if drive and not rest else path
+
+
+def _candidate(path: str, root: str, mod: ModuleType = os.path) -> str:
+    """``path`` as given if absolute, else joined onto the first root. On Windows a
+    drive-relative ``C:foo`` keeps its own drive (``ntpath.join``), so it is checked as a path on
+    ``C:`` and fails containment instead of landing under the root."""
+    return path if mod.isabs(path) else mod.join(root, path)
 
 
 def containing_root(path: str | os.PathLike[str], roots: Sequence[Path]) -> Path | None:
@@ -167,8 +223,7 @@ def resolve_in_roots(path: str, roots: Sequence[Path]) -> Path:
     _check_raw_path(path)
     if not roots:
         raise PathNotAllowedError("no upload roots configured")
-    candidate = Path(path) if os.path.isabs(path) else Path(roots[0]) / path
-    real = Path(os.path.realpath(candidate))
+    real = Path(os.path.realpath(_candidate(path, str(roots[0]))))
     if containing_root(real, roots) is None:
         raise PathNotAllowedError("path is outside the allowed upload roots")
     return real
@@ -351,21 +406,101 @@ def _write_json_atomic(path: Path, data: dict[str, object]) -> None:
     os.replace(tmp, path)
 
 
-def _active_sessions(data_dir: Path) -> int:
+def _active_session_dirs(data_dir: Path) -> list[Path]:
     """Sessions that received a part (or were created) recently; abandoned uploads (closed tab,
     cancelled) stop counting after ``ACTIVE_SESSION_S`` and cannot block new uploads."""
     sessions = sessions_dir(data_dir)
     if not sessions.is_dir():
-        return 0
+        return []
     cutoff = time.time() - ACTIVE_SESSION_S
-    count = 0
+    active: list[Path] = []
     for p in sessions.iterdir():
         with contextlib.suppress(OSError):
             if p.is_dir() and p.stat().st_mtime >= cutoff:  # part renames bump the dir mtime
-                count += 1
-    return count
+                active.append(p)
+    return active
 
 
+def _active_sessions(data_dir: Path) -> int:
+    return len(_active_session_dirs(data_dir))
+
+
+# ------------------------------------------------------------------------------- disk budget
+def _device(path: Path) -> int | None:
+    try:
+        return os.stat(path).st_dev
+    except OSError:
+        return None
+
+
+def _bytes_on_disk(directory: Path) -> int:
+    """Bytes a session already occupies (parts, part temp files, a partial ``assembled.tmp``)."""
+    total = 0
+    with contextlib.suppress(OSError):
+        for entry in os.scandir(directory):
+            if entry.name in (MANIFEST, COMPLETE_LOCK):
+                continue
+            with contextlib.suppress(OSError):
+                if entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+    return total
+
+
+def _complete_needs(
+    data_dir: Path, target: Path, size: int, *, on_disk: int
+) -> list[tuple[Path, int]]:
+    """Bytes a chunked upload still needs per volume until ``complete`` has finished: parts and
+    ``assembled.tmp`` (2 x ``size``) under ``data_dir`` minus what is already written, plus a
+    copy on the target volume when it differs (``move_into`` cannot rename across devices)."""
+    needs = [(data_dir, max(0, 2 * size - on_disk))]
+    if _device(target) != _device(data_dir):
+        needs.append((target, size))
+    return needs
+
+
+def _reserved_by_sessions(data_dir: Path) -> list[tuple[Path, int]]:
+    """What the other active sessions still need (their declared sizes), so 16 parallel uploads
+    cannot all pass the free-space check against the same free bytes."""
+    needs: list[tuple[Path, int]] = []
+    for directory in _active_session_dirs(data_dir):
+        try:
+            with open(directory / MANIFEST, encoding="utf-8") as f:
+                manifest = json.load(f)
+            size, target = int(manifest["size"]), Path(manifest["target_dir"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        needs += _complete_needs(data_dir, target, size, on_disk=_bytes_on_disk(directory))
+    return needs
+
+
+def _require_free_space(needs: Sequence[tuple[Path, int]]) -> None:
+    """Every volume in ``needs`` must keep ``FREE_SPACE_MARGIN`` free after the listed bytes."""
+    per_device: dict[int, tuple[Path, int]] = {}
+    for path, amount in needs:
+        dev = _device(path)
+        if dev is None:
+            continue
+        where, total = per_device.get(dev, (path, 0))
+        per_device[dev] = (where, total + amount)
+    for where, total in per_device.values():
+        if shutil.disk_usage(where).free < total + FREE_SPACE_MARGIN:
+            raise InsufficientStorageError(DISK_FULL_DETAIL)
+
+
+def check_space_for_upload(data_dir: Path, size: int) -> None:
+    """Single-request upload of ``size`` bytes: the temp file under ``data_dir`` must fit next
+    to what active chunked sessions still need. (The target volume is checked before the move,
+    ``check_space_for_move``, once ``target_dir`` has been parsed.)"""
+    _require_free_space([(data_dir, size), *_reserved_by_sessions(data_dir)])
+
+
+def check_space_for_move(src: Path, target: Path, size: int) -> None:
+    """``move_into`` copies across volumes: the target volume then needs ``size`` more."""
+    if _device(target) != _device(src.parent):
+        _require_free_space([(target, size)])
+
+
+# --------------------------------------------------------------------------------- sessions
 def create_session(
     data_dir: Path, roots: Sequence[Path], *, filename: str, size: int, target_dir: str
 ) -> UploadSession:
@@ -382,10 +517,10 @@ def create_session(
         raise TooManySessionsError(
             f"too many uploads in progress (max {MAX_OPEN_SESSIONS}); finish or wait for them"
         )
-    # Parts are written under data_dir and then moved into the target directory.
-    for where in (data_dir, target):
-        if shutil.disk_usage(where).free < size + FREE_SPACE_MARGIN:
-            raise InsufficientStorageError("not enough free disk space for this upload")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    _require_free_space(
+        [*_complete_needs(data_dir, target, size, on_disk=0), *_reserved_by_sessions(data_dir)]
+    )
     session = UploadSession(
         session_id=secrets.token_urlsafe(24),
         filename=safe_filename(filename),
@@ -397,8 +532,13 @@ def create_session(
         created_at=time.time(),
     )
     directory = _session_dir(data_dir, session.session_id)
-    directory.mkdir(parents=True, exist_ok=False)
-    _write_json_atomic(directory / MANIFEST, asdict(session))
+    try:
+        with disk_full_as_507():
+            directory.mkdir(parents=True, exist_ok=False)
+            _write_json_atomic(directory / MANIFEST, asdict(session))
+    except BaseException:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
     return session
 
 
@@ -422,7 +562,8 @@ def open_part_writer(data_dir: Path, session: UploadSession, n: int) -> tuple[Pa
     """Temp file for part ``n``; ``commit_part`` renames it into place (idempotent re-PUTs)."""
     session.expected_part_size(n)
     directory = _session_dir(data_dir, session.session_id)
-    fd, name = tempfile.mkstemp(dir=directory, prefix=f".part-{n:06d}.", suffix=".tmp")
+    with disk_full_as_507():
+        fd, name = tempfile.mkstemp(dir=directory, prefix=f".part-{n:06d}.", suffix=".tmp")
     return Path(name), os.fdopen(fd, "wb")
 
 
@@ -449,43 +590,94 @@ def _format_parts(parts: list[int]) -> str:
     return shown + (f" … ({len(parts)} total)" if len(parts) > 20 else "")
 
 
+# ----------------------------------------------------------------------------- complete lock
+_LOCK_BUSY_ERRNOS = frozenset(
+    code
+    for code in (
+        errno.EAGAIN,
+        errno.EACCES,
+        *(getattr(errno, n, None) for n in ("EWOULDBLOCK", "EDEADLOCK")),
+    )
+    if code is not None
+)
+_ERROR_LOCK_VIOLATION = 33
+
+
+def try_lock(fd: int) -> bool:
+    """Non-blocking exclusive lock on an open file; ``False`` if another holder has it.
+
+    The OS drops the lock when the holder closes the file or dies (crash, OOM kill, SIGKILL),
+    so a lock file left on disk by a dead process never blocks anybody. ``flock`` / ``msvcrt``
+    locks belong to the open file, so a second open in the same process conflicts too.
+    """
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        # Anything but "held by someone else" means locking is unsupported here (e.g. some
+        # network file systems): the per-session asyncio lock in the route still serialises
+        # completes, and D46 guarantees a single process.
+        busy = exc.errno in _LOCK_BUSY_ERRNOS
+        return not (busy or getattr(exc, "winerror", None) == _ERROR_LOCK_VIOLATION)
+    return True
+
+
+@contextlib.contextmanager
+def _complete_lock(directory: Path) -> Iterator[None]:
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(directory / COMPLETE_LOCK, flags, 0o644)
+    except FileNotFoundError as exc:  # session removed meanwhile
+        raise NotFoundError("unknown upload session") from exc
+    try:
+        if not try_lock(fd):
+            raise ConflictError("upload session is already being completed; retry in a moment")
+        yield
+    finally:
+        os.close(fd)  # releases the lock (also done by the OS if this process dies)
+
+
 def complete_session(data_dir: Path, roots: Sequence[Path], session_id: str) -> tuple[Path, str]:
     """Assemble all parts in order into the target directory and remove the session.
 
-    Returns ``(stored_path, original_name)``.
+    Returns ``(stored_path, original_name)``. A full disk raises ``InsufficientStorageError``
+    and leaves the parts in place (the client may free space and retry); the partial
+    ``assembled.tmp`` and any partial copy in the target directory are removed.
     """
     session = load_session(data_dir, session_id)
     directory = _session_dir(data_dir, session_id)
-    try:
-        lock_fd = os.open(directory / COMPLETE_LOCK, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    except FileExistsError as exc:
-        raise ConflictError("upload session is already being completed; retry in a moment") from exc
-    os.close(lock_fd)
-    done = False
-    try:
+    with _complete_lock(directory):
         missing = missing_parts(data_dir, session)
         if missing:
             raise InvalidUploadError(f"missing or incomplete parts: {_format_parts(missing)}")
         target = resolve_target_dir(session.target_dir, roots)
-        assembled = directory / "assembled.tmp"
-        written = 0
-        with open(assembled, "wb") as out:
-            for n in range(session.total_parts):
-                with open(part_path(data_dir, session_id, n), "rb") as part:
-                    while chunk := part.read(_COPY_CHUNK):
-                        out.write(chunk)
-                        written += len(chunk)
-        if written != session.size:
-            assembled.unlink(missing_ok=True)
-            raise InvalidUploadError(f"assembled size {written} != declared size {session.size}")
-        stored = move_into(assembled, target, session.filename)
-        done = True
-    finally:
-        if done:
-            shutil.rmtree(directory, ignore_errors=True)
-        else:
-            with contextlib.suppress(OSError):
-                (directory / COMPLETE_LOCK).unlink()
+        assembled = directory / ASSEMBLED
+        assembled.unlink(missing_ok=True)  # left by an attempt that died mid-assembly
+        _require_free_space(_complete_needs(data_dir, target, session.size, on_disk=session.size))
+        try:
+            with disk_full_as_507():
+                written = 0
+                with open(assembled, "wb") as out:
+                    for n in range(session.total_parts):
+                        with open(part_path(data_dir, session_id, n), "rb") as part:
+                            while chunk := part.read(_COPY_CHUNK):
+                                out.write(chunk)
+                                written += len(chunk)
+                if written != session.size:
+                    raise InvalidUploadError(
+                        f"assembled size {written} != declared size {session.size}"
+                    )
+                stored = move_into(assembled, target, session.filename)
+        finally:
+            assembled.unlink(missing_ok=True)  # already moved away on success
+    # The lock file is closed (Windows cannot delete an open file) before the session goes.
+    shutil.rmtree(directory, ignore_errors=True)
     return stored, session.original_name
 
 
