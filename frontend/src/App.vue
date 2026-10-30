@@ -24,10 +24,11 @@ import { computed, h, onBeforeUnmount, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 
-import { getBackendUrl } from '@/api'
+import BackendSwitcher from '@/components/BackendSwitcher.vue'
 import { LOCALE_STORAGE_KEY, type AppLocale } from '@/locales'
 import { isDesktop } from '@/platform'
 import { useHealthStore } from '@/stores/health'
+import { useProfilesStore } from '@/stores/profiles'
 import { useRecorderStore } from '@/stores/recorder'
 
 const { t, locale } = useI18n()
@@ -36,6 +37,7 @@ const health = useHealthStore()
 const osTheme = useOsTheme()
 const desktop = isDesktop()
 const recorder = useRecorderStore()
+const profiles = useProfilesStore()
 
 const theme = computed(() => (osTheme.value === 'dark' ? darkTheme : null))
 const naiveLocale = computed(() => (locale.value === 'en' ? enUS : zhCN))
@@ -81,7 +83,7 @@ const healthTag = computed(() => {
 })
 
 const healthTooltip = computed(() => {
-  const url = getBackendUrl() || t('health.sameOrigin')
+  const url = profiles.activeUrl || t('health.sameOrigin')
   if (health.state === 'connected' && health.info) {
     return `${url} · v${health.info.version} · ${health.info.decoder}`
   }
@@ -102,6 +104,7 @@ function toggleLocale(): void {
 onMounted(() => {
   document.documentElement.lang = locale.value
   health.startPolling()
+  profiles.init() // desktop: the built-in profile follows the sidecar
   if (desktop) void recorder.init()
 })
 onBeforeUnmount(() => health.stopPolling())
@@ -116,6 +119,7 @@ onBeforeUnmount(() => health.stopPolling())
           <NLayoutHeader bordered class="app-header">
             <RouterLink to="/upload" class="app-title">{{ t('app.title') }}</RouterLink>
             <NMenu mode="horizontal" :options="menuOptions" :value="activeKey" class="app-menu" />
+            <BackendSwitcher />
             <NTooltip>
               <template #trigger>
                 <NTag
@@ -148,7 +152,10 @@ onBeforeUnmount(() => health.stopPolling())
               {{ t('errors.unauthorized') }}
               <RouterLink :to="{ name: 'settings' }">{{ t('errors.goToSettings') }}</RouterLink>
             </NAlert>
-            <RouterView />
+            <!-- Re-mounted on a backend switch: every page reloads its data from the new backend. -->
+            <RouterView v-slot="{ Component }">
+              <component :is="Component" :key="profiles.epoch" />
+            </RouterView>
           </NLayoutContent>
         </NLayout>
       </NDialogProvider>

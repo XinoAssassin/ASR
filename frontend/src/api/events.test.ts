@@ -20,7 +20,7 @@ function stubBrowser(): void {
 }
 
 stubBrowser()
-const { STORAGE_KEYS } = await import('./client')
+const { setApiKey } = await import('./client')
 const { watchJob } = await import('./events')
 
 const job = (status: string) => ({ id: 'j1', status })
@@ -51,9 +51,9 @@ afterEach(() => vi.unstubAllGlobals())
 
 describe('watchJob', () => {
   it('retries a retryable status with the current key and stops after a terminal job', async () => {
-    stored.set(STORAGE_KEYS.apiKey, 'old')
+    setApiKey('old')
     fetchMock.mockImplementationOnce(async () => {
-      stored.set(STORAGE_KEYS.apiKey, 'new') // changed in Settings while the stream retries
+      setApiKey('new') // changed in Settings while the stream retries
       return status(503)
     })
     fetchMock.mockImplementationOnce(async () =>

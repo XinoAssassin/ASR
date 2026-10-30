@@ -175,6 +175,21 @@ export const useJobsStore = defineStore('jobs', () => {
     if (active) syncLive()
   }
 
+  /** Another backend: close the streams and forget the list (late answers are ignored). */
+  function reset(): void {
+    loadSeq++
+    for (const id of [...streams.keys()]) stopStream(id)
+    failed.clear()
+    if (pollTimer) clearInterval(pollTimer)
+    pollTimer = null
+    items.value = []
+    total.value = 0
+    page.value = 1
+    uploads.value = {}
+    loading.value = false
+    error.value = null
+  }
+
   async function remove(jobId: string, deleteAudio: boolean): Promise<void> {
     await deleteJob(jobId, deleteAudio)
     stopStream(jobId)
@@ -200,5 +215,6 @@ export const useJobsStore = defineStore('jobs', () => {
     cancel,
     retry,
     remove,
+    reset,
   }
 })

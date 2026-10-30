@@ -24,16 +24,30 @@ export const useTermSetsStore = defineStore('termSets', () => {
   const loading = ref(false)
   const error = ref<ApiError | null>(null)
 
+  /** Bumped by reset(): answers of the previous backend are ignored. */
+  let epoch = 0
+
   async function load(): Promise<void> {
+    const mine = epoch
     loading.value = true
     try {
-      items.value = await listTermSets()
+      const result = await listTermSets()
+      if (mine !== epoch) return
+      items.value = result
       error.value = null
     } catch (e) {
-      error.value = toApiError(e)
+      if (mine === epoch) error.value = toApiError(e)
     } finally {
-      loading.value = false
+      if (mine === epoch) loading.value = false
     }
+  }
+
+  /** Another backend: its term sets are different ones. */
+  function reset(): void {
+    epoch++
+    items.value = []
+    loading.value = false
+    error.value = null
   }
 
   /** Insert or replace `saved` in the cached list. */
@@ -97,5 +111,5 @@ export const useTermSetsStore = defineStore('termSets', () => {
     )
   }
 
-  return { items, loading, error, load, create, save, remove, importText, addAlias }
+  return { items, loading, error, load, reset, create, save, remove, importText, addAlias }
 })

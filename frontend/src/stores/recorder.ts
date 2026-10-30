@@ -3,8 +3,8 @@
  * options, the recordings list kept current by `recordings://changed`, and the backend config
  * that Rust uses for its own uploads. Everything goes through `@/platform` (docs/desktop-ipc.md).
  *
- * The browser settings (backend URL + X-API-Key in localStorage) are the single source of truth
- * for the connection; `syncBackend()` pushes them to Rust.
+ * The active backend profile (URL + X-API-Key in localStorage, `useProfilesStore`) is the single
+ * source of truth for the connection; `syncBackend()` pushes it to Rust.
  */
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
@@ -415,6 +415,11 @@ export const useRecorderStore = defineStore('recorder', () => {
     return saveConfig()
   }
 
+  /** Another backend (profile switch): job ids of the previous one mean nothing there. */
+  function forgetBackendState(): void {
+    transcriptIds.value = {}
+  }
+
   /** Transcript id for a finished job without `upload.transcriptId` (cached); null while unknown. */
   async function lookupTranscript(jobId: string): Promise<string | null> {
     const cached = transcriptIds.value[jobId]
@@ -472,6 +477,7 @@ export const useRecorderStore = defineStore('recorder', () => {
     saveConfig,
     syncBackend,
     lookupTranscript,
+    forgetBackendState,
   }
 })
 

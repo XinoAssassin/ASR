@@ -3,6 +3,16 @@ import { describe, expect, it } from 'vitest'
 import { buildJobCreate, defaultJobForm } from './jobForm'
 
 describe('buildJobCreate', () => {
+  it('sends the chosen hardware as options.local.device for local jobs only', () => {
+    const target = { uploadId: 'u', channels: 'auto' as const, streamIndex: 0 }
+    const local = buildJobCreate({ ...defaultJobForm('local'), device: 'rocm' }, target, [])
+    expect(local.options?.local).toEqual({ device: 'rocm' })
+    const cloud = buildJobCreate({ ...defaultJobForm('cloud'), device: 'rocm' }, target, [])
+    expect(cloud.options?.local).toBeUndefined()
+    const unset = buildJobCreate(defaultJobForm('local'), target, [])
+    expect(unset.options?.local).toBeUndefined() // the server's settings device applies
+  })
+
   it('maps the form to JobCreate', () => {
     const form = {
       ...defaultJobForm(),

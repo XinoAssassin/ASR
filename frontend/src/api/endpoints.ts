@@ -6,7 +6,7 @@
  * before it is saved (`probeHealth`) and the SiYuan dialog reading the upload's file name for its
  * path preview (`getUpload`); a store around them would hold no state.
  */
-import { api, normalizeBackendUrl, type Schemas } from './client'
+import { api, API_KEY_HEADER, normalizeBackendUrl, type Schemas } from './client'
 import {
   ApiError,
   errorFromResponse,
@@ -61,6 +61,11 @@ export type SiYuanPushIn = Schemas['SiYuanPushIn']
 export type SiYuanPushOut = Schemas['SiYuanPushOut']
 export type ExportLocale = NonNullable<SiYuanPushIn['locale']>
 
+/** Compute device of the local pipeline (`rocm`: AMD GPU through torch's HIP build). */
+export type DeviceId = Schemas['HardwareDeviceOut']['id']
+export type HardwareDeviceOut = Schemas['HardwareDeviceOut']
+export type HardwareOut = Schemas['HardwareOut']
+
 // health -----------------------------------------------------------------------------------------
 
 export const getHealth = (): Promise<HealthOut> => unwrap(api.GET('/api/health'))
@@ -80,6 +85,42 @@ export async function probeHealth(baseUrl: string, timeoutMs = 8000): Promise<He
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * Check that `apiKey` is accepted by the backend at `baseUrl` (an authenticated read). Resolves
+ * true on 2xx, false on 401; throws ApiError otherwise. Like `probeHealth`, for unsaved profiles.
+ */
+export async function probeAuth(baseUrl: string, apiKey: string | null, timeoutMs = 8000): Promise<boolean> {
+  const url = `${normalizeBackendUrl(baseUrl)}/api/term-sets`
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const headers: Record<string, string> = apiKey ? { [API_KEY_HEADER]: apiKey } : {}
+    const response = await fetch(url, { signal: controller.signal, headers })
+    if (response.status === 401) return false
+    if (!response.ok) throw await errorFromResponse(response)
+    return true
+  } catch (e) {
+    throw toApiError(e)
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// system -----------------------------------------------------------------------------------------
+
+/** Devices the backend can run the local pipeline on; null when the backend predates the endpoint. */
+export async function getHardware(): Promise<HardwareOut | null> {
+  let result
+  try {
+    result = await api.GET('/api/system/hardware')
+  } catch (e) {
+    throw toApiError(e)
+  }
+  if (result.response.status === 404) return null
+  if (!result.response.ok) throw new ApiError(result.response.status, extractDetail(result.error))
+  return result.data as HardwareOut
 }
 
 // filesystem / uploads ---------------------------------------------------------------------------

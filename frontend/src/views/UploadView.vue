@@ -23,11 +23,14 @@ import ProbeCard from '@/components/ProbeCard.vue'
 import SourceTips from '@/components/SourceTips.vue'
 import { isImeKey, speakerCountMissing } from '@/components/interaction'
 import { useApiErrors } from '@/composables/useApiErrors'
+import { useDeviceOptions } from '@/composables/useDeviceOptions'
+import { useHardwareStore } from '@/stores/hardware'
 import { useSettingsStore } from '@/stores/settings'
 import { useTermSetsStore } from '@/stores/termSets'
 import { useUploadsStore, type QueueItem } from '@/stores/uploads'
 import { ACCEPT_ATTRIBUTE, ACCEPTED_EXTENSIONS } from '@/utils/audio'
 import { formatBytes } from '@/utils/format'
+import { defaultJobDevice, DEVICE_LABELS, isDeviceRejection } from '@/utils/hardware'
 import { parseTerms } from '@/utils/terms'
 
 const { t } = useI18n()
@@ -37,6 +40,7 @@ const { describe, notify } = useApiErrors()
 const uploads = useUploadsStore()
 const settings = useSettingsStore()
 const termSets = useTermSetsStore()
+const hardware = useHardwareStore()
 
 // --- file selection ---------------------------------------------------------------------------
 
@@ -127,7 +131,20 @@ const canStart = computed(
 
 async function startJobs(): Promise<void> {
   const { submitted, failures } = await uploads.startJobs(termsParsed.value.terms)
-  for (const f of failures) notify(f.error, t('upload.start.failed', { name: f.name }))
+  for (const f of failures) {
+    if (isDeviceRejection(f.error.status, f.error.detail) && uploads.jobForm.device) {
+      // The chosen hardware is not usable on this backend: say so instead of "validation failed".
+      message.error(
+        t('common.labelDetail', {
+          label: t('upload.start.failed', { name: f.name }),
+          detail: t('hardware.deviceRejected', { device: DEVICE_LABELS[uploads.jobForm.device], detail: f.error.detail }),
+        }),
+        { duration: 10000, closable: true },
+      )
+    } else {
+      notify(f.error, t('upload.start.failed', { name: f.name }))
+    }
+  }
   if (submitted) {
     message.success(t('upload.start.done', { n: submitted }))
     if (!uploads.ready.length) void router.push({ name: 'jobs' })
@@ -144,9 +161,24 @@ function initProvider(): void {
 
 watch(() => settings.server, initProvider)
 
+/** Per-job hardware: the settings device, else (settings not readable) the hardware default. */
+function initDevice(): void {
+  if (uploads.deviceInitialized) return
+  const device = defaultJobDevice(settings.server?.local.device, hardware.info)
+  if (!device) return
+  uploads.jobForm.device = device
+  if (settings.server) uploads.deviceInitialized = true
+}
+
+watch([() => settings.server, () => hardware.info], initDevice)
+
+const jobDeviceOptions = useDeviceOptions(() => uploads.jobForm.device)
+
 onMounted(() => {
   if (!settings.server) void settings.load()
   else initProvider()
+  if (!hardware.loaded && !hardware.loading) void hardware.load()
+  initDevice()
   void termSets.load()
 })
 </script>
@@ -305,6 +337,8 @@ onMounted(() => {
         v-model="uploads.jobForm"
         :term-sets="termSets.items"
         :term-sets-error="termSets.error ? describe(termSets.error) : null"
+        :device-options="jobDeviceOptions"
+        :device-hint="hardware.loaded && !hardware.supported ? t('hardware.unknown') : t('hardware.jobHint')"
       />
       <NSpace align="center">
         <NButton

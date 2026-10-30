@@ -313,6 +313,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/system/hardware": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Hardware
+         * @description cpu is always available; cuda needs a CUDA build of torch with a visible NVIDIA GPU, rocm
+         *     a ROCm (HIP) build with a visible AMD GPU. Probed once per server process; no downloads.
+         */
+        get: operations["hardware_api_system_hardware_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/term-sets": {
         parameters: {
             query?: never;
@@ -915,6 +936,43 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** HardwareDeviceOut */
+        HardwareDeviceOut: {
+            /** Available */
+            available: boolean;
+            /**
+             * Detail
+             * @description Why the device is unavailable (e.g. 'torch ... is a CPU build'), or facts about it when available (GPU arch, HIP / CUDA version, core count).
+             */
+            detail: string | null;
+            /**
+             * Id
+             * @enum {string}
+             */
+            id: "cpu" | "cuda" | "rocm";
+            /**
+             * Name
+             * @description CPU model or GPU name; null when unavailable.
+             */
+            name: string | null;
+        };
+        /**
+         * HardwareOut
+         * @description What the installed torch can run on; probed once per server process, no downloads.
+         */
+        HardwareOut: {
+            /**
+             * Default
+             * @description The available GPU (cuda or rocm), else cpu.
+             * @enum {string}
+             */
+            default: "cpu" | "cuda" | "rocm";
+            /**
+             * Devices
+             * @description Always cpu, cuda, rocm in that order.
+             */
+            devices: components["schemas"]["HardwareDeviceOut"][];
+        };
         /** HealthOut */
         HealthOut: {
             /** Api Key Required */
@@ -1111,7 +1169,7 @@ export interface components {
             /** Asr Model */
             asr_model?: string | null;
             /** Device */
-            device?: ("cpu" | "cuda") | null;
+            device?: ("cpu" | "cuda" | "rocm") | null;
             /** Diarize Model */
             diarize_model?: string | null;
         };
@@ -1123,7 +1181,7 @@ export interface components {
              * Device
              * @enum {string}
              */
-            device: "cpu" | "cuda";
+            device: "cpu" | "cuda" | "rocm";
             /** Diarize Model */
             diarize_model: string | null;
             /** Model Cache Dir */
@@ -1134,7 +1192,7 @@ export interface components {
             /** Asr Model */
             asr_model?: string | null;
             /** Device */
-            device?: ("cpu" | "cuda") | null;
+            device?: ("cpu" | "cuda" | "rocm") | null;
             /** Diarize Model */
             diarize_model?: string | null;
         };
@@ -2345,6 +2403,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SiYuanTestOut"];
+                };
+            };
+        };
+    };
+    hardware_api_system_hardware_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HardwareOut"];
                 };
             };
         };

@@ -16,9 +16,7 @@ import {
   NSpace,
   NTag,
   NText,
-  type ButtonProps,
   type DataTableColumns,
-  useDialog,
   useMessage,
 } from 'naive-ui'
 import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
@@ -26,159 +24,41 @@ import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
 
 import {
-  BackendUrlError,
-  getDefaultBackendUrl,
-  probeHealth,
+  type DeviceId,
   type FileTransfer,
-  type HealthOut,
   type LocalModelOut,
   type ProviderName,
   type SettingsUpdate,
 } from '@/api'
+import BackendProfilesCard from '@/components/BackendProfilesCard.vue'
 import EnvironmentCard from '@/components/EnvironmentCard.vue'
 import EnvTag from '@/components/EnvTag.vue'
 import DesktopSettingsCard from '@/components/recorder/DesktopSettingsCard.vue'
 import SidecarCard from '@/components/recorder/SidecarCard.vue'
 import SiyuanSettingsCard from '@/components/SiyuanSettingsCard.vue'
 import { useApiErrors } from '@/composables/useApiErrors'
+import { useDeviceOptions } from '@/composables/useDeviceOptions'
 import { isDesktop } from '@/platform'
+import { useHardwareStore } from '@/stores/hardware'
 import { useHealthStore } from '@/stores/health'
-import { useRecorderStore } from '@/stores/recorder'
 import { useSettingsStore } from '@/stores/settings'
 import { envVariable } from '@/utils/envFacts'
+import { deviceLabel } from '@/utils/hardware'
 
 import { createFormSync } from './formSync'
 
 const { t } = useI18n()
 const message = useMessage()
-const dialog = useDialog()
 const { describe, notify } = useApiErrors()
 const health = useHealthStore()
 const settings = useSettingsStore()
+const hardware = useHardwareStore()
 const desktop = isDesktop()
-const recorder = useRecorderStore()
 const route = useRoute()
 
 /** Environment variable behind a settings field (`env_only`), for the "env" markers. */
 function envOf(field: string): string | null {
   return envVariable(settings.server?.env_only, field)
-}
-
-/** Desktop: the browser connection settings are the source of truth; hand them to Rust too. */
-async function pushToDesktop(): Promise<void> {
-  if (!desktop) return
-  try {
-    await recorder.syncBackend()
-  } catch (e) {
-    message.error(t('common.labelDetail', { label: t('recorder.settings.syncFailed'), detail: (e as Error).message }))
-  }
-}
-
-// --- browser-local connection settings --------------------------------------------------------
-
-const urlInput = ref(settings.backendUrl)
-// Desktop "use this backend" (local sidecar) changes the override from outside this form.
-watch(
-  () => settings.backendUrl,
-  (url) => (urlInput.value = url),
-)
-/** Why the typed backend URL was rejected (not http(s) / not a URL); cleared on edit. */
-const urlError = ref<string | null>(null)
-watch(urlInput, () => (urlError.value = null))
-const keyInput = ref(settings.apiKey)
-const probing = ref(false)
-const probeResult = ref<{ ok: true; info: HealthOut } | { ok: false; text: string } | null>(null)
-const defaultUrl = getDefaultBackendUrl()
-
-function describeUrlError(e: BackendUrlError): string {
-  return t(`settings.connection.urlInvalid.${e.reason}`, { url: e.input })
-}
-
-async function testBackendUrl(): Promise<void> {
-  probing.value = true
-  probeResult.value = null
-  try {
-    const info = await probeHealth(urlInput.value.trim() || defaultUrl)
-    probeResult.value = { ok: true, info }
-  } catch (e) {
-    if (e instanceof BackendUrlError) urlError.value = describeUrlError(e)
-    else probeResult.value = { ok: false, text: describe(e) }
-  } finally {
-    probing.value = false
-  }
-}
-
-type KeyChoice = 'clear' | 'keep' | 'cancel'
-type TestButtonProps = ButtonProps & { 'data-testid': string }
-const KEY_CLEAR_BUTTON: TestButtonProps = { type: 'warning', 'data-testid': 'key-clear-confirm' }
-const KEY_KEEP_BUTTON: TestButtonProps = { 'data-testid': 'key-keep' }
-
-/** The stored API key would go to another host: clear it (default), keep it, or cancel. */
-function askAboutKey(): Promise<KeyChoice> {
-  return new Promise((resolve) => {
-    let settled = false
-    const done = (choice: KeyChoice): void => {
-      if (!settled) resolve(choice)
-      settled = true
-    }
-    dialog.warning({
-      title: t('settings.connection.keyOtherHostTitle'),
-      content: t('settings.connection.keyOtherHost'),
-      positiveText: t('settings.connection.clearKeyAndSave'),
-      negativeText: t('settings.connection.keepKey'),
-      positiveButtonProps: KEY_CLEAR_BUTTON,
-      negativeButtonProps: KEY_KEEP_BUTTON,
-      onPositiveClick: () => done('clear'),
-      onNegativeClick: () => done('keep'),
-      onClose: () => done('cancel'),
-      onMaskClick: () => done('cancel'),
-      onAfterLeave: () => done('cancel'),
-    })
-  })
-}
-
-async function saveBackendUrl(): Promise<void> {
-  let clearApiKey = false
-  try {
-    if (settings.keyAtRisk(urlInput.value)) {
-      const choice = await askAboutKey()
-      if (choice === 'cancel') return
-      clearApiKey = choice === 'clear'
-    }
-    settings.setBackendUrl(urlInput.value, { clearApiKey })
-  } catch (e) {
-    if (!(e instanceof BackendUrlError)) throw e
-    urlError.value = describeUrlError(e) // nothing was saved
-    return
-  }
-  if (clearApiKey) keyInput.value = ''
-  urlInput.value = settings.backendUrl
-  urlError.value = null
-  message.success(t('settings.saved'))
-  void settings.load()
-  void pushToDesktop()
-}
-
-function resetBackendUrl(): void {
-  urlInput.value = ''
-  void saveBackendUrl()
-}
-
-function clearApiKey(): void {
-  keyInput.value = ''
-  settings.clearApiKey()
-  message.success(t('settings.connection.keyCleared'))
-  void health.check()
-  void pushToDesktop()
-}
-
-function saveApiKey(): void {
-  settings.setApiKey(keyInput.value)
-  message.success(t('settings.saved'))
-  void health.check()
-  void settings.load()
-  void refreshLocalModels() // the list was empty (401) before the key was set
-  void pushToDesktop()
 }
 
 // --- server-side settings ---------------------------------------------------------------------
@@ -273,8 +153,18 @@ async function runCloudTest(): Promise<void> {
 // --- local models (status only; management in Settings arrives with M6) ----------------------
 
 const useMirror = ref(true)
-const localForm = reactive({ asrModel: '', device: 'cpu' as 'cpu' | 'cuda' })
+const localForm = reactive({ asrModel: '', device: 'cpu' as DeviceId })
 let pollTimer: ReturnType<typeof setInterval> | null = null
+
+/** cpu / cuda / rocm, unavailable ones disabled with the backend's reason. */
+const localDeviceOptions = useDeviceOptions(() => settings.server?.local.device)
+
+/** "ROCm · AMD Radeon 8060S" for the effective settings device. */
+const currentDeviceText = computed(() => {
+  const id = settings.server?.local.device
+  if (!id) return '—'
+  return deviceLabel(id, hardware.info?.devices.find((d) => d.id === id)?.name)
+})
 
 const localModelsError = computed(() =>
   settings.localModelsError ? describe(settings.localModelsError) : null,
@@ -409,77 +299,20 @@ async function refreshLocalModels(): Promise<void> {
 
 onMounted(() => {
   void settings.load()
+  void hardware.load()
   void refreshLocalModels()
-  // "Open Settings" from the SiYuan dialog links to #siyuan.
-  if (route.hash === '#siyuan') {
-    void nextTick(() => document.getElementById('siyuan')?.scrollIntoView({ block: 'start' }))
+  // Deep links: #siyuan (SiYuan dialog), #backends / #sidecar (top-bar backend menu).
+  const anchor = route.hash.slice(1)
+  if (anchor) {
+    void nextTick(() => document.getElementById(anchor)?.scrollIntoView({ block: 'start' }))
   }
 })
 </script>
 
 <template>
   <NSpace vertical size="large" class="settings">
-    <!-- Connection (stored in this browser) -->
-    <NCard :title="t('settings.connection.title')">
-      <NForm label-placement="left" label-width="140">
-        <NFormItem :label="t('settings.connection.backendUrl')">
-          <NSpace vertical style="width: 100%">
-            <NSpace :wrap="false">
-              <NInput
-                v-model:value="urlInput"
-                data-testid="backend-url-input"
-                :status="urlError ? 'error' : undefined"
-                :placeholder="defaultUrl || t('health.sameOrigin')"
-                clearable
-                style="min-width: 320px"
-              />
-              <NButton :loading="probing" data-testid="backend-url-test" @click="testBackendUrl">
-                {{ t('settings.connection.test') }}
-              </NButton>
-              <NButton type="primary" data-testid="backend-url-save" @click="saveBackendUrl">
-                {{ t('common.save') }}
-              </NButton>
-              <NButton v-if="settings.backendUrl" quaternary @click="resetBackendUrl">
-                {{ t('settings.connection.reset') }}
-              </NButton>
-            </NSpace>
-            <NText v-if="urlError" type="error" data-testid="backend-url-error">{{ urlError }}</NText>
-            <NText depth="3">{{ t('settings.connection.backendUrlHint') }}</NText>
-            <NAlert v-if="probeResult?.ok" type="success" :show-icon="true">
-              {{ t('settings.connection.testOk', { version: probeResult.info.version }) }}
-            </NAlert>
-            <NAlert v-else-if="probeResult" type="error">{{ probeResult.text }}</NAlert>
-          </NSpace>
-        </NFormItem>
-        <NFormItem :label="t('settings.connection.apiKey')">
-          <NSpace vertical style="width: 100%">
-            <NSpace :wrap="false">
-              <NInput
-                v-model:value="keyInput"
-                data-testid="api-key-input"
-                type="password"
-                show-password-on="click"
-                :placeholder="t('settings.connection.apiKeyPlaceholder')"
-                :input-props="{ autocomplete: 'off' }"
-                style="min-width: 320px"
-              />
-              <NButton type="primary" data-testid="api-key-save" @click="saveApiKey">
-                {{ t('common.save') }}
-              </NButton>
-              <NButton
-                v-if="settings.apiKey"
-                quaternary
-                type="error"
-                data-testid="api-key-clear"
-                @click="clearApiKey"
-              >
-                {{ t('settings.connection.clearKey') }}
-              </NButton>
-            </NSpace>
-            <NText depth="3">{{ t('settings.connection.apiKeyHint') }}</NText>
-          </NSpace>
-        </NFormItem>
-      </NForm>
+    <!-- Backend profiles + the active one's URL / key (stored in this browser) -->
+    <BackendProfilesCard @key-changed="refreshLocalModels">
       <NDescriptions v-if="health.info" :column="2" bordered size="small" label-placement="left">
         <NDescriptionsItem :label="t('health.title')">
           <NTag type="success" size="small">{{ t('health.connected') }}</NTag>
@@ -497,7 +330,7 @@ onMounted(() => {
       <NAlert v-else-if="health.state === 'error'" type="error">
         {{ t('health.error') }} — {{ health.error }}
       </NAlert>
-    </NCard>
+    </BackendProfilesCard>
 
     <!-- Desktop app only: what the Rust core uses for background uploads -->
     <DesktopSettingsCard v-if="desktop" />
@@ -657,7 +490,7 @@ onMounted(() => {
           {{ settings.server.local.diarize_model ?? '—' }}
         </NDescriptionsItem>
         <NDescriptionsItem :label="t('settings.local.device')">
-          {{ settings.server.local.device }}
+          <span data-testid="local-device-current">{{ currentDeviceText }}</span>
         </NDescriptionsItem>
         <NDescriptionsItem :label="t('settings.local.cacheDir')">
           {{ settings.server.local.model_cache_dir }}
@@ -673,10 +506,17 @@ onMounted(() => {
           />
         </NFormItem>
         <NFormItem :label="t('settings.local.device')">
-          <NRadioGroup v-model:value="localForm.device" data-testid="local-device">
-            <NRadio value="cpu">CPU</NRadio>
-            <NRadio value="cuda">CUDA</NRadio>
-          </NRadioGroup>
+          <NSpace vertical style="width: 100%">
+            <NSelect
+              v-model:value="localForm.device"
+              :options="localDeviceOptions"
+              data-testid="local-device"
+              style="max-width: 420px"
+            />
+            <NText v-if="hardware.loaded && !hardware.supported" depth="3" data-testid="hardware-unknown">
+              {{ t('hardware.unknown') }}
+            </NText>
+          </NSpace>
         </NFormItem>
         <NFormItem>
           <NSpace>

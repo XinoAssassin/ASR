@@ -18,13 +18,20 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import type { TermSetOut } from '@/api'
+import type { DeviceSelectOption } from '@/composables/useDeviceOptions'
 import { LANGUAGE_OPTIONS, MAX_CONTEXT_LENGTH, MAX_SPEAKERS, type JobFormState } from '@/utils/jobForm'
 import { parseTerms } from '@/utils/terms'
 
 import { speakerCountMissing } from './interaction'
 
 const form = defineModel<JobFormState>({ required: true })
-const props = defineProps<{ termSets: TermSetOut[]; termSetsError: string | null }>()
+const props = defineProps<{
+  termSets: TermSetOut[]
+  termSetsError: string | null
+  /** Hardware choices for local-provider jobs (`options.local.device`); omitted = no select. */
+  deviceOptions?: DeviceSelectOption[]
+  deviceHint?: string
+}>()
 
 const { t } = useI18n()
 
@@ -44,6 +51,17 @@ const speakersMissing = computed(() => speakerCountMissing(form.value))
         <NRadio value="cloud">{{ t('provider.cloud') }}</NRadio>
         <NRadio value="local">{{ t('provider.local') }}</NRadio>
       </NRadioGroup>
+    </NFormItem>
+    <NFormItem v-if="form.provider === 'local' && props.deviceOptions" :label="t('hardware.label')">
+      <NSpace vertical style="width: 100%">
+        <NSelect
+          v-model:value="form.device"
+          :options="props.deviceOptions"
+          data-testid="job-device"
+          style="max-width: 420px"
+        />
+        <NText v-if="props.deviceHint" depth="3">{{ props.deviceHint }}</NText>
+      </NSpace>
     </NFormItem>
     <NFormItem :label="t('jobOptions.languages')">
       <NCheckboxGroup v-model:value="form.languageHints" data-testid="job-languages">

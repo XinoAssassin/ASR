@@ -122,6 +122,8 @@ export const useTranscriptStore = defineStore('transcript', () => {
   let slowChain: Promise<unknown> = Promise.resolve()
   let loadSeq = 0
   let loadController: AbortController | null = null
+  /** Bumped by discard() (backend switch): writes queued before it are never sent. */
+  let backendEpoch = 0
 
   /** Term names of the job (highlighted while proofreading). */
   const terms = computed(() => (job.value?.options.terms ?? []).map((t) => t.term))
@@ -348,9 +350,12 @@ export const useTranscriptStore = defineStore('transcript', () => {
     bump(writesFor, id, 1)
     if (isCurrent(id)) saveState.value = 'saving'
     const epoch = conflicts.get(id) ?? 0
+    const backend = backendEpoch
     const work = async (): Promise<void> => {
       let ok = false
       try {
+        // Queued for the previous backend: `api` now points at another one.
+        if (backend !== backendEpoch) throw new ApiError(0, 'backend switched')
         // Queued before a 409 reload: do not apply it to a version the user has not seen.
         if ((conflicts.get(id) ?? 0) !== epoch) throw new ApiError(409, 'transcript changed elsewhere')
         const updated = await call(versions.get(id) ?? null)
@@ -570,6 +575,21 @@ export const useTranscriptStore = defineStore('transcript', () => {
     loading.value = false
   }
 
+  /**
+   * Another backend (profile switch): drop the transcript and any unsent text WITHOUT sending it
+   * (the caller flushed first and the user confirmed losing what could not be saved).
+   */
+  function discard(): void {
+    backendEpoch++
+    loadSeq++
+    loadController?.abort()
+    loadController = null
+    clearState()
+    loading.value = false
+    versions.clear()
+    conflicts.clear()
+  }
+
   return {
     transcript,
     job,
@@ -591,6 +611,7 @@ export const useTranscriptStore = defineStore('transcript', () => {
     releaseAudio,
     exportAs,
     reset,
+    discard,
     applyOps,
     editText,
     flush,

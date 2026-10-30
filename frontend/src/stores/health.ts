@@ -15,17 +15,33 @@ export const useHealthStore = defineStore('health', () => {
   const unauthorized = ref(false)
   let timer: ReturnType<typeof setInterval> | null = null
 
+  /** Per check; a reset() also bumps it, so an answer of the previous backend is dropped. */
+  let seq = 0
+
   async function check(): Promise<void> {
+    const mine = ++seq
     if (state.value !== 'connected') state.value = 'checking'
     try {
-      info.value = await getHealth()
+      const result = await getHealth()
+      if (mine !== seq) return
+      info.value = result
       state.value = 'connected'
       error.value = null
     } catch (e) {
+      if (mine !== seq) return
       info.value = null
       state.value = 'error'
       error.value = toApiError(e).message
     }
+  }
+
+  /** Another backend: nothing is known about it yet (call check() next). */
+  function reset(): void {
+    seq++
+    state.value = 'idle'
+    info.value = null
+    error.value = null
+    unauthorized.value = false
   }
 
   function startPolling(): void {
@@ -53,6 +69,7 @@ export const useHealthStore = defineStore('health', () => {
     error,
     unauthorized,
     check,
+    reset,
     startPolling,
     stopPolling,
     markUnauthorized,

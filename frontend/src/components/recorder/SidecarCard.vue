@@ -22,13 +22,15 @@ import { computed, onMounted, reactive, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import type { SidecarConfig, SidecarState } from '@/platform'
-import { useSettingsStore } from '@/stores/settings'
+import { useBackendSwitch } from '@/composables/useBackendSwitch'
+import { useProfilesStore } from '@/stores/profiles'
 import { defaultSidecarConfig, syncPortArg, useSidecarStore } from '@/stores/sidecar'
 
 const { t } = useI18n()
 const message = useMessage()
 const sidecar = useSidecarStore()
-const settings = useSettingsStore()
+const profiles = useProfilesStore()
+const backend = useBackendSwitch()
 
 const form = reactive<SidecarConfig & { cwdText: string }>({ ...defaultSidecarConfig(), cwdText: '' })
 
@@ -65,7 +67,7 @@ const STATE_TYPE: Record<SidecarState, 'default' | 'info' | 'success' | 'error'>
 const st = computed(() => sidecar.status)
 const busy = computed(() => sidecar.starting || sidecar.stopping || st.value.state === 'starting')
 const inUse = computed(
-  () => !!st.value.url && settings.backendUrl.replace(/\/+$/, '') === st.value.url,
+  () => !!st.value.url && profiles.isLocalActive && profiles.activeUrl === st.value.url,
 )
 
 async function save(): Promise<boolean> {
@@ -107,8 +109,9 @@ async function onStop(): Promise<void> {
 
 async function onUse(): Promise<void> {
   try {
-    const url = await sidecar.useAsBackend()
-    message.success(t('recorder.sidecar.used', { url }))
+    const url = sidecar.status.url
+    if (sidecar.status.state !== 'running' || !url) throw new Error('sidecar is not running')
+    if (await backend.useSidecar()) message.success(t('recorder.sidecar.used', { url }))
   } catch (e) {
     message.error(t('common.labelDetail', { label: t('recorder.sidecar.useFailed'), detail: (e as Error).message }))
   }
@@ -118,7 +121,7 @@ onMounted(() => void sidecar.init())
 </script>
 
 <template>
-  <NCard :title="t('recorder.sidecar.title')" data-testid="sidecar-settings">
+  <NCard id="sidecar" :title="t('recorder.sidecar.title')" data-testid="sidecar-settings">
     <template #header-extra>
       <NTag :type="STATE_TYPE[st.state]" round data-testid="sidecar-state" :data-state="st.state">
         {{ t(`recorder.sidecar.state.${st.state}`) }}

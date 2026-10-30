@@ -40,16 +40,33 @@ export const useSiyuanStore = defineStore('siyuan', () => {
 
   const configured = computed(() => !!settings.value?.token_set)
 
+  /** Bumped by reset(): answers of the previous backend are ignored. */
+  let epoch = 0
+
   async function load(): Promise<void> {
+    const mine = epoch
     loading.value = true
     try {
-      settings.value = await getSiyuanSettings()
+      const result = await getSiyuanSettings()
+      if (mine !== epoch) return
+      settings.value = result
       error.value = null
     } catch (e) {
-      error.value = toApiError(e)
+      if (mine === epoch) error.value = toApiError(e)
     } finally {
-      loading.value = false
+      if (mine === epoch) loading.value = false
     }
+  }
+
+  /** Another backend: its SiYuan settings are its own. */
+  function reset(): void {
+    epoch++
+    settings.value = null
+    loading.value = false
+    error.value = null
+    testResult.value = null
+    notebooks.value = []
+    notebooksError.value = null
   }
 
   /** `GET /api/siyuan/notebooks`; errors land in `notebooksError` (422 not configured, 502). */
@@ -124,6 +141,7 @@ export const useSiyuanStore = defineStore('siyuan', () => {
     pushing,
     configured,
     load,
+    reset,
     loadNotebooks,
     save,
     test,

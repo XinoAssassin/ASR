@@ -60,6 +60,14 @@ describe('recording job config', () => {
     expect(fromJobConfig(toJobConfig(settings))).toEqual(settings)
   })
 
+  it('round-trips the hardware of a local job', () => {
+    const settings = defaultRecordingJob('local')
+    settings.form.device = 'rocm'
+    const config = toJobConfig(settings)
+    expect(config.jobOptions?.local).toEqual({ device: 'rocm' })
+    expect(fromJobConfig(config).form.device).toBe('rocm')
+  })
+
   it('formatTerms is the inverse of parseTerms', () => {
     const terms = [
       { term: 'A,B', weight: 3, aliases: [], blacklist: [] },

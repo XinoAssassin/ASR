@@ -4,37 +4,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { setDesktopPlatformForTests } from '@/platform'
 import { createFakeDesktop, type FakeDesktop } from '@/platform/testing'
 
-const browser = vi.hoisted(() => ({
-  storage: new Map<string, string>(),
-  backendUrl: '',
-  apiKey: null as string | null,
-}))
+const storage = new Map<string, string>()
 
-vi.mock('@/api', () => ({
-  readStorage: (k: string) => browser.storage.get(k) ?? null,
-  writeStorage: (k: string, v: string | null) =>
-    v ? browser.storage.set(k, v) : browser.storage.delete(k),
-  getBackendUrl: () => browser.backendUrl,
-  getBackendUrlOverride: () => browser.backendUrl,
-  getApiKey: () => browser.apiKey,
-  setBackendUrl: (url: string | null) => (browser.backendUrl = (url ?? '').replace(/\/+$/, '')),
-  setApiKey: vi.fn(),
-  getJob: vi.fn(),
-  getSettings: vi.fn(),
-  getHealth: vi.fn(async () => ({ status: 'ok', version: 'test' })),
-  updateSettings: vi.fn(),
-  testCloud: vi.fn(),
-  toApiError: (e: unknown) => e,
-}))
+function stubDesktopWindow(): void {
+  vi.stubGlobal('window', {
+    __TAURI_INTERNALS__: {},
+    localStorage: {
+      getItem: (k: string) => storage.get(k) ?? null,
+      setItem: (k: string, v: string) => storage.set(k, v),
+      removeItem: (k: string) => storage.delete(k),
+    },
+  })
+}
 
+stubDesktopWindow() // the typed client is built at import time
+const { getBackendUrl } = await import('@/api')
 const { cleanSidecarConfig, syncPortArg, useSidecarStore } = await import('./sidecar')
 
 let fake: FakeDesktop
 
 beforeEach(() => {
-  browser.storage.clear()
-  browser.backendUrl = ''
-  vi.stubGlobal('window', { __TAURI_INTERNALS__: {} })
+  storage.clear()
+  stubDesktopWindow()
   fake = createFakeDesktop()
   setDesktopPlatformForTests(fake)
   setActivePinia(createPinia())
@@ -86,7 +77,8 @@ describe('sidecar store', () => {
     expect(st).toMatchObject({ state: 'running', url: 'http://127.0.0.1:8123' })
     const url = await store.useAsBackend()
     expect(url).toBe('http://127.0.0.1:8123')
-    expect(browser.backendUrl).toBe('http://127.0.0.1:8123')
+    // The built-in "本机" profile follows the sidecar; the SPA and Rust both use it.
+    expect(getBackendUrl()).toBe('http://127.0.0.1:8123')
     expect(fake.state.config.baseUrl).toBe('http://127.0.0.1:8123') // pushed to Rust
     await store.stop()
     expect(store.status.state).toBe('stopped')

@@ -1,5 +1,6 @@
 /**
- * Two kinds of settings: browser-local (backend URL override, X-API-Key — localStorage) and
+ * Two kinds of settings: browser-local (the active backend profile's URL + X-API-Key —
+ * localStorage, see `useProfilesStore` for the profiles themselves) and
  * server-side (`GET/PUT /api/settings`; the DashScope key is write-only and comes back masked),
  * plus the local model list shown on the Settings page (downloads only on explicit request, rule 6).
  */
@@ -61,25 +62,52 @@ export const useSettingsStore = defineStore('settings', () => {
   const defaultProvider = computed<ProviderName>(() => server.value?.provider_default ?? 'cloud')
   const cloudMaxFileSizeMb = computed(() => lastMaxMb.value ?? DEFAULT_CLOUD_MAX_FILE_SIZE_MB)
 
+  /** Bumped when the backend changes: answers of the previous one are ignored. */
+  let epoch = 0
+
   async function load(): Promise<void> {
+    const mine = epoch
     loading.value = true
     try {
-      server.value = await getSettings()
+      const result = await getSettings()
+      if (mine !== epoch) return
+      server.value = result
       error.value = null
     } catch (e) {
-      error.value = toApiError(e)
+      if (mine === epoch) error.value = toApiError(e)
     } finally {
-      loading.value = false
+      if (mine === epoch) loading.value = false
     }
   }
 
   async function loadLocalModels(): Promise<void> {
+    const mine = epoch
     try {
-      localModels.value = await listLocalModels()
+      const result = await listLocalModels()
+      if (mine !== epoch) return
+      localModels.value = result
       localModelsError.value = null
     } catch (e) {
-      localModelsError.value = toApiError(e)
+      if (mine === epoch) localModelsError.value = toApiError(e)
     }
+  }
+
+  /** Re-read the active profile's URL / key (after a profile switch or edit). */
+  function refreshConnection(): void {
+    backendUrl.value = getBackendUrlOverride()
+    apiKey.value = getApiKey() ?? ''
+  }
+
+  /** Another backend (profile switch): drop what the previous one said. */
+  function resetForBackend(): void {
+    epoch++
+    refreshConnection()
+    server.value = null
+    loading.value = false
+    error.value = null
+    cloudTest.value = null
+    localModels.value = []
+    localModelsError.value = null
   }
 
   /** Start a model download (explicit user action); throws ApiError. Refreshes the list. */
@@ -136,6 +164,7 @@ export const useSettingsStore = defineStore('settings', () => {
       apiKey.value = ''
     }
     backendUrl.value = getBackendUrlOverride()
+    epoch++
     server.value = null
     // A 401 from the previous backend says nothing about this one.
     health.clearUnauthorized()
@@ -168,6 +197,8 @@ export const useSettingsStore = defineStore('settings', () => {
     anyDownloading,
     load,
     loadLocalModels,
+    refreshConnection,
+    resetForBackend,
     downloadLocalModel,
     save,
     testCloud,

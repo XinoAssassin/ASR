@@ -7,8 +7,10 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
 import {
+  activeProfile,
   createJob,
   isAbortError,
+  profileStorageKey,
   readStorage,
   registerUpload,
   toApiError,
@@ -23,8 +25,13 @@ import {
 import { isAcceptedFile } from '@/utils/audio'
 import { buildJobCreate, defaultJobForm, type JobFormState } from '@/utils/jobForm'
 
+// Server paths: stored per backend profile (`<key>@<profileId>`, see PER_BACKEND_KEYS).
 const RECENT_DIRS_KEY = 'asr.recentDirs'
 const LAST_DIR_KEY = 'asr.lastTargetDir'
+
+function dirKey(key: string): string {
+  return profileStorageKey(key, activeProfile().id)
+}
 const MAX_RECENT = 8
 
 export type QueueStatus = 'pending' | 'uploading' | 'done' | 'error' | 'cancelled'
@@ -59,7 +66,7 @@ export interface ReadyUpload {
 
 function readRecent(): string[] {
   try {
-    const parsed: unknown = JSON.parse(readStorage(RECENT_DIRS_KEY) ?? '[]')
+    const parsed: unknown = JSON.parse(readStorage(dirKey(RECENT_DIRS_KEY)) ?? '[]')
     return Array.isArray(parsed) ? parsed.filter((d): d is string => typeof d === 'string') : []
   } catch {
     return []
@@ -69,17 +76,21 @@ function readRecent(): string[] {
 let keySeq = 0
 
 export const useUploadsStore = defineStore('uploads', () => {
-  const targetDir = ref(readStorage(LAST_DIR_KEY) ?? '')
+  const targetDir = ref(readStorage(dirKey(LAST_DIR_KEY)) ?? '')
   const recentDirs = ref<string[]>(readRecent())
   const queue = ref<QueueItem[]>([])
   const ready = ref<ReadyUpload[]>([])
   const uploading = ref(false)
   const registering = ref(false)
   const controllers = new Map<string, AbortController>()
+  /** Bumped by resetForBackend(): work started for the previous backend stops touching state. */
+  let generation = 0
   /** Job options form; kept here so it survives navigating away and back. */
   const jobForm = ref<JobFormState>(defaultJobForm())
   /** Whether jobForm.provider has been initialised from the server default. */
   const providerInitialized = ref(false)
+  /** Whether jobForm.device has been initialised from the settings / hardware default. */
+  const deviceInitialized = ref(false)
 
   const pendingCount = computed(
     () => queue.value.filter((i) => STARTABLE.includes(i.status)).length,
@@ -88,9 +99,9 @@ export const useUploadsStore = defineStore('uploads', () => {
   function rememberDir(dir: string): void {
     const clean = dir.trim()
     if (!clean) return
-    writeStorage(LAST_DIR_KEY, clean)
+    writeStorage(dirKey(LAST_DIR_KEY), clean)
     recentDirs.value = [clean, ...recentDirs.value.filter((d) => d !== clean)].slice(0, MAX_RECENT)
-    writeStorage(RECENT_DIRS_KEY, JSON.stringify(recentDirs.value))
+    writeStorage(dirKey(RECENT_DIRS_KEY), JSON.stringify(recentDirs.value))
   }
 
   /** Queue files; returns the names that were rejected by extension. */
@@ -151,9 +162,10 @@ export const useUploadsStore = defineStore('uploads', () => {
   }
 
   async function uploadOne(entry: QueueItem, dir: string): Promise<void> {
+    const gen = generation
     const controller = new AbortController()
     controllers.set(entry.key, controller)
-    const live = (): QueueItem | undefined => item(entry.key)
+    const live = (): QueueItem | undefined => (gen === generation ? item(entry.key) : undefined)
     Object.assign(entry, { status: 'uploading', error: null, loaded: 0 })
     try {
       const upload = await uploadFileChunked(entry.file, dir, {
@@ -170,7 +182,7 @@ export const useUploadsStore = defineStore('uploads', () => {
       })
       const it = live()
       if (it) Object.assign(it, { status: 'done', loaded: it.total, session: null })
-      addReady(upload, 'uploaded')
+      if (gen === generation) addReady(upload, 'uploaded')
     } catch (e) {
       const it = live()
       if (it) {
@@ -178,7 +190,7 @@ export const useUploadsStore = defineStore('uploads', () => {
         it.error = isAbortError(e) ? null : toApiError(e)
       }
     } finally {
-      controllers.delete(entry.key)
+      if (controllers.get(entry.key) === controller) controllers.delete(entry.key)
     }
   }
 
@@ -186,14 +198,16 @@ export const useUploadsStore = defineStore('uploads', () => {
   async function uploadAll(): Promise<void> {
     const dir = targetDir.value.trim()
     if (!dir || uploading.value) return
+    const gen = generation
     uploading.value = true
     rememberDir(dir)
     try {
       for (const entry of queue.value) {
+        if (gen !== generation) return // backend switched: never upload there with this dir
         if (STARTABLE.includes(entry.status)) await uploadOne(entry, dir)
       }
     } finally {
-      uploading.value = false
+      if (gen === generation) uploading.value = false
     }
   }
 
@@ -227,11 +241,13 @@ export const useUploadsStore = defineStore('uploads', () => {
    */
   async function startJobs(terms: Term[]): Promise<{ submitted: number; failures: JobStartFailure[] }> {
     if (submitting.value) return { submitted: 0, failures: [] }
+    const gen = generation
     submitting.value = true
     const submitted: string[] = []
     const failures: JobStartFailure[] = []
     try {
       for (const entry of [...ready.value]) {
+        if (gen !== generation) break // backend switched: these uploads are not there
         const body = buildJobCreate(
           jobForm.value,
           { uploadId: entry.upload.id, channels: entry.channels, streamIndex: entry.streamIndex },
@@ -245,10 +261,33 @@ export const useUploadsStore = defineStore('uploads', () => {
         }
       }
     } finally {
-      submitting.value = false
+      if (gen === generation) submitting.value = false
     }
-    if (submitted.length) clearSubmitted(submitted)
+    if (submitted.length && gen === generation) clearSubmitted(submitted)
     return { submitted: submitted.length, failures }
+  }
+
+  /**
+   * Another backend (profile switch): running uploads are aborted, server-side state (sessions,
+   * uploads waiting for a job, chosen term sets) is forgotten; picked files stay queued for the
+   * new backend. The target directory switches to the one remembered for the new profile.
+   */
+  function resetForBackend(): void {
+    generation++
+    for (const controller of controllers.values()) controller.abort()
+    controllers.clear()
+    queue.value = queue.value
+      .filter((i) => i.status !== 'done')
+      .map((i) => ({ ...i, status: 'pending', loaded: 0, part: 0, totalParts: 0, error: null, session: null }))
+    ready.value = []
+    uploading.value = false
+    registering.value = false
+    submitting.value = false
+    jobForm.value = { ...jobForm.value, termSetIds: [], device: null }
+    providerInitialized.value = false
+    deviceInitialized.value = false
+    targetDir.value = readStorage(dirKey(LAST_DIR_KEY)) ?? ''
+    recentDirs.value = readRecent()
   }
 
   return {
@@ -260,6 +299,7 @@ export const useUploadsStore = defineStore('uploads', () => {
     registering,
     jobForm,
     providerInitialized,
+    deviceInitialized,
     pendingCount,
     rememberDir,
     addFiles,
@@ -271,5 +311,6 @@ export const useUploadsStore = defineStore('uploads', () => {
     clearSubmitted,
     submitting,
     startJobs,
+    resetForBackend,
   }
 })

@@ -1,5 +1,5 @@
 /** Job form state → `JobCreate` request body (pure; unit-tested). */
-import type { ChannelsOption, JobCreate, ProviderName, Term } from '@/api/endpoints'
+import type { ChannelsOption, DeviceId, JobCreate, ProviderName, Term } from '@/api/endpoints'
 
 export const LANGUAGE_OPTIONS = ['zh', 'en'] as const
 export const MAX_SPEAKERS = 20
@@ -22,6 +22,8 @@ export interface JobFormState {
   termCorrection: boolean
   /** [5b] runaway-repetition filter. */
   repetitionFilter: boolean
+  /** Hardware of a local-provider job (`options.local.device`); null = the server's setting. */
+  device: DeviceId | null
 }
 
 export function defaultJobForm(provider: ProviderName = 'cloud'): JobFormState {
@@ -37,6 +39,7 @@ export function defaultJobForm(provider: ProviderName = 'cloud'): JobFormState {
     peakGain: true,
     termCorrection: true,
     repetitionFilter: true,
+    device: null,
   }
 }
 
@@ -53,27 +56,29 @@ export function buildJobCreate(form: JobFormState, target: JobTarget, extraTerms
     form.speakerMode === 'fixed' && Number.isFinite(form.numSpeakers) && form.numSpeakers >= 1
       ? Math.min(MAX_SPEAKERS, Math.round(form.numSpeakers))
       : null
+  const options: JobCreate['options'] = {
+    provider: form.provider,
+    language_hints: [...form.languageHints],
+    num_speakers: numSpeakers,
+    context: context || null,
+    preprocess: {
+      channels: target.channels,
+      stream_index: target.streamIndex,
+      peak_gain: form.peakGain,
+    },
+    cloud: { keep_dialect: form.keepDialect },
+    correction: {
+      terms: form.termCorrection,
+      repetition: form.repetitionFilter,
+      threshold: CORRECTION_THRESHOLD,
+    },
+  }
+  if (form.provider === 'local' && form.device) options.local = { device: form.device }
   return {
     upload_id: target.uploadId,
     provider: form.provider,
     term_set_ids: [...form.termSetIds],
     extra_terms: extraTerms,
-    options: {
-      provider: form.provider,
-      language_hints: [...form.languageHints],
-      num_speakers: numSpeakers,
-      context: context || null,
-      preprocess: {
-        channels: target.channels,
-        stream_index: target.streamIndex,
-        peak_gain: form.peakGain,
-      },
-      cloud: { keep_dialect: form.keepDialect },
-      correction: {
-        terms: form.termCorrection,
-        repetition: form.repetitionFilter,
-        threshold: CORRECTION_THRESHOLD,
-      },
-    },
+    options,
   }
 }

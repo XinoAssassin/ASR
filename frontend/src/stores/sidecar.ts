@@ -1,7 +1,7 @@
 /**
  * Desktop "local backend" sidecar (M10, docs/desktop-ipc.md): the optional `asr serve` process the
  * desktop app can start. Config + live status (`sidecar://status`), start / stop, and "use this
- * backend", which points the SPA (browser setting) and the Rust uploader at it.
+ * backend", which makes the built-in "本机" profile (following the sidecar) the active backend.
  */
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
@@ -15,8 +15,7 @@ import {
   type Unlisten,
 } from '@/platform'
 
-import { useRecorderStore } from './recorder'
-import { useSettingsStore } from './settings'
+import { useProfilesStore, type ChangeOptions } from './profiles'
 
 export const DEFAULT_SIDECAR_PORT = 8000
 
@@ -135,16 +134,14 @@ export const useSidecarStore = defineStore('sidecar', () => {
   }
 
   /**
-   * Point the SPA (Settings → backend URL override) and the Rust uploader at the running sidecar.
-   * The browser setting stays the single source of truth; `syncBackend()` pushes it to Rust.
+   * Make the built-in "本机" profile follow the running sidecar and switch to it; the profile
+   * store pushes the connection to the Rust uploader. Resolves the URL, or null when the user
+   * cancelled the switch (unsaved edits / uploads running).
    */
-  async function useAsBackend(): Promise<string> {
+  async function useAsBackend(options: ChangeOptions = {}): Promise<string | null> {
     const url = status.value.url
     if (status.value.state !== 'running' || !url) throw new Error('sidecar is not running')
-    const settings = useSettingsStore()
-    settings.setBackendUrl(url)
-    await useRecorderStore().syncBackend()
-    return url
+    return (await useProfilesStore().useSidecar(options)) ? url : null
   }
 
   return {

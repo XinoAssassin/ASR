@@ -3,6 +3,7 @@
  * `BackendConfig` (`jobOptions`, `provider`, `termSetIds`, `extraTerms`). Pure; unit-tested.
  */
 import type { ChannelsOption, JobOptions, ProviderName, Term } from '@/api/endpoints'
+import { isDeviceId } from '@/utils/hardware'
 import { buildJobCreate, defaultJobForm, MAX_SPEAKERS, type JobFormState } from '@/utils/jobForm'
 import { DEFAULT_TERM_WEIGHT, parseTerms } from '@/utils/terms'
 
@@ -88,5 +89,7 @@ export function fromJobConfig(
   const corr = jobOptions.correction
   if (typeof corr?.terms === 'boolean') form.termCorrection = corr.terms
   if (typeof corr?.repetition === 'boolean') form.repetitionFilter = corr.repetition
+  const device: unknown = jobOptions.local?.device
+  if (isDeviceId(device)) form.device = device
   return settings
 }

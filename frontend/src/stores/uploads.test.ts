@@ -15,6 +15,8 @@ vi.mock('@/api', async () => {
     ...api,
     readStorage: () => null,
     writeStorage: () => undefined,
+    activeProfile: () => ({ id: 'local', name: '', url: '', apiKey: null }),
+    profileStorageKey: (k: string, id: string) => `${k}@${id}`,
     isAbortError: errors.isAbortError,
     toApiError: errors.toApiError,
   }
