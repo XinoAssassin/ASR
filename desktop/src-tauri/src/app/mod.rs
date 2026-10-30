@@ -49,7 +49,7 @@ fn emit_status(app: &AppHandle, st: &RecorderStatus) {
 fn refresh_tray(app: &AppHandle) {
     let state = app.state::<AppState>();
     let recording = state.recorder.state() == RecorderState::Recording;
-    if let Some(item) = state.tray_toggle.lock().unwrap().as_ref() {
+    if let Some(item) = crate::util::lock(&state.tray_toggle).as_ref() {
         let _ = item.set_text(if recording {
             "停止录音 (Ctrl+Alt+R)"
         } else {
@@ -259,7 +259,13 @@ fn recording_reveal(state: State<'_, AppState>, id: String) -> Res<()> {
 #[cfg(windows)]
 fn reveal(path: &std::path::Path) -> Res<()> {
     use std::os::windows::process::CommandExt;
-    let mut cmd = std::process::Command::new("explorer.exe");
+    // Full path: a bare name would be searched in the (user-writable) app directory first.
+    let windir = std::env::var_os("WINDIR")
+        .or_else(|| std::env::var_os("SystemRoot"))
+        .map(PathBuf::from)
+        .filter(|d| d.is_absolute())
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let mut cmd = std::process::Command::new(windir.join("explorer.exe"));
     if path.exists() {
         // explorer parses its own command line: pass `/select,"<path>"` verbatim.
         cmd.raw_arg(format!("/select,\"{}\"", path.display()));
@@ -363,17 +369,21 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         tray = tray.icon(icon.clone());
     }
     tray.build(app)?;
-    *app.state::<AppState>().tray_toggle.lock().unwrap() = Some(toggle_item);
+    *crate::util::lock(&app.state::<AppState>().tray_toggle) = Some(toggle_item);
 
     // Global hotkey (a failure, e.g. taken by another app, is not fatal).
     if let Err(e) = app.global_shortcut().register(HOTKEY) {
         log::warn!("global shortcut {HOTKEY} unavailable: {e}");
     }
 
-    // Recover recordings orphaned by a crash, then start the upload worker. This runs while
-    // the hotkey / tray / IPC are live: `Recorder::recover_dir` skips partials owned by a
-    // session, so a recording started meanwhile is never finalised under it (no start gate:
-    // finalising a long orphan may take minutes).
+    // The upload worker starts right away (entries added later wake it), so neither a long
+    // recovery nor a panic in it holds back uploads.
+    uploader.start();
+
+    // Recover recordings orphaned by a crash. This runs while the hotkey / tray / IPC are
+    // live: `Recorder::recover_dir` skips partials owned by a session, so a recording started
+    // meanwhile is never finalised under it (no start gate: finalising a long orphan may take
+    // minutes).
     {
         let handle = handle.clone();
         let settings = config.settings();
@@ -408,7 +418,6 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     s.active_partial = state.recorder.active_partial();
                 }
             });
-            state.uploader.start();
         });
     }
 

@@ -5,7 +5,7 @@
 //! the timeline's silence fill is rarely needed here.
 
 use std::ffi::CString;
-use std::io::{BufReader, Read};
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
 
@@ -23,8 +23,9 @@ fn e2s(e: impl std::fmt::Display) -> String {
 fn connect() -> Result<(Sock, u16), String> {
     let path = pulseaudio::socket_path_from_env().ok_or("no PulseAudio / PipeWire-pulse server")?;
     let stream = UnixStream::connect(&path).map_err(e2s)?;
-    // A wedged server must not hang the recorder: requests and the data stream time out
-    // (a monitor / source delivers data continuously, so 5 s of nothing means trouble).
+    // A wedged server must not hang a request. On the data stream a timeout between
+    // messages is normal (a sink monitor goes quiet while `module-suspend-on-idle` suspends
+    // the sink) and only a timeout inside a message is an error; see `reader`.
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(5)))
         .map_err(e2s)?;
@@ -117,7 +118,7 @@ fn monitor_of(sock: &mut Sock, v: u16, sink: Option<&str>) -> Result<CString, St
 
 pub struct PulseSource {
     rate: f64,
-    rx: mpsc::Receiver<Result<Packet, String>>,
+    rx: mpsc::Receiver<Msg>,
     id: String,
 }
 
@@ -217,7 +218,31 @@ impl Stamper {
     }
 }
 
-fn reader(mut sock: Sock, v: u16, rate: f64, ch: usize, tx: mpsc::Sender<Result<Packet, String>>) {
+/// Wait for the next message. Ok(false): the read timed out with nothing consumed (an idle
+/// stream, e.g. a suspended sink's monitor; the timeline silence-fills meanwhile), so the
+/// stream is still in sync and reading can simply continue.
+fn wait_message(sock: &mut Sock) -> Result<bool, String> {
+    match sock.fill_buf() {
+        Ok([]) => Err("pulse server closed the connection".into()),
+        Ok(_) => Ok(true),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::Interrupted
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e2s(e)),
+    }
+}
+
+/// Reader thread -> `poll`: a packet, a heartbeat (None) or the error that ended the stream.
+type Msg = Result<Option<Packet>, String>;
+
+fn reader(mut sock: Sock, v: u16, rate: f64, ch: usize, tx: mpsc::Sender<Msg>) {
     let mut buf = Vec::new();
     let mut stamper = Stamper {
         rate,
@@ -226,6 +251,9 @@ fn reader(mut sock: Sock, v: u16, rate: f64, ch: usize, tx: mpsc::Sender<Result<
     };
     loop {
         let res = (|| -> Result<Option<Packet>, String> {
+            if !wait_message(&mut sock)? {
+                return Ok(None);
+            }
             let desc = protocol::read_descriptor(&mut sock).map_err(e2s)?;
             if desc.channel == u32::MAX {
                 let (_, cmd) = protocol::Command::read_tag_prefixed(&mut sock, v).map_err(e2s)?;
@@ -254,11 +282,17 @@ fn reader(mut sock: Sock, v: u16, rate: f64, ch: usize, tx: mpsc::Sender<Result<
         })();
         match res {
             Ok(Some(p)) => {
-                if tx.send(Ok(p)).is_err() {
+                if tx.send(Ok(Some(p))).is_err() {
                     return; // source dropped
                 }
             }
-            Ok(None) => {}
+            Ok(None) => {
+                // Idle or a control message: a heartbeat, so the thread (and the connection)
+                // ends once the source is dropped even while no audio flows.
+                if tx.send(Ok(None)).is_err() {
+                    return;
+                }
+            }
             Err(e) => {
                 let _ = tx.send(Err(e));
                 return;
@@ -275,7 +309,8 @@ impl CaptureSource for PulseSource {
     fn poll(&mut self, out: &mut Vec<Packet>) -> Result<(), String> {
         loop {
             match self.rx.try_recv() {
-                Ok(Ok(p)) => out.push(p),
+                Ok(Ok(Some(p))) => out.push(p),
+                Ok(Ok(None)) => {}
                 Ok(Err(e)) => return Err(e),
                 Err(mpsc::TryRecvError::Empty) => return Ok(()),
                 Err(mpsc::TryRecvError::Disconnected) => return Err("pulse reader ended".into()),
@@ -327,6 +362,77 @@ pub fn devices() -> Result<DeviceList, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::time::Duration;
+
+    /// An idle stream (suspended sink: no data for longer than the read timeout) is not an
+    /// error: the reader keeps waiting and delivers the data that follows; only a closed
+    /// connection ends it.
+    #[test]
+    fn idle_stream_is_not_an_error() {
+        let (a, mut b) = UnixStream::pair().unwrap();
+        a.set_read_timeout(Some(Duration::from_millis(30))).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let t = std::thread::spawn(move || {
+            reader(BufReader::new(a), protocol::MAX_VERSION, 48000.0, 2, tx)
+        });
+        // several read timeouts: heartbeats only, no error
+        for _ in 0..3 {
+            let m = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(m, Ok(None)), "only heartbeats while idle");
+        }
+        // one stereo frame pair: (0.5, 0.25), (-1, 0)
+        let payload: Vec<u8> = [0.5f32, 0.25, -1.0, 0.0]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect();
+        protocol::write_descriptor(
+            &mut b,
+            &protocol::Descriptor {
+                length: payload.len() as u32,
+                channel: 0,
+                offset: 0,
+                flags: protocol::DescriptorFlags::empty(),
+            },
+        )
+        .unwrap();
+        b.write_all(&payload).unwrap();
+        let p = loop {
+            match rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+                Ok(Some(p)) => break p,
+                Ok(None) => continue,
+                Err(e) => panic!("{e}"),
+            }
+        };
+        assert_eq!(p.samples, vec![0.375, -0.5]);
+        drop(b);
+        let end = loop {
+            match rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+                Err(e) => break e,
+                Ok(_) => continue,
+            }
+        };
+        assert!(end.contains("closed"), "{end}");
+        t.join().unwrap();
+    }
+
+    /// The source is dropped while the stream is idle: the reader thread still ends.
+    #[test]
+    fn reader_ends_when_the_source_is_dropped_while_idle() {
+        let (a, _b) = UnixStream::pair().unwrap();
+        a.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let t = std::thread::spawn(move || {
+            reader(BufReader::new(a), protocol::MAX_VERSION, 48000.0, 1, tx)
+        });
+        drop(rx);
+        let start = std::time::Instant::now();
+        while !t.is_finished() && start.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(t.is_finished());
+    }
     #[test]
     fn stamper_smooths_jitter_and_reanchors() {
         let mut s = super::Stamper {

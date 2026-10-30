@@ -110,7 +110,7 @@ type BackendConfig = {
 | `recorder_set_options` | `{ options: StartOptions }` | — | M10: store the options the tray / Ctrl+Alt+R toggle replays, without starting (the SPA calls it, debounced, when options change) |
 | `recorder_processes` | — | `AudioProcess[]` | M10: processes with an active audio session, for `processId` |
 | `sidecar_get_config` | — | `SidecarConfig` | M10 |
-| `sidecar_set_config` | `{ config: SidecarConfig }` | `SidecarConfig` | M10; does not start / stop by itself |
+| `sidecar_set_config` | `{ config: SidecarConfig }` | `SidecarConfig` | M10; does not start / stop by itself. Rejects a `command` that is not an absolute path to an existing file, a `cwd` that is not a folder, and a `--port` in `args` that contradicts `port`; may append `--port {port}` for `asr serve` (the returned config shows it) |
 | `sidecar_status` | — | `SidecarStatus` | M10 |
 | `sidecar_start` | — | `SidecarStatus` | M10; resolves once healthy or failed (timeout 120 s) |
 | `sidecar_stop` | — | `SidecarStatus` | M10 |
@@ -138,7 +138,8 @@ channels option becomes `per_channel` (the backend's `auto` may downmix correlat
 explicit `downmix` / `left` / `right` are kept.
 
 Recorder warnings (bilingual, shown verbatim in `RecorderStatus.warnings`) include: a source that
-could not be opened (recording continues without it), "write failed, retrying (N s held in memory)",
+could not be opened (recording continues without it), "per-app capture unavailable, recording the
+whole output device" (`processId` is then null), "write failed, retrying (N s held in memory)",
 "recording stopped: …" after 300 s of failed writes (the core then finalises and queues what was
 written), and "recording paused for about N s (system sleep?), gap skipped" when no track delivered
 audio for more than 10 s (`elapsed` excludes the cut time).
@@ -156,8 +157,9 @@ or a config change. Warning strings are bilingual and shown verbatim.
 
 ## Backend notes
 
-- Tauri 2 on Windows serves the SPA from `http://tauri.localhost`; the backend must list that
-  origin in `ASR_CORS_ORIGINS` for the SPA's own API calls. Rust's uploads are not browser
+- Tauri 2 on Windows serves the SPA from `http://tauri.localhost` (`tauri://localhost` on macOS /
+  Linux); a backend must list that origin in `ASR_CORS_ORIGINS` for the SPA's own API calls. The
+  app-started sidecar gets it added automatically; only a backend started by hand needs it set. Rust's uploads are not browser
   requests and need no CORS.
 - With `ASR_API_KEY` empty the backend accepts only loopback Host names, so a remote backend needs
   a key.

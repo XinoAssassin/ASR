@@ -135,11 +135,23 @@ fn net(e: reqwest::Error) -> ApiError {
     ApiError::Transient(redact(&msg))
 }
 
+/// Timeout of one request without a large body.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+/// Slowest uplink a part upload must still complete on (64 kbit/s).
+const MIN_UPLINK_BYTES_PER_S: u64 = 8 * 1024;
+
+/// Timeout for sending `len` body bytes: [`REQUEST_TIMEOUT`] or the time the body takes at
+/// [`MIN_UPLINK_BYTES_PER_S`] plus a minute, whichever is longer (a fixed timeout would fail the
+/// same part forever on a slow line).
+pub fn body_timeout(len: u64) -> Duration {
+    REQUEST_TIMEOUT.max(Duration::from_secs(60 + len / MIN_UPLINK_BYTES_PER_S))
+}
+
 impl Client {
     pub fn new(cfg: &BackendConfig) -> Result<Self, String> {
         let mut b = reqwest::blocking::Client::builder()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(300))
+            .timeout(REQUEST_TIMEOUT)
             .user_agent(concat!("asr-recorder/", env!("CARGO_PKG_VERSION")))
             // Never follow redirects: reqwest would forward X-API-Key to the new host.
             .redirect(reqwest::redirect::Policy::none());
@@ -235,6 +247,7 @@ impl Client {
                 &format!("/api/uploads/{session}/parts/{n}"),
             )
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .timeout(body_timeout(len))
             .body(buf),
         )?;
         Ok(())
@@ -313,6 +326,17 @@ pub fn job_body(cfg: &BackendConfig, upload_id: &str, channels: u16) -> Option<V
 mod tests {
     use super::*;
     use crate::ipc::Provider;
+
+    #[test]
+    fn part_timeout_scales_with_the_body() {
+        assert_eq!(body_timeout(0), REQUEST_TIMEOUT);
+        assert_eq!(body_timeout(1024 * 1024), REQUEST_TIMEOUT);
+        // an 8 MiB part gets the time it needs at 64 kbit/s (+ 1 min)
+        assert_eq!(
+            body_timeout(8 * 1024 * 1024),
+            Duration::from_secs(60 + 1024)
+        );
+    }
 
     fn cfg(opts: Option<Value>) -> BackendConfig {
         BackendConfig {

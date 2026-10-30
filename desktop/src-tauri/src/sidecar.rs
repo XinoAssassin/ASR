@@ -76,6 +76,121 @@ fn healthy(http: &reqwest::blocking::Client, port: u16) -> bool {
         .unwrap_or(false)
 }
 
+/// Origins of the app's own WebView: Windows (`http://tauri.localhost`) and macOS / Linux.
+pub const WEBVIEW_ORIGINS: [&str; 2] = ["http://tauri.localhost", "tauri://localhost"];
+/// The backend's own default `ASR_CORS_ORIGINS` (Vite dev server, docker nginx).
+const BACKEND_DEFAULT_ORIGINS: [&str; 2] = ["http://localhost:5173", "http://localhost:8080"];
+
+/// `ASR_CORS_ORIGINS` for the sidecar: the inherited value (or the backend's defaults when it
+/// is unset / empty) plus the WebView origins, so the SPA can call the backend the app started.
+pub fn cors_origins(inherited: Option<&str>) -> String {
+    let mut list: Vec<String> = inherited
+        .unwrap_or("")
+        .split(',')
+        .map(|o| o.trim().trim_end_matches('/').to_string())
+        .filter(|o| !o.is_empty())
+        .collect();
+    if list.is_empty() {
+        list = BACKEND_DEFAULT_ORIGINS.map(String::from).to_vec();
+    }
+    for o in WEBVIEW_ORIGINS {
+        if !list.iter().any(|x| x == o) {
+            list.push(o.to_string());
+        }
+    }
+    list.join(",")
+}
+
+/// The value of a `--port N` / `--port=N` argument: None if absent, Some(Err) if malformed.
+fn port_arg(args: &[String]) -> Option<Result<u16, String>> {
+    let i = args
+        .iter()
+        .position(|a| a == "--port" || a.starts_with("--port="))?;
+    let v = match args[i].strip_prefix("--port=") {
+        Some(v) => Some(v),
+        None => args.get(i + 1).map(String::as_str),
+    };
+    Some(
+        v.and_then(|v| v.trim().parse::<u16>().ok())
+            .filter(|p| *p != 0)
+            .ok_or_else(|| "args: --port needs a port number".to_string()),
+    )
+}
+
+/// `args` with the server's port equal to `port`: an existing `--port` value is replaced; for
+/// `asr serve` (an argument `serve`) without one, `--port {port}` is appended. Other commands
+/// are left alone (they may take the port another way).
+pub fn args_with_port(args: &[String], port: u16) -> Vec<String> {
+    let mut out = args.to_vec();
+    match out
+        .iter()
+        .position(|a| a == "--port" || a.starts_with("--port="))
+    {
+        Some(i) if out[i] == "--port" => {
+            if i + 1 < out.len() {
+                out[i + 1] = port.to_string();
+            } else {
+                out.push(port.to_string());
+            }
+        }
+        Some(i) => out[i] = format!("--port={port}"),
+        None if out.iter().any(|a| a == "serve") => {
+            out.push("--port".into());
+            out.push(port.to_string());
+        }
+        None => {}
+    }
+    out
+}
+
+/// Check a config from the SPA. The WebView choosing a program the app runs is the one
+/// IPC path to code execution, so `command` must be an absolute path to an existing file
+/// (CSP keeps foreign scripts out of the WebView; changes are logged). `args` may not name
+/// another port than `port` (the health check would time out and kill a healthy server).
+pub fn validate(c: &SidecarConfig) -> Result<SidecarConfig, String> {
+    if c.port == 0 {
+        return Err("port must be 1..65535".into());
+    }
+    let command = c.command.trim().to_string();
+    if !command.is_empty() {
+        let p = Path::new(&command);
+        if !p.is_absolute() || !p.is_file() {
+            return Err(format!(
+                "command must be the full path of an existing program (e.g. \
+                 D:\\ASR\\backend\\.venv\\Scripts\\asr.exe): {command}"
+            ));
+        }
+    }
+    let cwd = c
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(str::to_string);
+    if let Some(d) = cwd.as_deref() {
+        if !Path::new(d).is_dir() {
+            return Err(format!("cwd is not a folder: {d}"));
+        }
+    }
+    match port_arg(&c.args) {
+        Some(Err(e)) => return Err(e),
+        Some(Ok(p)) if p != c.port => {
+            return Err(format!(
+                "args say --port {p} but the port is {}; make them the same",
+                c.port
+            ))
+        }
+        _ => {}
+    }
+    Ok(SidecarConfig {
+        enabled: c.enabled,
+        command,
+        args: args_with_port(&c.args, c.port),
+        cwd,
+        port: c.port,
+    })
+}
+
 fn port_in_use(port: u16) -> bool {
     std::net::TcpStream::connect_timeout(
         &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
@@ -114,26 +229,38 @@ impl Sidecar {
     }
 
     pub fn config(&self) -> SidecarConfig {
-        self.config.lock().unwrap().clone()
+        crate::util::lock(&self.config).clone()
     }
 
+    /// Store a config from the SPA (checked by [`validate`]; `args` get the port, see
+    /// [`args_with_port`]). A changed `command` is logged.
     pub fn set_config(&self, c: SidecarConfig) -> Result<SidecarConfig, String> {
-        if c.port == 0 {
-            return Err("port must be 1..65535".into());
-        }
+        let c = validate(&c)?;
+        let old = self.config();
         let body = serde_json::to_vec_pretty(&c).map_err(|e| e.to_string())?;
         crate::util::write_atomic(&self.config_path, &body)
             .map_err(|e| format!("cannot store the sidecar config: {e}"))?;
-        *self.config.lock().unwrap() = c.clone();
+        if old.command != c.command || old.args != c.args {
+            let msg = format!(
+                "config changed: command {:?} -> {:?}, args {:?} -> {:?}",
+                old.command, c.command, old.args, c.args
+            );
+            log::warn!("sidecar: {msg}");
+            LogFile {
+                path: self.log_path.clone(),
+            }
+            .write_line(&msg);
+        }
+        *crate::util::lock(&self.config) = c.clone();
         Ok(c)
     }
 
     pub fn status(&self) -> SidecarStatus {
-        self.status.lock().unwrap().clone()
+        crate::util::lock(&self.status).clone()
     }
 
     fn set_status(&self, st: SidecarStatus) {
-        *self.status.lock().unwrap() = st.clone();
+        *crate::util::lock(&self.status) = st.clone();
         (self.on_status)(&st);
     }
 
@@ -150,7 +277,7 @@ impl Sidecar {
     }
 
     fn last_output(&self) -> String {
-        let t = self.tail.lock().unwrap();
+        let t = crate::util::lock(&self.tail);
         if t.is_empty() {
             String::new()
         } else {
@@ -163,9 +290,9 @@ impl Sidecar {
 
     /// Start (blocking until healthy, failed or timed out). Idempotent while running.
     pub fn start(self: &Arc<Self>) -> SidecarStatus {
-        let _op = self.op.lock().unwrap();
+        let _op = crate::util::lock(&self.op);
         self.abort.store(false, std::sync::atomic::Ordering::SeqCst);
-        if self.running.lock().unwrap().is_some() {
+        if crate::util::lock(&self.running).is_some() {
             return self.status();
         }
         let cfg = self.config();
@@ -178,12 +305,35 @@ impl Sidecar {
                 cfg.port
             ));
         }
+        let http = match reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => return self.fail(format!("cannot create the health-check client: {e}")),
+        };
         let log = LogFile {
             path: self.log_path.clone(),
         };
-        log.write_line(&format!("starting: {} {:?}", cfg.command, cfg.args));
+        // A config stored by an older version (or edited by hand) may disagree on the port.
+        let args = args_with_port(&cfg.args, cfg.port);
+        if args != cfg.args {
+            log::warn!(
+                "sidecar: args {:?} run as {args:?} (port {})",
+                cfg.args,
+                cfg.port
+            );
+        }
+        let cors = cors_origins(std::env::var("ASR_CORS_ORIGINS").ok().as_deref());
+        log.write_line(&format!(
+            "starting: {} {args:?} (ASR_CORS_ORIGINS={cors})",
+            cfg.command
+        ));
         let mut cmd = Command::new(&cfg.command);
-        cmd.args(&cfg.args)
+        cmd.args(&args)
+            // The SPA in the app's WebView calls this backend directly (CORS + Origin check).
+            .env("ASR_CORS_ORIGINS", &cors)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -214,7 +364,7 @@ impl Sidecar {
             Err(e) => return self.fail(format!("cannot start {}: {e}", cfg.command)),
         };
         let pid = child.id();
-        self.tail.lock().unwrap().clear();
+        crate::util::lock(&self.tail).clear();
         for (name, stream) in [
             (
                 "out",
@@ -239,7 +389,7 @@ impl Sidecar {
             std::thread::spawn(move || {
                 for line in BufReader::new(stream).lines().map_while(Result::ok) {
                     log.write_line(&format!("[{name}] {line}"));
-                    let mut t = tail.lock().unwrap();
+                    let mut t = crate::util::lock(&tail);
                     t.push(line);
                     if t.len() > TAIL_LINES {
                         t.remove(0);
@@ -247,7 +397,7 @@ impl Sidecar {
                 }
             });
         }
-        *self.running.lock().unwrap() = Some(Running {
+        *crate::util::lock(&self.running) = Some(Running {
             #[cfg(windows)]
             job: win::Job::assign(&child),
             child,
@@ -259,18 +409,13 @@ impl Sidecar {
             url: None,
             error: None,
         });
-        let http = reqwest::blocking::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(2))
-            .build()
-            .expect("http client");
         let deadline = Instant::now() + self.health_timeout;
         loop {
             if healthy(&http, cfg.port) {
                 break;
             }
             let exited = {
-                let mut r = self.running.lock().unwrap();
+                let mut r = crate::util::lock(&self.running);
                 match r.as_mut().map(|r| r.child.try_wait()) {
                     Some(Ok(Some(code))) => Some(code.to_string()),
                     Some(Err(e)) => Some(e.to_string()),
@@ -278,7 +423,7 @@ impl Sidecar {
                 }
             };
             if let Some(code) = exited {
-                *self.running.lock().unwrap() = None;
+                *crate::util::lock(&self.running) = None;
                 std::thread::sleep(Duration::from_millis(200)); // let the log threads drain
                 return self.fail(format!(
                     "exited during startup ({code}){}",
@@ -312,7 +457,7 @@ impl Sidecar {
         let me = self.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_secs(1));
-            let mut r = me.running.lock().unwrap();
+            let mut r = crate::util::lock(&me.running);
             let Some(run) = r.as_mut() else { return };
             if run.child.id() != pid {
                 return;
@@ -334,9 +479,9 @@ impl Sidecar {
     /// Stop: graceful signal, then kill the whole process tree after a grace period.
     pub fn stop(&self) -> SidecarStatus {
         self.abort.store(true, std::sync::atomic::Ordering::SeqCst);
-        let _op = self.op.lock();
+        let _op = crate::util::lock(&self.op);
         let pid = {
-            let mut r = self.running.lock().unwrap();
+            let mut r = crate::util::lock(&self.running);
             match r.as_mut() {
                 Some(run) => {
                     run.stopping = true;
@@ -359,7 +504,7 @@ impl Sidecar {
         let deadline = Instant::now() + STOP_GRACE;
         loop {
             let done = {
-                let mut r = self.running.lock().unwrap();
+                let mut r = crate::util::lock(&self.running);
                 match r.as_mut() {
                     None => true,
                     Some(run) => matches!(run.child.try_wait(), Ok(Some(_))),
@@ -370,7 +515,7 @@ impl Sidecar {
             }
             if Instant::now() >= deadline {
                 log::warn!("sidecar did not exit in time; killing the process tree");
-                if let Some(run) = self.running.lock().unwrap().as_mut() {
+                if let Some(run) = crate::util::lock(&self.running).as_mut() {
                     kill_tree(run);
                     let _ = run.child.wait();
                 }
@@ -379,7 +524,7 @@ impl Sidecar {
             std::thread::sleep(Duration::from_millis(200));
         }
         // Also take down children that outlived a graceful exit of the parent.
-        if let Some(mut run) = self.running.lock().unwrap().take() {
+        if let Some(mut run) = crate::util::lock(&self.running).take() {
             kill_tree(&mut run);
         }
         let st = SidecarStatus::stopped();
@@ -504,14 +649,16 @@ mod win {
 mod tests {
     use super::*;
 
+    /// Absolute path of a Python interpreter (`set_config` takes full paths only).
     fn python() -> Option<String> {
         ["python3", "python"].iter().find_map(|p| {
             Command::new(p)
-                .arg("--version")
+                .args(["-c", "import sys; print(sys.executable)"])
                 .output()
                 .ok()
                 .filter(|o| o.status.success())
-                .map(|_| p.to_string())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|p| Path::new(p).is_file())
         })
     }
 
@@ -524,7 +671,8 @@ mod tests {
     }
 
     const STANDIN: &str = r#"
-import http.server, sys, time
+import http.server, os, sys, time
+print("cors=" + os.environ.get("ASR_CORS_ORIGINS", "<unset>"), flush=True)
 time.sleep(float(sys.argv[2]))
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -594,6 +742,15 @@ http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
             log.contains("standin listening") && log.contains("healthy"),
             "{log}"
         );
+        // the child got the WebView origin (whatever the inherited value was)
+        let cors = log
+            .lines()
+            .find_map(|l| l.split("[out] cors=").nth(1))
+            .expect("cors line");
+        assert!(
+            cors.split(',').any(|o| o == "http://tauri.localhost"),
+            "{cors}"
+        );
         assert_eq!(
             *states.lock().unwrap(),
             vec![
@@ -606,6 +763,95 @@ http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
         // config persisted
         let again = Sidecar::new(dir.path(), dir.path(), Arc::new(|_| {}));
         assert_eq!(again.config().port, port);
+    }
+
+    #[test]
+    fn cors_origins_always_include_the_webview() {
+        let all =
+            "http://localhost:5173,http://localhost:8080,http://tauri.localhost,tauri://localhost";
+        assert_eq!(cors_origins(None), all);
+        assert_eq!(cors_origins(Some(" ")), all);
+        assert_eq!(
+            cors_origins(Some("https://asr.example, http://tauri.localhost/")),
+            "https://asr.example,http://tauri.localhost,tauri://localhost"
+        );
+        assert_eq!(cors_origins(Some(all)), all);
+    }
+
+    #[test]
+    fn port_args_follow_the_port() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            args_with_port(&v(&["serve", "--port", "8000"]), 8001),
+            v(&["serve", "--port", "8001"])
+        );
+        assert_eq!(
+            args_with_port(&v(&["serve", "--port=8000", "--x"]), 9),
+            v(&["serve", "--port=9", "--x"])
+        );
+        assert_eq!(
+            args_with_port(&v(&["serve"]), 8002),
+            v(&["serve", "--port", "8002"])
+        );
+        assert_eq!(
+            args_with_port(&v(&["serve", "--port"]), 7),
+            v(&["serve", "--port", "7"])
+        );
+        // not `asr serve`: left alone
+        assert_eq!(
+            args_with_port(&v(&["app.py", "8000"]), 8001),
+            v(&["app.py", "8000"])
+        );
+    }
+
+    #[test]
+    fn set_config_checks_command_cwd_and_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("asr.exe");
+        std::fs::write(&exe, b"x").unwrap();
+        let sc = Sidecar::new(dir.path(), dir.path(), Arc::new(|_| {}));
+        let cfg = |command: &str, args: &[&str], port: u16| SidecarConfig {
+            enabled: true,
+            command: command.into(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            cwd: None,
+            port,
+        };
+        let exe_s = exe.to_string_lossy().to_string();
+        // contradictory port
+        let e = sc.set_config(cfg(&exe_s, &["serve", "--port", "8000"], 8001));
+        assert!(e.unwrap_err().contains("--port 8000"));
+        assert!(sc
+            .set_config(cfg(&exe_s, &["serve", "--port", "x"], 8000))
+            .is_err());
+        // not a full path / missing / a folder
+        for bad in [
+            "asr".to_string(),
+            dir.path().join("nope.exe").to_string_lossy().to_string(),
+            dir.path().to_string_lossy().to_string(),
+        ] {
+            let e = sc.set_config(cfg(&bad, &["serve"], 8000)).unwrap_err();
+            assert!(e.contains("full path"), "{bad}: {e}");
+        }
+        let mut c = cfg(&exe_s, &["serve"], 8000);
+        c.cwd = Some(dir.path().join("nope").to_string_lossy().into());
+        assert!(sc.set_config(c).unwrap_err().contains("cwd"));
+        assert_eq!(sc.config(), SidecarConfig::default(), "nothing stored");
+        // accepted: the port is added for `asr serve`, empty cwd is null, the change is logged
+        let mut c = cfg(&format!(" {exe_s} "), &["serve"], 8001);
+        c.cwd = Some(" ".into());
+        let got = sc.set_config(c).unwrap();
+        assert_eq!(got.command, exe_s);
+        assert_eq!(got.args, vec!["serve", "--port", "8001"]);
+        assert_eq!(got.cwd, None);
+        assert_eq!(sc.config(), got);
+        let log = std::fs::read_to_string(dir.path().join("sidecar.log")).unwrap();
+        assert!(
+            log.contains("config changed") && log.contains("asr.exe"),
+            "{log}"
+        );
+        // an empty command (not configured) is fine
+        assert!(sc.set_config(cfg("", &["serve"], 8000)).is_ok());
     }
 
     #[test]

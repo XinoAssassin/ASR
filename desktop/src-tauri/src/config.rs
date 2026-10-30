@@ -100,15 +100,17 @@ impl ConfigStore {
 
     /// Config with the real key (internal use: the uploader).
     pub fn get_with_key(&self) -> BackendConfig {
-        let mut c = self.config.lock().unwrap().clone();
-        c.api_key = self.key.lock().unwrap().clone();
+        let mut c = crate::util::lock(&self.config).clone();
+        c.api_key = crate::util::lock(&self.key).clone();
         c
     }
 
     /// Config as returned to the SPA (key masked).
     pub fn get_masked(&self) -> BackendConfig {
-        let mut c = self.config.lock().unwrap().clone();
-        c.api_key = self.key.lock().unwrap().as_ref().map(|_| MASK.to_string());
+        let mut c = crate::util::lock(&self.config).clone();
+        c.api_key = crate::util::lock(&self.key)
+            .as_ref()
+            .map(|_| MASK.to_string());
         c
     }
 
@@ -120,26 +122,26 @@ impl ConfigStore {
                 let k = k.trim().to_string();
                 crate::util::write_atomic_private(&self.dir.join("api-key"), k.as_bytes())
                     .map_err(|e| format!("cannot store the API key: {e}"))?;
-                *self.key.lock().unwrap() = Some(k);
+                *crate::util::lock(&self.key) = Some(k);
             }
             _ => {
                 let _ = std::fs::remove_file(self.dir.join("api-key"));
-                *self.key.lock().unwrap() = None;
+                *crate::util::lock(&self.key) = None;
             }
         }
         let body = serde_json::to_vec_pretty(&new).map_err(|e| e.to_string())?;
         crate::util::write_atomic(&self.dir.join("backend.json"), &body)
             .map_err(|e| format!("cannot store the config: {e}"))?;
-        *self.config.lock().unwrap() = new;
+        *crate::util::lock(&self.config) = new;
         Ok(self.get_masked())
     }
 
     pub fn settings(&self) -> LocalSettings {
-        self.settings.lock().unwrap().clone()
+        crate::util::lock(&self.settings).clone()
     }
 
     pub fn update_settings(&self, f: impl FnOnce(&mut LocalSettings)) {
-        let mut s = self.settings.lock().unwrap();
+        let mut s = crate::util::lock(&self.settings);
         f(&mut s);
         match serde_json::to_vec_pretty(&*s) {
             Ok(b) => {

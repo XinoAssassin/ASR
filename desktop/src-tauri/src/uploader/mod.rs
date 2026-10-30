@@ -100,17 +100,19 @@ impl Uploader {
         &self.store
     }
 
-    /// Start the background worker thread.
+    /// Start the background worker thread (entries added later are picked up via `wake`).
     pub fn start(self: &Arc<Self>) {
         let me = self.clone();
-        std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name("uploader".into())
             .spawn(move || me.run())
-            .expect("spawn uploader");
+        {
+            log::error!("cannot start the upload worker: {e}");
+        }
     }
 
     pub fn wake(&self) {
-        *self.wake.0.lock().unwrap() = true;
+        *crate::util::lock(&self.wake.0) = true;
         self.wake.1.notify_all();
     }
 
@@ -221,9 +223,12 @@ impl Uploader {
                     .min(Duration::from_secs(60)),
                 None => Duration::from_secs(60),
             };
-            let mut flag = self.wake.0.lock().unwrap();
+            let mut flag = crate::util::lock(&self.wake.0);
             if !*flag {
-                flag = self.wake.1.wait_timeout(flag, wait).unwrap().0;
+                flag = match self.wake.1.wait_timeout(flag, wait) {
+                    Ok((g, _)) => g,
+                    Err(p) => p.into_inner().0,
+                };
             }
             *flag = false;
         }
@@ -241,8 +246,9 @@ impl Uploader {
             }
         };
         let u = e.upload();
-        // The file is only needed until the job exists; polling works without it.
-        if u.job_id.is_none() && !Path::new(&e.recording.path).is_file() {
+        // The file is only needed until it is on the server: creating the job and polling work
+        // without it (if the backend lost the upload, the re-upload lands here again).
+        if u.job_id.is_none() && u.upload_id.is_none() && !Path::new(&e.recording.path).is_file() {
             self.fail(
                 id,
                 Stage::Upload,

@@ -2,6 +2,13 @@
 
 use std::io::Write;
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
+
+/// Lock `m`, also when a thread panicked while holding it: the guarded values here are plain
+/// state that stays consistent (a poisoned lock must not take the app down with it).
+pub fn lock<T: ?Sized>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
 
 /// Write a file atomically (temp file in the same directory + rename).
 pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
@@ -54,6 +61,20 @@ pub fn iso(t: chrono::DateTime<chrono::Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lock_survives_a_poisoned_mutex() {
+        let m = std::sync::Arc::new(Mutex::new(1));
+        let m2 = m.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = m2.lock().unwrap();
+            panic!("poison it");
+        })
+        .join();
+        assert!(m.is_poisoned());
+        *lock(&m) += 1;
+        assert_eq!(*lock(&m), 2);
+    }
 
     #[test]
     fn atomic_write_replaces_and_leaves_no_temp() {

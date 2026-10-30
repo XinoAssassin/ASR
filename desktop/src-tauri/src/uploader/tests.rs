@@ -534,6 +534,38 @@ fn missing_file_before_upload_is_permanent() {
     assert_eq!(srv.hits.load(Ordering::SeqCst), 0);
 }
 
+/// The file is moved away after the upload but before the job exists (backend down at that
+/// moment): the job is still created from the upload; only a needed re-upload fails.
+#[test]
+fn missing_file_after_upload_still_creates_the_job() {
+    let srv = serve(10);
+    let e = env(&srv.url, None, Some(serde_json::json!({})));
+    srv.state.lock().unwrap().inject_at = vec![(6, 503)]; // init, 4 parts, complete; job -> 503
+    e.up.step(ID);
+    let u = state(&e);
+    assert_eq!(u.upload_id.as_deref(), Some("u0"), "{u:?}");
+    assert_eq!(u.job_id, None);
+    std::fs::remove_file(&entry(&e).recording.path).unwrap();
+    e.up.step(ID);
+    let u = state(&e);
+    assert_eq!(u.state, UploadState::Transcribing, "{u:?}");
+    assert_eq!(u.job_id.as_deref(), Some("j1"));
+    // the backend lost the upload of another such entry: re-upload needed, file gone
+    let srv = serve(10);
+    let e = env(&srv.url, None, Some(serde_json::json!({})));
+    srv.state.lock().unwrap().inject_at = vec![(6, 503)];
+    e.up.step(ID);
+    std::fs::remove_file(&entry(&e).recording.path).unwrap();
+    srv.state.lock().unwrap().uploads.clear();
+    e.up.step(ID); // job 404 + upload 404 -> upload id dropped, retry scheduled
+    assert_eq!(state(&e).upload_id, None);
+    e.up.step(ID);
+    let u = state(&e);
+    assert_eq!(u.state, UploadState::Failed, "{u:?}");
+    assert_eq!(u.next_retry_at, None, "missing file is permanent");
+    assert!(u.error.unwrap().contains("missing"));
+}
+
 #[test]
 fn changed_file_with_the_same_size_gets_a_new_session() {
     let srv = serve(10);

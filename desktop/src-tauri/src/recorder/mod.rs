@@ -29,6 +29,10 @@ use engine::{Env, Live, SessionConfig, SessionResult, SystemEnv};
 
 pub const PARTIAL_SUFFIX: &str = ".partial.wav";
 
+/// [`Recorder::failure`] of a recorder thread that ended without a reason (e.g. a panic).
+pub const THREAD_ENDED: &str =
+    "录音线程异常退出，录音已停止 / recorder thread ended unexpectedly, recording stopped";
+
 /// A finished recording file on disk.
 #[derive(Debug, Clone)]
 pub struct Finished {
@@ -164,14 +168,20 @@ impl Recorder {
         self.lock().session.as_ref().map(|s| s.partial.clone())
     }
 
-    /// Some(reason) once the session ended by itself (the file could not be written for
-    /// [`engine::MAX_BACKLOG_S`]). The state stays `Recording` until [`stop`](Self::stop) is
-    /// called, which finalises the partial file as usual.
+    /// Some(reason) once the session ended by itself: the file could not be written for
+    /// [`engine::MAX_BACKLOG_S`], or the recorder thread died (panic in a capture backend or
+    /// an early return) without saying why. The state stays `Recording` until
+    /// [`stop`](Self::stop) is called, which finalises the partial file as usual.
     pub fn failure(&self) -> Option<String> {
         let inner = self.lock();
         let s = inner.session.as_ref()?;
-        let l = s.live.lock().unwrap_or_else(|p| p.into_inner());
-        l.fatal.clone()
+        let fatal = s
+            .live
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .fatal
+            .clone();
+        fatal.or_else(|| s.thread.is_finished().then(|| THREAD_ENDED.to_string()))
     }
 
     /// Start recording. Blocks while the devices open (bounded by [`engine::START_TIMEOUT`]),
@@ -250,15 +260,21 @@ impl Recorder {
             if inner.state != RecorderState::Recording {
                 return Err("not recording".into());
             }
-            inner.state = RecorderState::Finalizing;
             // The stem stays busy until the partial is finalised.
-            inner.session.take().expect("recording without a session")
+            let Some(session) = inner.session.take() else {
+                // Cannot happen (Recording always has a session); recover instead of panicking.
+                log::error!("recorder state Recording without a session; resetting to idle");
+                inner.state = RecorderState::Idle;
+                return Err("not recording".into());
+            };
+            inner.state = RecorderState::Finalizing;
+            session
         };
         session.stop.store(true, Ordering::Release);
         let result = session
             .thread
             .join()
-            .map_err(|_| "recorder thread panicked".to_string())
+            .map_err(|p| format!("recorder thread panicked: {}", panic_message(&*p)))
             .and_then(|r| r);
         if let Err(e) = &result {
             log::error!("recorder thread ended with: {e}");
@@ -305,7 +321,7 @@ impl Recorder {
             }
             // A session may have finalised it between the listing and the claim.
             if p.exists() {
-                match finalize(&p, &stem, created) {
+                match guarded(|| finalize(&p, &stem, created)) {
                     Ok(f) => {
                         log::info!("recovered {}", f.path.display());
                         done.insert(stem.clone());
@@ -329,7 +345,7 @@ impl Recorder {
             if !old || !self.claim(&stem) {
                 continue;
             }
-            match describe(&p, &stem, created) {
+            match guarded(|| describe(&p, &stem, created)) {
                 Ok(f) => out.push(Recovered {
                     finished: f,
                     adopted: true,
@@ -340,6 +356,13 @@ impl Recorder {
         }
         out
     }
+}
+
+/// Run `f`, turning a panic (third-party decoders / encoders on arbitrary leftover files) into
+/// an error, so one bad file neither ends recovery nor leaves its stem claimed.
+fn guarded<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .unwrap_or_else(|p| Err(format!("panicked: {}", panic_message(&*p))))
 }
 
 /// Stem of a finished recording file name (`<stem>.flac` / `<stem>.wav`, recorder stems only).
@@ -394,6 +417,13 @@ fn describe(path: &Path, stem: &str, created_at: DateTime<Utc>) -> Result<Finish
     })
 }
 
+fn panic_message(p: &(dyn std::any::Any + Send)) -> &str {
+    p.downcast_ref::<&str>()
+        .copied()
+        .or_else(|| p.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("(no message)")
+}
+
 fn status_of(inner: &Inner, take_peaks: bool) -> RecorderStatus {
     let Some(s) = inner.session.as_ref() else {
         let mut st = RecorderStatus::idle(inner.last_file.clone());
@@ -444,10 +474,27 @@ fn finalize_with(
     let tmp = dir.join(format!("{stem}.flac.part"));
     let res = (|| -> std::io::Result<()> {
         if flac_path.exists() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!("{} exists", flac_path.display()),
-            ));
+            // A crash between the rename below and the removal of the partial: if that FLAC
+            // holds exactly this recording, the job is done (keeping both would queue the
+            // recording twice). Anything else keeps both files.
+            return match flac::verify(&flac_path, partial) {
+                Ok(n) if n == info.frames => {
+                    log::info!("{} is already complete", flac_path.display());
+                    Ok(())
+                }
+                Ok(n) => Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!(
+                        "{} exists with {n} of {} frames",
+                        flac_path.display(),
+                        info.frames
+                    ),
+                )),
+                Err(e) => Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("{} exists and differs: {e}", flac_path.display()),
+                )),
+            };
         }
         let verified = encode_verify(partial, &tmp)?;
         // The partial is only deleted when the FLAC holds every frame the file has on disk.
@@ -629,25 +676,46 @@ mod tests {
     }
 
     /// `start` does not hold the lock while devices open: status and recovery stay responsive.
+    /// Manual clock: the open blocks until the test moves the clock, so "responsive" is checked
+    /// without real-time bounds (a call that waited for the open would never return).
     #[test]
     fn slow_device_open_does_not_block_status() {
+        use std::sync::mpsc;
         let dir = tempfile::tempdir().unwrap();
-        let env = testenv::FakeEnv::new();
+        let env = testenv::FakeEnv::manual();
         *env.open_delay.lock().unwrap() = std::time::Duration::from_millis(400);
-        let rec = Arc::new(Recorder::with_env(env));
+        let rec = Arc::new(Recorder::with_env(env.clone()));
         let h = {
             let (rec, d) = (rec.clone(), dir.path().to_path_buf());
             std::thread::spawn(move || rec.start(&opts(), &d).map(|_| ()))
         };
-        std::thread::sleep(std::time::Duration::from_millis(100));
         let t = std::time::Instant::now();
-        assert_eq!(rec.status(false).state, RecorderState::Idle);
-        assert!(rec.recover_dir(dir.path()).is_empty());
-        assert!(
-            rec.start(&opts(), dir.path()).is_err(),
-            "second start refused"
-        );
-        assert!(t.elapsed() < std::time::Duration::from_millis(100));
+        while env.opens(capture::SourceKind::System) == 0 {
+            assert!(t.elapsed() < std::time::Duration::from_secs(10));
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        // the first open is now blocked on the clock
+        let (tx, rx) = mpsc::channel();
+        {
+            let (rec, d) = (rec.clone(), dir.path().to_path_buf());
+            std::thread::spawn(move || {
+                let idle = rec.status(false).state == RecorderState::Idle;
+                let recovered = rec.recover_dir(&d).is_empty();
+                let refused = rec.start(&opts(), &d).is_err();
+                let _ = tx.send((idle, recovered, refused));
+            });
+        }
+        let (idle, recovered, refused) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("status / recovery / start blocked by the opening start");
+        assert!(idle && recovered, "{idle} {recovered}");
+        assert!(refused, "second start refused");
+        // the devices open (one after the other)
+        let t = std::time::Instant::now();
+        while !h.is_finished() && t.elapsed() < std::time::Duration::from_secs(10) {
+            env.advance(0.1);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         h.join().unwrap().unwrap();
         assert_eq!(rec.state(), RecorderState::Recording);
         rec.stop().unwrap();
@@ -712,6 +780,83 @@ mod tests {
         assert!(!dir.path().join("2026-01-01_00-00-00.flac").exists());
         assert!(!dir.path().join("2026-01-01_00-00-00.flac.part").exists());
         assert_eq!(wav::WavReader::open(&f.path).unwrap().info.frames, 4000);
+    }
+
+    /// The recorder thread dies without a reason (a panic in a capture backend): `failure()`
+    /// reports it, so the app's status loop stops the session, and `stop` finalises what was
+    /// recorded before the panic.
+    #[test]
+    fn dead_recorder_thread_is_reported_and_stop_finalises() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = testenv::FakeEnv::manual();
+        *env.mic_panics_after.lock().unwrap() = Some(1.2);
+        let rec = Recorder::with_env(env.clone());
+        rec.start(&opts(), dir.path()).unwrap();
+        // to 1.1 s (before the panic), then until the recorder has processed it
+        for _ in 0..110 {
+            env.advance(0.01);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let t = std::time::Instant::now();
+        while rec.status(false).elapsed < 1.1 && t.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(rec.failure(), None);
+        env.advance(0.2); // past the panic
+        let t = std::time::Instant::now();
+        while rec.failure().is_none() && t.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(rec.failure().as_deref(), Some(THREAD_ENDED));
+        assert_eq!(rec.state(), RecorderState::Recording);
+        let f = rec.stop().unwrap();
+        assert_eq!(f.path.extension().unwrap(), "flac");
+        assert!((0.8..1.2).contains(&f.duration), "{f:?}");
+        assert!(!dir
+            .path()
+            .join(format!("{}{PARTIAL_SUFFIX}", f.stem))
+            .exists());
+        assert_eq!(rec.state(), RecorderState::Idle);
+        assert_eq!(rec.failure(), None);
+    }
+
+    /// Crash after the FLAC was renamed into place but before the partial was removed: the
+    /// next finalise (recovery) keeps the verified FLAC and removes the partial, so only one
+    /// file is left to queue. A FLAC that does not match keeps both.
+    #[test]
+    fn finalize_after_a_crash_past_the_rename_keeps_one_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let stem = "2026-01-01_00-00-00";
+        let p = dir.path().join(format!("{stem}{PARTIAL_SUFFIX}"));
+        crashed_partial(&p);
+        let flac_path = dir.path().join(format!("{stem}.flac"));
+        wav::repair(&p).unwrap();
+        flac::encode(&p, &flac_path).unwrap();
+        let f = finalize(&p, stem, Utc::now()).unwrap();
+        assert_eq!(f.path, flac_path);
+        assert!(!p.exists());
+        assert!(!dir.path().join(format!("{stem}.wav")).exists());
+        // no leftover files, nothing adopted twice
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names, vec![format!("{stem}.flac")]);
+
+        // a different recording under the same name: both are kept
+        let stem = "2026-01-01_00-00-01";
+        let other = dir.path().join("other.wav");
+        crashed_partial(&other);
+        let flac_path = dir.path().join(format!("{stem}.flac"));
+        wav::repair(&other).unwrap();
+        flac::encode(&other, &flac_path).unwrap();
+        let p = dir.path().join(format!("{stem}{PARTIAL_SUFFIX}"));
+        let mut w = wav::WavWriter::create(&p, 2, 16000).unwrap();
+        w.write(&vec![9i16; 2 * 4000]).unwrap();
+        w.finish().unwrap();
+        let f = finalize(&p, stem, Utc::now()).unwrap();
+        assert_eq!(f.path, dir.path().join(format!("{stem}.wav")));
+        assert!(flac_path.exists() && f.path.exists());
     }
 
     /// The disk fails for good: `failure()` reports it, the state stays Recording until `stop`,

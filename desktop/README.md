@@ -17,7 +17,7 @@ desktop/
   src-tauri/
     Cargo.toml              feature `app` (default) = Tauri shell; without it a plain library
     tauri.conf.json         frontendDist ../../frontend/dist, devUrl http://localhost:5173
-    capabilities/           core:default for the main window
+    capabilities/           main window: event listen / unlisten only
     src/
       ipc.rs                contract payload types (serde camelCase)
       config.rs             BackendConfig store (key in its own file, masked as "***")
@@ -66,6 +66,11 @@ Checks: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
 none), and they also build and run on Linux without WebKitGTK. On Windows the lib test exe
 *with* the `app` feature cannot start (`STATUS_ENTRYPOINT_NOT_FOUND`): it links Tauri, which
 needs common controls v6, but tauri-build embeds the manifest only into binaries.
+
+CI (`.forgejo/workflows/desktop.yml`): fmt / clippy / tests of the library on Linux, and an MSVC
+build of the full app (clippy with the `app` feature, library tests, release build with the
+embedded SPA, self-test binary) on a Windows runner; the dev machine itself has only the GNU
+toolchain.
 
 Release builds use the GUI subsystem (no console). Logs go to
 `%LOCALAPPDATA%\dev.asr.recorder\logs\` (tauri-plugin-log). App data (backend config, API key,
@@ -125,12 +130,18 @@ Test hooks (environment variables, for automated checks only):
   If FLAC fails the WAV is kept as `<stem>.wav`. After a crash, orphaned `*.partial.wav` files in
   the known output folders are repaired (sizes from the file length) and finalised at the next
   start, and finished `<stem>.flac` / `.wav` files from earlier runs that are missing from the
-  queue (a crash between finalising and queueing) are adopted. Recovery runs in the background
-  while the tray / hotkey / IPC are live; `Recorder::recover_dir` skips partials owned by a
-  session, so recording can start at once and is never finalised under itself.
-* **Write failure.** If the engine cannot write the file for too long it ends the session by
-  itself; the app's status loop then stops the recording, so the partial is finalised and
-  queued as usual (the warning is in `RecorderStatus.warnings`).
+  queue (a crash between finalising and queueing) are adopted. A crash between renaming the FLAC
+  into place and removing the partial leaves both: finalising then verifies the existing FLAC
+  against the partial and, if it holds every frame, only removes the partial (one recording, one
+  queue entry). Recovery runs in the background while the tray / hotkey / IPC are live (the
+  upload worker starts first, so a long recovery never holds back uploads); `Recorder::recover_dir`
+  skips partials owned by a session, so recording can start at once and is never finalised under
+  itself, and a panic on one leftover file is logged and does not end recovery.
+* **Write failure / dead recorder thread.** If the engine cannot write the file for too long it
+  ends the session by itself; if the recorder thread dies (a panic in a capture backend) the
+  WAV writer flushes on unwind. Either way `Recorder::failure()` reports it and the app's status
+  loop stops the recording, so the partial is finalised and queued as usual (the write-failure
+  warning is in `RecorderStatus.warnings`; the thread death is logged).
 * **Sources that cannot be opened** do not fail the start: with mic + system requested and no
   microphone, the recording runs system-only (mono) with a bilingual warning; only when no
   source opens does `recorder_start` fail. `RecorderStatus.sources` reports what is captured.
@@ -138,14 +149,18 @@ Test hooks (environment variables, for automated checks only):
   warning is shown, and the device is reopened every 2 s (rate changes are handled).
 * **Default-device changes** are followed: for sources recording "the default device", the
   default endpoint id is checked every 2 s and the source reopens on the new device (the track
-  continues; the switch is placed by timestamps like any gap).
+  continues at the new device's rate; the switch is placed by timestamps like any gap). If the
+  new device cannot be opened, the track shows the "device disconnected" warning and is retried
+  every 2 s.
 * **Per-application capture** (`StartOptions.processId`, Windows 10 2004+): WASAPI process
   loopback (`AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS`, include the process tree) via the `wasapi`
   crate, 48 kHz float stereo, event-mode client polled like the others. The process-loopback
   stream is produced continuously by the audio engine (silence while the app is quiet) with
   QPC timestamps that match its sample count, so it is a regular reference track; the clock
   map's rate estimate is a least-squares fit, so one badly stamped packet cannot skew it. A
-  `processId` that no longer exists falls back to the whole device with a warning; an app that
+  `processId` that no longer exists, or process loopback that cannot be opened (Windows older
+  than 10 2004, policy), falls back to the whole device with a warning (`processId` in the
+  status is then `null`); an app that
   exits mid-recording yields a warning (and silence). `recorder_processes` lists processes with
   a non-expired audio session on any render endpoint (active first) with exe name and main
   window title.
@@ -178,6 +193,11 @@ redacted (no query strings / keys). Recordings are never deleted.
 
 * **Resume.** The upload session stores the file's size and modification time; an interrupted
   upload resumes at the next part only if both match, otherwise a new session starts.
+* **Timeouts.** 300 s per request; a part upload gets at least the time its body needs at
+  64 kbit/s plus a minute (8 MiB: ~18 min), so a slow uplink does not fail the same part forever.
+* **File gone.** The recording is needed only until it is on the server: once `uploadId` is set,
+  job creation and polling work without the local file; a missing file before that (or when the
+  backend lost the upload and it must be sent again) is a permanent failure.
 * **Complete.** The backend's `complete` is idempotent, so a lost response is retried with the
   same session and returns the same upload; 409 (a concurrent duplicate still assembling) is
   transient. 404 (session expired) or another 4xx drops the session: the next attempt uploads
@@ -198,6 +218,20 @@ redacted (no query strings / keys). Recordings are never deleted.
 `serve --port 8000`), `cwd`, `port`, `enabled`. When enabled the app starts it at launch;
 `sidecar_start` / `sidecar_stop` do it on demand; `sidecar://status` reports every change.
 
+* `sidecar_set_config` accepts only a `command` that is the absolute path of an existing file
+  (e.g. `D:\ASR\backend\.venv\Scripts\asr.exe`; empty = not configured) and a `cwd` that is an
+  existing folder; command / args changes are logged (app log and `sidecar.log`).
+* `port` and `args` must agree: a `--port N` / `--port=N` argument with another value than
+  `port` is rejected; `asr serve` args without `--port` get `--port {port}` appended (the stored
+  and returned config shows it). At start the same rule is applied to configs stored by older
+  versions (a mismatching `--port` is replaced by `port`).
+* `ASR_CORS_ORIGINS` for the sidecar = the app's inherited value (or the backend's defaults
+  `http://localhost:5173,http://localhost:8080` when unset) plus the WebView origins
+  `http://tauri.localhost` (Windows) and `tauri://localhost` (macOS / Linux), so the SPA's own
+  API calls to the backend the app started pass CORS and the Origin check. The variable is set in
+  the child's environment, so it takes precedence over a `backend/.env` value: put extra origins
+  into the app's environment instead. The sidecar binds `127.0.0.1` (no API key needed).
+
 * Spawned without a console window (`CREATE_NO_WINDOW`) in its own process group and in a Job
   object with `KILL_ON_JOB_CLOSE`, so the whole process tree dies with the app even if the app
   crashes. stdout/stderr go to `<app log dir>\sidecar.log` (rotated at 5 MB, one `.1` backup).
@@ -214,6 +248,15 @@ redacted (no query strings / keys). Recordings are never deleted.
 
 ## Security
 
+* The WebView may only use the event API (`capabilities/default.json`: `core:event:allow-listen`
+  / `allow-unlisten`; the app's own commands need no permission). No window / tray / menu / path
+  / shell / fs APIs are exposed to the SPA.
+* `sidecar_set_config` + `sidecar_start` let the WebView choose a program the app runs: the one
+  IPC path to code execution. It is limited by the CSP (only the bundled scripts run in the
+  WebView), by accepting only an absolute path to an existing file, and by logging every
+  command change; a stored config is never sent anywhere.
+* Windows Explorer (`recording_reveal`) is started by full path (`%WINDIR%\explorer.exe`), not
+  searched for in the (user-writable) app directory.
 * The API key is stored in `api-key` in the app data dir (never in `backend.json`), returned to
   the SPA only as `"***"`, and sent only as `X-API-Key` to the configured backend (no redirects).
   On Unix the file is created with mode 0600 (older 0644 files are tightened at start); on

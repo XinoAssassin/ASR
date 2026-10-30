@@ -253,7 +253,7 @@ impl WavReader {
         let mut f = File::open(path)?;
         let mut h = [0u8; 44];
         f.read_exact(&mut h)?;
-        if &h[0..4] != b"RIFF" || &h[36..40] != b"data" {
+        if &h[0..4] != b"RIFF" || &h[8..12] != b"WAVE" || &h[36..40] != b"data" {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "not a recorder WAV",
@@ -337,6 +337,23 @@ mod tests {
         std::fs::write(&p, b"keep").unwrap();
         assert!(WavWriter::create(&p, 1, 16000).is_err());
         assert_eq!(std::fs::read(&p).unwrap(), b"keep");
+    }
+
+    /// `open` and `repair` agree on what a recorder WAV is: a RIFF file that is not `WAVE` is
+    /// refused by both.
+    #[test]
+    fn open_checks_the_wave_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.wav");
+        let mut w = WavWriter::create(&p, 1, 16000).unwrap();
+        w.write(&[1i16; 100]).unwrap();
+        w.finish().unwrap();
+        assert_eq!(WavReader::open(&p).unwrap().info.frames, 100);
+        let mut b = std::fs::read(&p).unwrap();
+        b[8..12].copy_from_slice(b"AVI ");
+        std::fs::write(&p, &b).unwrap();
+        assert!(WavReader::open(&p).is_err());
+        assert!(repair(&p).is_err());
     }
 
     /// In-memory storage that fails or accepts only part of a write on demand.

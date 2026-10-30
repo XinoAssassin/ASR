@@ -179,7 +179,7 @@ impl Store {
     /// a transcript): an entry for the same file is kept as is (`Inserted::Existing`), and a
     /// different file whose id is taken gets a suffixed id (`<id>_2`, ...).
     pub fn insert(&self, mut entry: Entry) -> Inserted {
-        let mut v = self.entries.lock().unwrap();
+        let mut v = crate::util::lock(&self.entries);
         if let Some(e) = v
             .iter()
             .find(|e| same_path(&e.recording.path, &entry.recording.path))
@@ -216,7 +216,7 @@ impl Store {
     /// Mutate every entry, persisting once (and only if something changed). Returns the
     /// entries whose recording (the part the SPA sees) changed.
     pub fn update_all(&self, mut f: impl FnMut(&mut Entry)) -> Vec<Entry> {
-        let mut v = self.entries.lock().unwrap();
+        let mut v = crate::util::lock(&self.entries);
         let mut changed = false;
         let mut visible = Vec::new();
         for e in v.iter_mut() {
@@ -237,7 +237,7 @@ impl Store {
 
     /// Mutate one entry and persist. Returns the updated entry.
     pub fn update(&self, id: &str, f: impl FnOnce(&mut Entry)) -> Option<Entry> {
-        let mut v = self.entries.lock().unwrap();
+        let mut v = crate::util::lock(&self.entries);
         let e = v.iter_mut().find(|e| e.recording.id == id)?;
         f(e);
         let out = e.clone();

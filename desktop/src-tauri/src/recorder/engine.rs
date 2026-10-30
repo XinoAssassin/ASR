@@ -271,7 +271,20 @@ fn run(
             ));
             process = None;
         }
-        match env.open(kind, device.as_deref(), process) {
+        let opened = match (env.open(kind, device.as_deref(), process), process) {
+            // Per-app capture unavailable (Windows < 10 2004, policy, transient): record the
+            // whole device rather than nothing.
+            (Err(e), Some(pid)) => {
+                log::warn!("process loopback of {pid} failed ({e}); capturing the whole device");
+                start_warnings.push(format!(
+                    "无法单独录制进程 {pid}，改为录制整个输出设备 / per-app capture of process {pid} unavailable, recording the whole output device: {e}"
+                ));
+                process = None;
+                env.open(kind, device.as_deref(), None)
+            }
+            (r, _) => r,
+        };
+        match opened {
             Ok(src) => slots.push(Slot {
                 kind,
                 device,
@@ -412,15 +425,19 @@ fn run(
                         s.lost_at = None;
                         s.reopening = None;
                     }
+                    // A failed reopen (also right after a default-device switch, where
+                    // `lost_at` was cleared) marks the track as disconnected for the warning.
                     Ok(Err(e)) => {
                         log::debug!("{:?} reopen failed: {e}", s.kind);
                         s.reopening = None;
                         s.last_try = now;
+                        s.lost_at.get_or_insert(now);
                     }
                     Err(mpsc::TryRecvError::Empty) => {}
                     Err(mpsc::TryRecvError::Disconnected) => {
                         s.reopening = None;
                         s.last_try = now;
+                        s.lost_at.get_or_insert(now);
                     }
                 }
             }
@@ -532,8 +549,9 @@ fn run(
                 }
                 if s.lost_at.is_some() {
                     l.warnings.push(format!(
-                        "{}设备已断开，正在重新连接（期间以静音填充）",
-                        label(s.kind)
+                        "{}设备已断开，正在重新连接（期间以静音填充）/ {} device disconnected, reconnecting (silence filled meanwhile)",
+                        label(s.kind),
+                        label_en(s.kind)
                     ));
                 } else {
                     let silent = tl.silent_for(i, now);
@@ -623,33 +641,193 @@ mod tests {
         (h, live, stop)
     }
 
+    /// Manual clock step of the deterministic tests (s).
+    const STEP: f64 = 0.02;
+
+    fn frames_s(r: &SessionResult) -> f64 {
+        r.frames as f64 / OUT_RATE
+    }
+
     /// A mic reopen that blocks for 0.6 s must not stall the loop: the healthy system track
-    /// keeps every sample (no silence fill past its data, nothing dropped).
+    /// keeps every sample (no silence fill past its data, nothing dropped). Manual clock: the
+    /// result does not depend on how loaded the machine is.
     #[test]
     fn slow_reopen_does_not_drop_healthy_track() {
         let dir = tempfile::tempdir().unwrap();
-        let env = FakeEnv::new();
+        let env = FakeEnv::manual();
         *env.mic_dies_after.lock().unwrap() = Some(0.2);
         *env.reopen_delay.lock().unwrap() = Duration::from_millis(600);
         let (h, live, stop) = start(&env, dir.path().join("a.partial.wav"), 60.0);
         // loss at 0.2 s, reopen attempt at 2.2 s that takes until 2.8 s
-        std::thread::sleep(Duration::from_millis(3300));
-        assert_eq!(env.opens(SourceKind::Mic), 2, "mic was reopened");
+        assert!(env.run_to(&live, 1.0, STEP));
+        assert!(
+            live.lock().unwrap().warnings[0].contains("microphone device disconnected"),
+            "bilingual warning"
+        );
+        assert!(env.run_to(&live, 2.6, STEP));
+        assert_eq!(env.opens(SourceKind::Mic), 2, "reopen running");
+        assert!(env.run_to(&live, 3.3, STEP));
         let warnings = live.lock().unwrap().warnings.clone();
         assert!(warnings.is_empty(), "{warnings:?}");
         stop.store(true, Ordering::Release);
         let r = h.join().unwrap().unwrap();
         let (sys, mic) = (&r.stats[0], &r.stats[1]);
         assert!(sys.dropped_s < 0.002, "{sys:?}");
-        assert!(sys.silence_inserted_s < 0.05, "{sys:?}");
-        // the mic gap (~2.6 s) was silence-filled
-        assert!(mic.silence_inserted_s > 2.0, "{mic:?}");
-        // 3.3 s recorded
+        assert!(sys.silence_inserted_s < 0.002, "{sys:?}");
+        // the mic gap (0.2 .. ~2.8 s) was silence-filled
+        assert!((mic.silence_inserted_s - 2.6).abs() < 0.1, "{mic:?}");
+        assert!((frames_s(&r) - 3.3).abs() < 0.01, "{}", r.frames);
+    }
+
+    /// The default mic changes to a device with another rate: the source is reopened at once
+    /// and the track continues at the new rate (`reset_rate`): no drift, nothing dropped, the
+    /// file as long as the session.
+    #[test]
+    fn default_device_switch_reopens_with_the_new_rate() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("d.partial.wav");
+        let env = FakeEnv::manual();
+        env.set_default_id(SourceKind::Mic, Some("mic-a"));
+        *env.reopen_rate[SourceKind::Mic as usize].lock().unwrap() = Some(48000.0);
+        let (h, live, stop) = start(&env, p.clone(), 60.0);
+        assert!(env.run_to(&live, 1.0, STEP));
+        env.set_default_id(SourceKind::Mic, Some("mic-b"));
+        // the default is checked every 2 s
+        assert!(env.run_to(&live, 1.9, STEP));
+        assert_eq!(env.opens(SourceKind::Mic), 1);
+        assert!(env.run_to(&live, 6.0, STEP));
+        assert_eq!(env.opens(SourceKind::Mic), 2, "switched once");
+        assert_eq!(env.opens(SourceKind::System), 1, "system default unchanged");
+        assert!(live.lock().unwrap().warnings.is_empty());
+        stop.store(true, Ordering::Release);
+        let r = h.join().unwrap().unwrap();
+        let (sys, mic) = (&r.stats[0], &r.stats[1]);
+        assert!((frames_s(&r) - 6.0).abs() < 0.01, "{}", r.frames);
         assert!(
-            (r.frames as f64 / OUT_RATE - 3.3).abs() < 0.2,
-            "{}",
-            r.frames
+            sys.dropped_s < 0.002 && sys.silence_inserted_s < 0.002,
+            "{sys:?}"
         );
+        assert!(mic.dropped_s < 0.01, "{mic:?}");
+        // the reopen runs on a helper thread: it may land a few clock steps late
+        assert!(mic.silence_inserted_s < 0.2, "{mic:?}");
+        // 2 s at 44.1 kHz, then 4 s at 48 kHz (less the reopen gap)
+        let expect = 2.0 * 44100.0 + (4.0 - mic.silence_inserted_s) * 48000.0;
+        assert!(
+            (mic.input_frames as f64 - expect).abs() < 0.03 * 48000.0,
+            "{mic:?}"
+        );
+        // the mic channel holds the tone up to the end (no drift fill / truncation)
+        let mut rd = super::super::wav::WavReader::open(&p).unwrap();
+        let mut b = Vec::new();
+        let mut mic_tail = Vec::new();
+        while rd.read_bytes(4096, &mut b).unwrap() > 0 {
+            for f in b.chunks_exact(4) {
+                mic_tail.push(i16::from_le_bytes([f[2], f[3]]));
+            }
+        }
+        let tail = &mic_tail[mic_tail.len() - 16000..mic_tail.len() - 4000];
+        let want = super::super::timeline::to_i16(-0.125);
+        assert!(
+            tail.iter().all(|&x| (x - want).abs() <= 2),
+            "mic tail {:?}",
+            &tail[..8]
+        );
+    }
+
+    /// The default device changes but the new one cannot be opened: the track is reported as
+    /// disconnected (it is silence-filled while the reopen is retried).
+    #[test]
+    fn failed_reopen_after_a_default_switch_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = FakeEnv::manual();
+        env.set_default_id(SourceKind::Mic, Some("mic-a"));
+        env.fail_reopens.store(true, Ordering::SeqCst);
+        let (h, live, stop) = start(&env, dir.path().join("e.partial.wav"), 60.0);
+        env.set_default_id(SourceKind::Mic, Some("mic-b"));
+        assert!(env.run_to(&live, 2.5, STEP));
+        assert!(env.opens(SourceKind::Mic) >= 2);
+        let w = live.lock().unwrap().warnings.clone();
+        assert_eq!(
+            w,
+            vec!["麦克风设备已断开，正在重新连接（期间以静音填充）/ microphone device disconnected, reconnecting (silence filled meanwhile)".to_string()]
+        );
+        // the device comes back
+        env.fail_reopens.store(false, Ordering::SeqCst);
+        assert!(env.run_to(&live, 5.0, STEP));
+        assert!(live.lock().unwrap().warnings.is_empty());
+        stop.store(true, Ordering::Release);
+        let r = h.join().unwrap().unwrap();
+        assert!((frames_s(&r) - 5.0).abs() < 0.01, "{}", r.frames);
+    }
+
+    /// A capture backend panics inside the recorder thread: the thread ends (the caller sees
+    /// `is_finished`, see `Recorder::failure`) and what was recorded before stays a valid WAV.
+    #[test]
+    fn panicking_source_ends_the_thread_and_keeps_the_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("p.partial.wav");
+        let env = FakeEnv::manual();
+        *env.mic_panics_after.lock().unwrap() = Some(1.5);
+        let (h, live, _stop) = start(&env, p.clone(), 60.0);
+        assert!(env.run_to(&live, 1.4, STEP));
+        assert!(!h.is_finished());
+        env.advance(0.2);
+        let t = std::time::Instant::now();
+        while !h.is_finished() && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(h.is_finished());
+        assert!(live.lock().unwrap().fatal.is_none(), "nobody set a reason");
+        assert!(h.join().is_err(), "panicked");
+        // the writer flushed on unwind: everything up to the last checkpoint is readable
+        let info = super::super::wav::repair(&p).unwrap();
+        let got = info.frames as f64 / OUT_RATE;
+        assert!((0.9..1.6).contains(&got), "{got}");
+    }
+
+    /// Per-app capture cannot be opened (old Windows, policy): the whole device is recorded
+    /// instead, with a warning, and `process_id` reports the whole device.
+    #[test]
+    fn process_loopback_failure_falls_back_to_the_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = FakeEnv::new();
+        env.fail_process_open.store(true, Ordering::SeqCst);
+        let live = Arc::new(Mutex::new(Live::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut c = cfg(dir.path().join("q.partial.wav"), 60.0);
+        c.process_id = Some(4242);
+        let h = spawn(
+            c,
+            live.clone(),
+            stop.clone(),
+            env.clone(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(
+            *env.open_log.lock().unwrap(),
+            vec![
+                (SourceKind::System, Some(4242)),
+                (SourceKind::System, None),
+                (SourceKind::Mic, None)
+            ]
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        {
+            let l = live.lock().unwrap();
+            assert!(l.sources.system && l.sources.mic);
+            assert_eq!(l.process_id, None);
+            assert_eq!(l.warnings.len(), 1, "{:?}", l.warnings);
+            assert!(
+                l.warnings[0]
+                    .contains("process 4242 unavailable, recording the whole output device"),
+                "{:?}",
+                l.warnings
+            );
+        }
+        stop.store(true, Ordering::Release);
+        let r = h.join().unwrap().unwrap();
+        assert_eq!(r.channels, 2);
     }
 
     /// Writes fail for half a second: frames are held and written later, none lost.
