@@ -5,8 +5,10 @@ term glossary (pinyin for Chinese terms) and context, must return the same segme
 fix mis-heard words. The rewrite is diffed on tokens (whole Latin words, single CJK characters,
 whitespace runs); each change weighs ``max(len(before), len(after))`` code points, and a segment
 whose changes exceed ``MAX_EDIT_RATIO`` of its text is discarded. Only a change that writes a
-glossary term (its ``after`` is the term, give or take ``TERM_SLACK`` characters) is exempt. Each
-changed span becomes a ``Correction(source="llm", status="suggested")``.
+glossary term (its ``after`` is the term, give or take ``TERM_SLACK`` characters, and its ``before``
+is no longer than a mis-hearing of that term can be: ``max(2 * len(term), len(term) + 4)`` plus
+``TERM_SLACK``) is exempt. Each changed span becomes a ``Correction(source="llm",
+status="suggested")``.
 
 Transport: DashScope OpenAI-compatible chat (``{endpoint}/compatible-mode/v1/chat/completions``)
 with the same key and allow-listed endpoint as the cloud ASR provider.
@@ -14,10 +16,11 @@ with the same key and allow-listed endpoint as the cloud ASR provider.
 
 from __future__ import annotations
 
+import contextlib
 import difflib
 import json
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 import httpx
@@ -55,10 +58,21 @@ def glossary(terms: Sequence[Term]) -> str:
     return "\n".join(lines)
 
 
-def _writes_term(after: str, names: Sequence[str]) -> bool:
-    """``after`` (whitespace-stripped) is a glossary term, give or take ``TERM_SLACK`` chars."""
+def _max_term_before(name: str) -> int:
+    """Longest ``before`` a change writing ``name`` may replace and stay exempt: a mis-heard
+    term (``汤泡`` -> ``Townfall``, ``tong yi`` -> ``通义``), not a rewritten clause."""
+    return max(2 * len(name), len(name) + 4) + TERM_SLACK
+
+
+def _writes_term(before: str, after: str, names: Sequence[str]) -> bool:
+    """``after`` (whitespace-stripped) is a glossary term, give or take ``TERM_SLACK`` chars,
+    and ``before`` is short enough to be a mis-hearing of it."""
     text = after.strip().casefold()
-    return any(name in text and len(text) - len(name) <= TERM_SLACK for name in names)
+    old = len(before.strip())
+    return any(
+        name in text and len(text) - len(name) <= TERM_SLACK and old <= _max_term_before(name)
+        for name in names
+    )
 
 
 def unsanctioned_ratio(old: str, corrections: Sequence[Correction], terms: Sequence[Term]) -> float:
@@ -70,7 +84,9 @@ def unsanctioned_ratio(old: str, corrections: Sequence[Correction], terms: Seque
     """
     names = [t.term.strip().casefold() for t in terms if t.term.strip()]
     changed = sum(
-        max(len(c.before), len(c.after), 1) for c in corrections if not _writes_term(c.after, names)
+        max(len(c.before), len(c.after), 1)
+        for c in corrections
+        if not _writes_term(c.before, c.after, names)
     )
     return changed / max(len(old), 1)
 
@@ -204,6 +220,16 @@ def chat_json(
     return answer
 
 
+@contextlib.contextmanager
+def llm_client(http: httpx.Client | None, *, timeout: float) -> Iterator[httpx.Client]:
+    """The caller's client as is, or a fresh one that is closed on exit (never leaked)."""
+    if http is not None:
+        yield http
+        return
+    with httpx.Client(timeout=timeout, follow_redirects=False) as own:
+        yield own
+
+
 class LlmCorrector:
     def __init__(
         self,
@@ -216,7 +242,7 @@ class LlmCorrector:
         self.url = chat_url(api_key, endpoint)
         self._key = api_key
         self.model = model
-        self._http = http or httpx.Client(timeout=120, follow_redirects=False)
+        self._http = http  # None: a short-lived client per request, closed right after
 
     def _ask(
         self, payload: list[dict[str, str]], terms: Sequence[Term], context: str | None
@@ -227,14 +253,15 @@ class LlmCorrector:
         if context:
             user.append("背景：" + context)
         user.append("句子：\n" + json.dumps({"segments": payload}, ensure_ascii=False))
-        answer = chat_json(
-            self._http,
-            self.url,
-            self._key,
-            model=self.model,
-            system=SYSTEM_PROMPT,
-            user="\n\n".join(user),
-        )
+        with llm_client(self._http, timeout=120) as http:
+            answer = chat_json(
+                http,
+                self.url,
+                self._key,
+                model=self.model,
+                system=SYSTEM_PROMPT,
+                user="\n\n".join(user),
+            )
         items = answer.get("segments", [])
         if not isinstance(items, list):
             raise ProviderError("LLM returned an unreadable answer")

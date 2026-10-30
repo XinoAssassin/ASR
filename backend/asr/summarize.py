@@ -20,7 +20,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field
 
-from asr.correct.llm import DEFAULT_LLM_MODEL, chat_json, chat_url, glossary
+from asr.correct.llm import DEFAULT_LLM_MODEL, chat_json, chat_url, glossary, llm_client
 from asr.providers.base import ProviderError, Segment, Speaker, Term
 
 CHUNK_CHARS = 12_000
@@ -181,12 +181,11 @@ class Summarizer:
         self._key = api_key
         self.model = model
         self.chunk_chars = chunk_chars
-        self._http = http or httpx.Client(timeout=180, follow_redirects=False)
+        self._http = http  # None: a short-lived client per request, closed right after
 
     def _ask(self, system: str, user: str) -> dict[str, Any]:
-        return chat_json(
-            self._http, self.url, self._key, model=self.model, system=system, user=user
-        )
+        with llm_client(self._http, timeout=180) as http:
+            return chat_json(http, self.url, self._key, model=self.model, system=system, user=user)
 
     def summarize(
         self,

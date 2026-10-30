@@ -61,6 +61,11 @@ class DashScopeHTTPError(ProviderError):
         self.code = code
 
 
+class DashScopeTransientError(DashScopeHTTPError):
+    """Retries ran out on a transient failure (429, 5xx, timeout, connection error): the
+    service may well answer again later. ``status`` is ``None`` for transport errors."""
+
+
 def _error_fields(response: httpx.Response) -> tuple[str | None, str | None]:
     try:
         body = response.json()
@@ -115,12 +120,18 @@ class DashScopeClient:
                     pass
         return min(2.0**attempt, 30.0) * self.retry_backoff
 
-    def raise_for_response(self, response: httpx.Response, what: str) -> None:
-        """Raise a redacted ``DashScopeHTTPError`` for non-2xx responses."""
+    def raise_for_response(
+        self, response: httpx.Response, what: str, *, auth_errors: bool = True
+    ) -> None:
+        """Raise a redacted ``DashScopeHTTPError`` for non-2xx responses.
+
+        ``auth_errors``: map 401 / 403 to the "rejected the API key" message. Off for requests
+        that carry no key (a signed result URL that expired is not a key problem).
+        """
         status = response.status_code
         if 200 <= status < 300:
             return
-        if status in (401, 403):
+        if status in (401, 403) and auth_errors:
             code, _ = _error_fields(response)
             raise DashScopeHTTPError(AUTH_MESSAGE.format(status=status), status=status, code=code)
         code, message = _error_fields(response)
@@ -139,9 +150,13 @@ class DashScopeClient:
         what: str,
         retry_statuses: frozenset[int] = RETRY_STATUSES,
         retry_read_errors: bool = True,
+        auth_errors: bool = True,
         **kwargs: Any,
     ) -> httpx.Response:
-        """Send with retries on transient errors; return the final (2xx) response."""
+        """Send with retries on transient errors; return the final (2xx) response.
+
+        Raises ``DashScopeTransientError`` when the retries run out on a transient failure.
+        """
         attempt = 0
         while True:
             response: httpx.Response | None = None
@@ -157,13 +172,18 @@ class DashScopeClient:
                 failure = type(exc).__name__
             else:
                 if response.status_code not in retry_statuses:
-                    self.raise_for_response(response, what)
+                    self.raise_for_response(response, what, auth_errors=auth_errors)
                     return response
                 failure = f"HTTP {response.status_code}"
             if attempt >= self.max_retries:
                 if response is not None:
-                    self.raise_for_response(response, what)
-                raise ProviderError(f"DashScope {what} failed after retries: {failure}")
+                    try:
+                        self.raise_for_response(response, what, auth_errors=auth_errors)
+                    except DashScopeHTTPError as exc:
+                        raise DashScopeTransientError(
+                            str(exc), status=exc.status, code=exc.code
+                        ) from None
+                raise DashScopeTransientError(f"DashScope {what} failed after retries: {failure}")
             delay = self._delay(attempt, response)
             log.warning(
                 "DashScope %s %s: %s; retry %d/%d in %.1fs",
@@ -245,5 +265,6 @@ class DashScopeClient:
             raise ProviderError(
                 f"Refusing to download a result from an unexpected host: {redact_url(url)}"
             )
-        response = self.request("GET", url, what="result download")
+        # No key was sent, so a 401 / 403 is an expired or forbidden signed URL, not the key.
+        response = self.request("GET", url, what="result download", auth_errors=False)
         return self._json(response, "result download")

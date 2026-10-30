@@ -37,7 +37,8 @@ def order_labels(turns: Sequence[Turn]) -> list[Turn]:
 
 
 MIN_CLUSTER_SHARE = 0.03  # clusters with < 3 % of the speech windows are folded into others
-MIN_CLUSTER_WINDOWS = 20
+MIN_CLUSTER_WINDOWS = 20  # ... and, on longer recordings, with fewer than 20 windows (15 s) ...
+MIN_CLUSTER_FLOOR_SHARE = 0.05  # ... but that floor never exceeds 5 % of the windows
 
 
 def fold_small_clusters(
@@ -46,11 +47,15 @@ def fold_small_clusters(
     *,
     min_share: float = MIN_CLUSTER_SHARE,
     min_windows: int = MIN_CLUSTER_WINDOWS,
+    floor_share: float = MIN_CLUSTER_FLOOR_SHARE,
 ) -> np.ndarray:
     """Reassign windows of tiny clusters (laughter, overlap, crosstalk) to the nearest kept cluster.
 
-    A cluster is kept when it holds at least ``max(min_share * N, min_windows)`` windows (the
-    largest cluster is always kept). Nearest = highest cosine similarity to a kept centroid.
+    A cluster is kept when it holds at least ``max(min_share * N, min(min_windows, floor_share *
+    N))`` windows (the largest cluster is always kept). The absolute floor of ``min_windows``
+    applies to long recordings only: on a 3-minute call (N ≈ 240) it would fold a speaker with
+    10 s of speech, so it is capped at ``floor_share`` of the windows (12 here). Nearest =
+    highest cosine similarity to a kept centroid.
     Negative labels (HDBSCAN's ``-1`` outliers) are never a cluster: those windows are always
     reassigned, and if every window is an outlier they all become cluster 0.
     """
@@ -59,7 +64,8 @@ def fold_small_clusters(
     if not valid.any():
         return np.zeros_like(labels)
     ids, counts = np.unique(labels[valid], return_counts=True)
-    threshold = max(min_share * len(labels), min_windows)
+    n = len(labels)
+    threshold = max(min_share * n, min(min_windows, floor_share * n))
     keep = [i for i, c in zip(ids, counts, strict=True) if c >= threshold] or [
         ids[np.argmax(counts)]
     ]
@@ -75,7 +81,7 @@ def fold_small_clusters(
 
 def reassign_outliers(embeddings: np.ndarray, labels: np.ndarray) -> np.ndarray:
     """Only the outlier part of ``fold_small_clusters``: every real cluster is kept."""
-    return fold_small_clusters(embeddings, labels, min_share=0.0, min_windows=0)
+    return fold_small_clusters(embeddings, labels, min_share=0.0, min_windows=0, floor_share=0.0)
 
 
 class CamPlusDiarizer:

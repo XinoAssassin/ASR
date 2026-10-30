@@ -30,7 +30,7 @@ from asr.providers.base import (
     make_speakers,
     speaker_id,
 )
-from asr.providers.local.asr_transformers import ENGINE_LANGUAGES
+from asr.providers.languages import normalize_hints
 from asr.providers.local.device import resolve_dtype
 from asr.providers.local.merge import ChunkResult, SpeakerTurn, Token, build_segments
 from asr.providers.local.models import ModelNotDownloaded, engine_installed, spec
@@ -109,6 +109,9 @@ def load_engines(cache_dir: Path, asr_model: str, *, device: str, dtype: str) ->
             raise ProviderError(str(exc.args[0])) from None
         if s.kind != "asr":
             raise ProviderError(f"{asr_model!r} is not an ASR model")
+        # Keep one model set in memory at a time: release the old one *before* loading the new
+        # one, so a swap never holds two sets at peak.
+        _ENGINE_CACHE.clear()
         try:
             from asr.providers.local.diar_campplus import CamPlusDiarizer
             from asr.providers.local.vad import FsmnVad
@@ -142,7 +145,6 @@ def load_engines(cache_dir: Path, asr_model: str, *, device: str, dtype: str) ->
             )
         except ModelNotDownloaded as exc:
             raise ProviderError(str(exc)) from None
-        _ENGINE_CACHE.clear()  # keep one model set in memory at a time
         _ENGINE_CACHE[key] = engines
         return engines
 
@@ -216,31 +218,36 @@ class LocalPipelineProvider:
 
             report("vad", at(0.0), "Detecting speech")
             speech = engines.vad.segments(track.audio)
-            spans = merge_segments(speech, max_len=self.max_chunk)
+            spans = merge_segments(speech, max_len=self.max_chunk, audio=track.audio)
             pieces = cut(track.audio, spans)
 
             chunks = self._recognise(
                 engines, pieces, spans, terms, options.context, language, report, at, warnings
             )
 
+            # Track-local labels first; real ids are handed out below, only to speakers that
+            # end up with text, so a silent channel or an unused cluster uses up no id.
             diarize = track.diarize and not single_speaker and (oracle is None or oracle > 1)
             if diarize and speech:
                 report("diarizing", at(0.85), "Identifying speakers")
                 raw_turns = engines.diarizer.diarize(track.audio, speech, num_speakers=oracle)
-                labels = sorted({t.label for t in raw_turns})
-                names = {lab: speaker_id(next_label + i) for i, lab in enumerate(labels)}
-                next_label += max(len(labels), 1)
-                turns = [SpeakerTurn(t.start, t.end, names[t.label]) for t in raw_turns]
-                fallback = names[labels[0]] if labels else speaker_id(next_label - 1)
+                turns = [SpeakerTurn(t.start, t.end, f"t{t.label}") for t in raw_turns]
+                fallback = turns[0].speaker if turns else "t"
             else:
-                fixed = speaker_id(next_label)
-                next_label += 1
                 for c in chunks:
-                    c.speaker = fixed
-                turns, fallback = [], fixed
+                    c.speaker = "t"
+                turns, fallback = [], "t"
 
             report("merging", at(0.97), "Building transcript")
-            all_segments.extend(build_segments(chunks, turns, default_speaker=fallback))
+            track_segments = build_segments(chunks, turns, default_speaker=fallback)
+            names: dict[str, str] = {}
+            for seg in sorted(track_segments, key=lambda s: (s.start, s.end)):
+                if seg.speaker_id not in names:
+                    names[seg.speaker_id] = speaker_id(next_label + len(names))
+            next_label += len(names)
+            all_segments.extend(
+                s.model_copy(update={"speaker_id": names[s.speaker_id]}) for s in track_segments
+            )
 
         all_segments.sort(key=lambda s: (s.start, s.end))
         segments = [s.model_copy(update={"id": f"seg_{i:05d}"}) for i, s in enumerate(all_segments)]
@@ -335,38 +342,10 @@ def _is_whisper(asr_model: str) -> bool:
         return False
 
 
-# Language codes Qwen3-ASR can be forced to (transformers' ``LANGUAGE_CODE_TO_NAME``).
-KNOWN_LANGUAGES = ENGINE_LANGUAGES["qwen3_asr"]
-_LANGUAGE_ALIASES = {
-    "chinese": "zh",
-    "mandarin": "zh",
-    "cmn": "zh",
-    "english": "en",
-    "cantonese": "yue",
-    "zh-yue": "yue",
-    "japanese": "ja",
-    "korean": "ko",
-}
-
-
-def normalize_language(hint: str) -> str | None:
-    """``zh-CN`` / ``zh_Hans`` -> ``zh``, ``en-US`` -> ``en``; ``auto`` or unknown -> ``None``."""
-    h = hint.strip().lower().replace("_", "-")
-    if not h or h == "auto":
-        return None
-    if h in _LANGUAGE_ALIASES:
-        return _LANGUAGE_ALIASES[h]
-    if h in KNOWN_LANGUAGES:
-        return h
-    primary = h.split("-", 1)[0]
-    primary = _LANGUAGE_ALIASES.get(primary, primary)
-    return primary if primary in KNOWN_LANGUAGES else None
-
-
 def _language(hints: Sequence[str]) -> str | None:
     """Chinese-primary: force zh when it is among the hints, else the first known hint, else
     auto-detect (``None``). Hints are normalised; ``auto`` and unknown codes force nothing."""
-    cleaned = [c for h in hints if (c := normalize_language(h))]
+    cleaned = normalize_hints(hints)
     if "zh" in cleaned:
         return "zh"
     return cleaned[0] if cleaned else None

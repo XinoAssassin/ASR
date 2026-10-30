@@ -3,7 +3,11 @@
 Each token (a CJK character or a Latin word, with absolute start / end seconds) takes the speaker
 whose turns overlap it most; single-token flips between two identical neighbours are smoothed away.
 Segments break at sentence-final punctuation and at speaker changes, and their text is cut from the
-ASR output so punctuation and spacing survive. Pure functions, no models.
+ASR output so punctuation and spacing survive. Every character of a chunk's text lands in exactly
+one segment: text the tokens do not cover (``《`` before the first token, ``++`` / ``℃`` / emoji
+the aligner drops, anything after the last token) is attached to a neighbour, so the segment texts
+of a chunk concatenate back to the chunk text (modulo whitespace at the cuts). Pure functions, no
+models.
 """
 
 from __future__ import annotations
@@ -102,7 +106,9 @@ def token_spans(text: str, tokens: Sequence[Token]) -> list[tuple[int, int]] | N
     spans: list[tuple[int, int]] = []
     pos = 0
     for tok in tokens:
-        needle = "".join(_fold(c) for c in tok.text)
+        # Same fold rule as the text: a character whose fold is several characters (``½``, ``ﬁ``,
+        # ``İ``) stays as it is on both sides, so the two still match.
+        needle = "".join(_fold(c) if len(_fold(c)) == 1 else c for c in tok.text)
         if not needle:
             spans.append((pos, pos))
             continue
@@ -228,14 +234,20 @@ def _snap_target(
     return best
 
 
+def _opens(ch: str) -> bool:
+    """Characters that belong to the *following* token: opening brackets / quotes (``《“(``) and
+    currency signs (``$100``, ``¥5``)."""
+    return unicodedata.category(ch) in ("Ps", "Pi", "Sc")
+
+
 def _trailing_end(text: str, end: int) -> int:
-    """Extend a span over following punctuation / closing quotes (not over spaces or letters)."""
+    """Extend a span over what follows it up to the next token, space or opening mark: closing
+    punctuation and the characters the aligner drops from its tokens (``C++``, ``30℃``, emoji)."""
     while end < len(text):
-        cat = unicodedata.category(text[end])
-        if cat[0] == "P" or text[end] in "”’》）)】」』":
-            end += 1
-        else:
+        ch = text[end]
+        if ch.isspace() or _aligner_kept(ch) or _opens(ch):
             break
+        end += 1
     return end
 
 
@@ -283,33 +295,40 @@ def build_segments(
         labels = smooth_flips(labels)
         labels = absorb_short_runs(labels, chunk.tokens)
         labels = snap_changes(labels, chunk.tokens, chunk.text, spans)
+        # Decide the groups first, then cut the text at their ends: each group starts where the
+        # previous one stopped (0 for the first) and the last one runs to the end of the text.
+        groups: list[tuple[list[int], int]] = []
         group: list[int] = []
         for i in range(len(chunk.tokens)):
             paused = i > 0 and chunk.tokens[i].start - chunk.tokens[i - 1].end >= PAUSE_SPLIT_S
             if group and (labels[i] != labels[group[0]] or paused):
-                _emit_group(chunk, spans, labels, group, emit)
+                groups.append((group, _trailing_end(chunk.text, spans[group[-1]][1])))
                 group = []
             group.append(i)
             end_char = _trailing_end(chunk.text, spans[i][1])
             if _sentence_end(chunk.text, spans[i][1], end_char):
-                _emit_group(chunk, spans, labels, group, emit)
+                groups.append((group, end_char))
                 group = []
         if group:
-            _emit_group(chunk, spans, labels, group, emit, last=True)
+            groups.append((group, len(chunk.text)))
+        if groups:
+            groups[-1] = (groups[-1][0], len(chunk.text))
+        cursor = 0
+        for grp, end_char in groups:
+            _emit_group(chunk, labels, grp, cursor, end_char, emit)
+            cursor = end_char
     return segments
 
 
 def _emit_group(
     chunk: ChunkResult,
-    spans: list[tuple[int, int]],
     labels: list[str],
     group: list[int],
+    start_char: int,
+    end_char: int,
     emit: Callable[[str, float, float, str, list[Word]], None],
-    last: bool = False,
 ) -> None:
     first, final = group[0], group[-1]
-    start_char = spans[first][0]
-    end_char = len(chunk.text) if last else _trailing_end(chunk.text, spans[final][1])
     words = [
         Word(
             text=chunk.tokens[i].text,

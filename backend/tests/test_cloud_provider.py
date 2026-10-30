@@ -340,7 +340,7 @@ def test_per_channel_over_cap_transcodes_stereo(router, work_dir, tmp_path, monk
         router, policy={"max_file_size_mb": 1}, result="result_per_channel.json"
     )
     audio = make_audio(tmp_path, "call.wav", size=2 * 1024 * 1024)
-    options = _options()
+    options = _options(num_speakers=2)  # one per channel: channel 0 needs no diarization
     options.preprocess.channels = "per_channel"
     make_provider(work_dir).transcribe(AudioSource(path=audio), options, Recorder())
     (call,) = fake.calls
@@ -496,13 +496,39 @@ def test_429_on_poll_is_retried(router, work_dir):
     assert len(transcript.segments) == 5
 
 
-def test_poll_retries_exhausted(router, work_dir):
-    routes = mock_dashscope(router, tasks=[httpx.Response(500)] * 10)
+def test_poll_outage_longer_than_the_retry_budget_keeps_polling(router, work_dir):
+    """Review m4: retries running out on 5xx / timeouts must not abandon the remote task."""
+    outage = [httpx.Response(500)] * 7 + [httpx.ConnectError("offline")] * 6
+    routes = mock_dashscope(
+        router, tasks=[*outage, *task_responses("task_running.json", "task_succeeded.json")]
+    )
     provider = make_provider(work_dir)
+    provider.max_retries = 2  # 3 attempts per poll: the outage spans several polls
+    rec = Recorder()
+    transcript = provider.transcribe(AudioSource(url="https://example.com/a.mp3"), _options(), rec)
+    assert routes.task.call_count == len(outage) + 2
+    assert len(transcript.segments) == 5
+    assert not routes.cancel.called
+    assert any(e.message and "unreachable" in e.message for e in rec.events)
+
+
+def test_poll_outage_until_the_deadline_cancels(router, work_dir):
+    routes = mock_dashscope(router, tasks=[httpx.Response(503)] * 10)
+    provider = make_provider(work_dir, timeout_s=0.0)
     provider.max_retries = 2
-    with pytest.raises(ProviderError, match="HTTP 500"):
+    with pytest.raises(ProviderError, match="did not finish"):
         provider.transcribe(AudioSource(url="https://example.com/a.mp3"), _options(), Recorder())
     assert routes.task.call_count == 3
+    assert routes.cancel.called
+
+
+def test_poll_client_error_fails_at_once(router, work_dir):
+    routes = mock_dashscope(router, tasks=[httpx.Response(404, json={"code": "TaskNotFound"})] * 3)
+    with pytest.raises(ProviderError, match="TaskNotFound"):
+        make_provider(work_dir).transcribe(
+            AudioSource(url="https://example.com/a.mp3"), _options(), Recorder()
+        )
+    assert routes.task.call_count == 1
 
 
 def test_submit_retries_429_but_not_500(router, work_dir):

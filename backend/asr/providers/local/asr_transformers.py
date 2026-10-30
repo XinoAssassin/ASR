@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 
+from asr.providers.languages import KNOWN_LANGUAGES
 from asr.providers.local.device import resolve_dtype
 from asr.providers.local.models import model_dir, spec
 
@@ -53,40 +54,7 @@ def fun_asr_nano_processor(path: str) -> Any:
 # ``LANGUAGE_CODE_TO_NAME`` of qwen3_asr / fun_asr_nano). Anything else would raise ValueError in
 # ``resolve_language``, so it is sent as ``None`` (auto-detect) instead.
 ENGINE_LANGUAGES: dict[str, frozenset[str]] = {
-    "qwen3_asr": frozenset(
-        {
-            "ar",
-            "yue",
-            "zh",
-            "cs",
-            "da",
-            "nl",
-            "en",
-            "fil",
-            "fi",
-            "fr",
-            "de",
-            "el",
-            "hi",
-            "hu",
-            "id",
-            "it",
-            "ja",
-            "ko",
-            "mk",
-            "ms",
-            "fa",
-            "pl",
-            "pt",
-            "ro",
-            "ru",
-            "es",
-            "sv",
-            "th",
-            "tr",
-            "vi",
-        }
-    ),
+    "qwen3_asr": KNOWN_LANGUAGES,
     "fun_asr_nano": frozenset({"zh", "en", "ja"}),
 }
 

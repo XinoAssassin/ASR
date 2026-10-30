@@ -34,6 +34,22 @@ enable``. Task status: ``PENDING | RUNNING | SUCCEEDED | FAILED | UNKNOWN``; a t
 ``SUCCEEDED`` when any subtask succeeded, so ``results[].subtask_status`` is checked too.
 ``transcription_url`` is a signed OSS URL valid 24 h. There is no ITN or word-timestamp switch;
 ``words`` are always present in the result. Audio preparation follows EXECUTION_LOG D8.
+
+Channel policy (D36, same rule as the local provider): with ``per_channel``, channel 0 (the
+remote side of a desktop recording, possibly several people) is diarized and every other channel
+is one fixed speaker. DashScope diarizes mono audio only and ``diarization_enabled`` applies to
+every channel of a task, so a path source is split into one 16 kHz mono FLAC per channel and one
+task per file (ch 0 with diarization, the others without; billing is per channel either way).
+The tasks run in parallel behind one progress callback and their results are merged by time.
+When channel 0 needs no diarization (``num_speakers`` already accounted for by the fixed
+channels) a single ``channel_id=[0..n-1]`` task is used. URL sources are never transcoded (D3):
+there ``per_channel`` stays one task without diarization and a warning says so, and a selected
+channel (``left`` / ``right``) is sent without diarization, since a URL file that needs a
+channel picked is not mono. Diarization on any other URL job assumes the URL audio is mono.
+
+Polling survives outages: a transient failure (429, 5xx, timeout, connection error) that
+outlasts the client's retries is logged and polling goes on until the job's overall timeout, so
+a laptop sleep or Wi-Fi drop does not abandon a remote task that keeps running (and billing).
 """
 
 from __future__ import annotations
@@ -68,8 +84,13 @@ from asr.providers.base import (
     Transcript,
 )
 from asr.providers.cloud import client as client_mod
-from asr.providers.cloud.client import DEFAULT_TIMEOUT, DashScopeClient, DashScopeHTTPError
-from asr.providers.cloud.normalize import to_transcript
+from asr.providers.cloud.client import (
+    DEFAULT_TIMEOUT,
+    DashScopeClient,
+    DashScopeHTTPError,
+    DashScopeTransientError,
+)
+from asr.providers.cloud.normalize import ResultTrack, tracks_to_transcript
 from asr.providers.cloud.security import (
     ALLOWED_ENDPOINTS,
     is_allowed_endpoint,
@@ -77,6 +98,7 @@ from asr.providers.cloud.security import (
 )
 from asr.providers.cloud.transfer.public_url import validate_public_url
 from asr.providers.cloud.transfer.temp_upload import MB, UploadPolicy, fetch_policy, upload_file
+from asr.providers.languages import normalize_hints
 
 __all__ = [
     "ALLOWED_ENDPOINTS",
@@ -144,6 +166,9 @@ def _context_messages(context: str, warnings: list[str]) -> list[dict[str, Any]]
     return [{"role": "user", "content": [{"type": "input_text", "text": c}]} for c in chunks]
 
 
+_FROM_OPTIONS: Any = object()
+
+
 def build_request_body(
     *,
     model: str,
@@ -152,18 +177,24 @@ def build_request_body(
     channel_ids: list[int],
     diarize: bool,
     warnings: list[str],
+    speaker_count: int | None = _FROM_OPTIONS,
 ) -> dict[str, Any]:
-    """Submit body for one file. Appends user-visible notes to ``warnings``."""
+    """Submit body for one file. Appends user-visible notes to ``warnings``.
+
+    ``speaker_count`` defaults to ``options.num_speakers``; per-channel jobs pass the count left
+    for channel 0 once the fixed channels are taken out. Language hints are normalised like the
+    local provider's (``zh-CN`` -> ``zh``; ``auto`` and unknown codes are dropped).
+    """
     parameters: dict[str, Any] = {"channel_id": list(channel_ids)}
     if diarize:
         parameters["diarization_enabled"] = True
-        n = options.num_speakers
+        n = options.num_speakers if speaker_count is _FROM_OPTIONS else speaker_count
         if n is not None and SPEAKER_COUNT_RANGE[0] <= n <= SPEAKER_COUNT_RANGE[1]:
             parameters["speaker_count"] = n
     vocabulary = _vocabulary(options.terms, warnings)
     if vocabulary:
         parameters["vocabulary"] = vocabulary
-    hints = list(dict.fromkeys(h.strip() for h in options.language_hints if h.strip()))
+    hints = normalize_hints(options.language_hints)
     if len(hints) > MAX_LANGUAGE_HINTS:
         warnings.append(f"Only the first {MAX_LANGUAGE_HINTS} language hints are used.")
         hints = hints[:MAX_LANGUAGE_HINTS]
@@ -187,6 +218,7 @@ class _Reporter:
     def __init__(self, callback: ProgressCallback) -> None:
         self._callback = callback
         self.value = 0.0
+        self.stage = "preparing"
         self.external_id: str | None = None
 
     def __call__(
@@ -197,6 +229,7 @@ class _Reporter:
         external_id: str | None = None,
     ) -> None:
         self.value = min(max(self.value, progress), 1.0)
+        self.stage = stage
         if external_id is not None:
             self.external_id = external_id
         self._callback(
@@ -208,7 +241,7 @@ class _Reporter:
 
 @dataclass
 class _Prepared:
-    """Audio ready to be referenced in the submit request."""
+    """Audio ready to be referenced in one submit request (one remote task)."""
 
     url: str | None = None  # public URL (url sources)
     path: Path | None = None  # file to upload (path sources)
@@ -216,8 +249,23 @@ class _Prepared:
     policy: UploadPolicy | None = None
     policy_at: float = 0.0
     channel_ids: list[int] = field(default_factory=lambda: [0])
-    per_channel: bool = False
+    per_channel: bool = False  # one speaker per result channel (no diarization)
+    diarize: bool = False
+    speaker_count: int | None = None
     duration: float | None = None
+
+
+def _channel_zero_oracle(options: JobOptions, channels: int) -> tuple[bool, int | None]:
+    """D36 for ``per_channel``: does channel 0 need diarization, and with how many speakers?
+
+    Channels 1..n-1 are one known speaker each, so channel 0 holds ``num_speakers - (n - 1)``.
+    """
+    if options.num_speakers == 1:
+        return False, None
+    if options.num_speakers is None:
+        return True, None
+    oracle = options.num_speakers - (channels - 1)
+    return oracle > 1, oracle
 
 
 # --------------------------------------------------------------------------------- provider
@@ -287,43 +335,47 @@ class DashScopeFiletransProvider:
             with self._client() as client:
                 report("preparing", P_PREPARING, "Preparing audio")
                 if source.url is not None:
-                    prepared = self._prepare_url(source.url, options)
-                    file_url, oss = prepared.url, False
+                    plan = [self._prepare_url(source.url, options, warnings)]
+                    file_urls, oss = [source.url], False
                 else:
                     assert source.path is not None  # noqa: S101 - AudioSource validator
-                    prepared = self._prepare_path(
-                        client, source, options, report, temp_files, warnings
-                    )
-                    file_url, oss = self._upload(client, prepared, report), True
-                assert file_url is not None  # noqa: S101
+                    plan = self._prepare_path(client, source, options, report, temp_files)
+                    file_urls, oss = self._upload_all(client, plan, report), True
 
-                diarize = not prepared.per_channel and options.num_speakers != 1
-                if (
-                    diarize
-                    and prepared.duration is not None
-                    and prepared.duration > DIARIZATION_MAX_S
-                ):
+                duration = plan[0].duration
+                if any(p.diarize for p in plan) and duration and duration > DIARIZATION_MAX_S:
                     warnings.append(
                         "Audio is longer than 2 hours; DashScope speaker diarization may fail "
                         "or time out on recordings this long."
                     )
-                body = build_request_body(
-                    model=self.model,
-                    file_url=file_url,
-                    options=options,
-                    channel_ids=prepared.channel_ids,
-                    diarize=diarize,
-                    warnings=warnings,
-                )
-                task_id = self._submit(client, body, oss=oss)
-                output = self._wait(client, task_id, report, prepared.duration, started)
+                bodies = []
+                for i, (prepared, file_url) in enumerate(zip(plan, file_urls, strict=True)):
+                    bodies.append(
+                        build_request_body(
+                            model=self.model,
+                            file_url=file_url,
+                            options=options,
+                            channel_ids=prepared.channel_ids,
+                            diarize=prepared.diarize,
+                            speaker_count=prepared.speaker_count,
+                            # vocabulary / context notes once, not once per task
+                            warnings=warnings if i == 0 else [],
+                        )
+                    )
+                task_ids = self._submit_all(client, bodies, oss=oss)
+                outputs = self._wait(client, task_ids, report, duration, started)
                 report("finalizing", P_FINALIZING, "Downloading the result")
-                results = self._download_results(client, output, warnings)
-                return to_transcript(
-                    results,
-                    per_channel=prepared.per_channel,
+                tracks = [
+                    ResultTrack(
+                        results=self._download_results(client, output, warnings),
+                        per_channel=prepared.per_channel,
+                    )
+                    for prepared, output in zip(plan, outputs, strict=True)
+                ]
+                return tracks_to_transcript(
+                    tracks,
                     language=None,  # the result JSON carries no detected language
-                    fallback_duration=prepared.duration,
+                    fallback_duration=duration,
                     warnings=warnings,
                 )
         except (JobCancelled, ProviderError):
@@ -340,15 +392,32 @@ class DashScopeFiletransProvider:
                     tmp.unlink()
 
     # ---------------------------------------------------------------------- preparation
-    def _prepare_url(self, url: str, options: JobOptions) -> _Prepared:
-        """URL sources are used as-is (D3): never fetched, never transcoded."""
+    def _prepare_url(self, url: str, options: JobOptions, warnings: list[str]) -> _Prepared:
+        """URL sources are used as-is (D3): never fetched, never transcoded.
+
+        DashScope diarizes mono audio only and a URL cannot be split into mono files, so
+        ``per_channel`` and a selected channel run without diarization (with a warning when
+        speakers are lost); other URL jobs assume mono audio.
+        """
         validate_public_url(url)
         option = options.preprocess.channels
         if option == "per_channel":
+            if _channel_zero_oracle(options, 2)[0]:
+                warnings.append(
+                    "URL audio cannot be split into channels here, so channel 0 is not "
+                    "separated into speakers; each channel is one speaker. Upload the file "
+                    "instead to diarize channel 0."
+                )
             return _Prepared(url=url, channel_ids=[0, 1], per_channel=True)
-        if option == "right":
-            return _Prepared(url=url, channel_ids=[1])
-        return _Prepared(url=url, channel_ids=[0])
+        if option in ("left", "right"):
+            if options.num_speakers != 1:
+                warnings.append(
+                    "DashScope separates speakers on mono audio only and URL audio is not "
+                    "transcoded, so the selected channel is transcribed as one speaker. Upload "
+                    "the file instead to diarize it."
+                )
+            return _Prepared(url=url, channel_ids=[1 if option == "right" else 0])
+        return _Prepared(url=url, channel_ids=[0], diarize=options.num_speakers != 1)
 
     def _prepare_path(
         self,
@@ -357,8 +426,8 @@ class DashScopeFiletransProvider:
         options: JobOptions,
         report: _Reporter,
         temp_files: list[Path],
-        warnings: list[str],
-    ) -> _Prepared:
+    ) -> list[_Prepared]:
+        """One ``_Prepared`` per remote task (several only for a diarized ``per_channel``)."""
         path = Path(source.path)  # type: ignore[arg-type]
         stream_index = options.preprocess.stream_index
         probe = source.probe
@@ -377,6 +446,13 @@ class DashScopeFiletransProvider:
         policy = fetch_policy(client, self.model)
         policy_at = time.monotonic()
         size = path.stat().st_size
+
+        if resolved.mode == "per_channel":
+            split, oracle = _channel_zero_oracle(options, len(resolved.channel_ids))
+            if split:
+                return self._split_channels(
+                    client, path, probe, resolved.channel_ids, oracle, policy, report, temp_files
+                )
 
         multi = probe.channels > 1
         # DashScope diarizes mono audio only, so a selected channel is extracted to mono too.
@@ -400,19 +476,62 @@ class DashScopeFiletransProvider:
             if time.monotonic() - policy_at > self._policy_ttl(policy):
                 policy, policy_at = fetch_policy(client, self.model), time.monotonic()
 
-        if resolved.mode == "per_channel":
+        if resolved.mode == "per_channel":  # channel 0 needs no diarization: one task
             channel_ids, per_channel = list(resolved.channel_ids), True
         else:  # mono, downmix, and select (already extracted to mono above)
             channel_ids, per_channel = [0], False
-        return _Prepared(
-            path=upload_path,
-            upload_name=upload_name,
-            policy=policy,
-            policy_at=policy_at,
-            channel_ids=channel_ids,
-            per_channel=per_channel,
-            duration=probe.duration,
-        )
+        return [
+            _Prepared(
+                path=upload_path,
+                upload_name=upload_name,
+                policy=policy,
+                policy_at=policy_at,
+                channel_ids=channel_ids,
+                per_channel=per_channel,
+                diarize=not per_channel and options.num_speakers != 1,
+                speaker_count=options.num_speakers,
+                duration=probe.duration,
+            )
+        ]
+
+    def _split_channels(
+        self,
+        client: DashScopeClient,
+        path: Path,
+        probe: ProbeInfo,
+        channel_ids: list[int],
+        oracle: int | None,
+        policy: UploadPolicy,
+        report: _Reporter,
+        temp_files: list[Path],
+    ) -> list[_Prepared]:
+        """D36 on the cloud path: each channel to its own 16 kHz mono FLAC; channel 0 is
+        diarized (``oracle`` speakers, ``None`` = auto), every other channel is one speaker."""
+        stream_index = probe.stream_index
+        policy_at = time.monotonic()
+        plan: list[_Prepared] = []
+        for k in channel_ids:
+            report("preparing", P_TRANSCODING, f"Extracting channel {k} to 16 kHz mono FLAC")
+            upload_path = self._transcode(
+                path, probe, stream_index, True, policy, temp_files, channel=k
+            )
+            first = k == channel_ids[0]
+            plan.append(
+                _Prepared(
+                    path=upload_path,
+                    upload_name=f"{path.stem}-ch{k}{upload_path.suffix}",
+                    channel_ids=[0],
+                    per_channel=not first,
+                    diarize=first,
+                    speaker_count=oracle if first else None,
+                    duration=probe.duration,
+                )
+            )
+        if time.monotonic() - policy_at > self._policy_ttl(policy):
+            policy, policy_at = fetch_policy(client, self.model), time.monotonic()
+        for p in plan:
+            p.policy, p.policy_at = policy, policy_at
+        return plan
 
     @staticmethod
     def _policy_ttl(policy: UploadPolicy) -> float:
@@ -477,16 +596,40 @@ class DashScopeFiletransProvider:
             "a public URL."
         )
 
-    def _upload(self, client: DashScopeClient, prepared: _Prepared, report: _Reporter) -> str:
+    def _upload_all(
+        self, client: DashScopeClient, plan: list[_Prepared], report: _Reporter
+    ) -> list[str]:
+        share = (P_UPLOAD_END - P_UPLOAD_START) / len(plan)
+        return [
+            self._upload(
+                client,
+                p,
+                report,
+                lo=P_UPLOAD_START + i * share,
+                hi=P_UPLOAD_START + (i + 1) * share,
+            )
+            for i, p in enumerate(plan)
+        ]
+
+    def _upload(
+        self,
+        client: DashScopeClient,
+        prepared: _Prepared,
+        report: _Reporter,
+        *,
+        lo: float = P_UPLOAD_START,
+        hi: float = P_UPLOAD_END,
+    ) -> str:
         assert prepared.path is not None and prepared.policy is not None  # noqa: S101
         policy = prepared.policy
         if time.monotonic() - prepared.policy_at > self._policy_ttl(policy):
             policy = fetch_policy(client, self.model)
-        report("uploading", P_UPLOAD_START, "Uploading to DashScope temporary storage")
-        last = [P_UPLOAD_START]
+            prepared.policy, prepared.policy_at = policy, time.monotonic()
+        report("uploading", lo, "Uploading to DashScope temporary storage")
+        last = [lo]
 
         def on_progress(sent: int, total: int) -> None:
-            value = P_UPLOAD_START + (P_UPLOAD_END - P_UPLOAD_START) * (sent / max(total, 1))
+            value = lo + (hi - lo) * (sent / max(total, 1))
             if value - last[0] >= 0.005 or sent >= total:
                 last[0] = value
                 report("uploading", value)
@@ -499,7 +642,7 @@ class DashScopeFiletransProvider:
             filename=prepared.upload_name,
             on_progress=on_progress,
         )
-        report("uploading", P_UPLOAD_END, "Upload complete")
+        report("uploading", hi, "Upload complete")
         return url
 
     # --------------------------------------------------------------------- remote task
@@ -512,31 +655,70 @@ class DashScopeFiletransProvider:
         log.info("DashScope task %s submitted (model %s)", task_id, self.model)
         return task_id
 
+    def _submit_all(
+        self, client: DashScopeClient, bodies: list[dict[str, Any]], *, oss: bool
+    ) -> list[str]:
+        """Submit every task; if one submission fails, cancel the ones already submitted."""
+        task_ids: list[str] = []
+        try:
+            for body in bodies:
+                task_ids.append(self._submit(client, body, oss=oss))
+        except BaseException:
+            for task_id in task_ids:
+                client.cancel_task(task_id)
+            raise
+        return task_ids
+
     def _wait(
         self,
         client: DashScopeClient,
-        task_id: str,
+        task_ids: list[str],
         report: _Reporter,
         duration: float | None,
         started: float,
-    ) -> dict[str, Any]:
-        """Poll until SUCCEEDED; cancel the remote task on JobCancelled / timeout."""
+    ) -> list[dict[str, Any]]:
+        """Poll every task until all SUCCEEDED; outputs in ``task_ids`` order.
+
+        Transient poll failures (``DashScopeTransientError``) never end the job on their own:
+        polling goes on until the overall deadline. On JobCancelled, timeout or a failed task
+        the unfinished remote tasks are cancelled (best effort).
+        """
         deadline = started + self.timeout_s
         estimate = max(30.0, (duration or 600.0) / 15.0)
         running_since: float | None = None
+        outputs: dict[int, dict[str, Any]] = {}  # by position in task_ids
         try:
-            report("cloud_queued", P_QUEUED, "Queued at DashScope", external_id=task_id)
+            report("cloud_queued", P_QUEUED, "Queued at DashScope", external_id=",".join(task_ids))
             while True:
-                task = client.get_task(task_id)
-                output = task.get("output") if isinstance(task.get("output"), dict) else {}
-                status = str(output.get("task_status") or "").upper()
-                if status == "SUCCEEDED":
-                    return output
-                if status == "FAILED":
-                    raise ProviderError(self._failure_message(client, output))
-                if status in ("UNKNOWN", "CANCELED", "CANCELLED"):
-                    raise ProviderError(f"DashScope task ended with status {status}")
-                if status == "RUNNING":
+                running = unreachable = False
+                for i, task_id in enumerate(task_ids):
+                    if i in outputs:
+                        continue
+                    try:
+                        task = client.get_task(task_id)
+                    except DashScopeTransientError as exc:
+                        log.warning(
+                            "DashScope task %s: polling failed (%s); still polling", task_id, exc
+                        )
+                        unreachable = True
+                        continue
+                    output = task.get("output") if isinstance(task.get("output"), dict) else {}
+                    status = str(output.get("task_status") or "").upper()
+                    if status == "SUCCEEDED":
+                        outputs[i] = output
+                    elif status == "FAILED":
+                        outputs[i] = output  # terminal: nothing to cancel
+                        raise ProviderError(self._failure_message(client, output))
+                    elif status in ("UNKNOWN", "CANCELED", "CANCELLED"):
+                        outputs[i] = output
+                        raise ProviderError(f"DashScope task ended with status {status}")
+                    elif status == "RUNNING":
+                        running = True
+                if len(outputs) == len(task_ids):
+                    return [outputs[i] for i in range(len(task_ids))]
+                if unreachable:
+                    report(report.stage, report.value, "DashScope is unreachable; still waiting")
+                elif running or (running_since is not None):
                     now = time.monotonic()
                     running_since = running_since or now
                     frac = 1.0 - math.exp(-(now - running_since) / estimate)
@@ -545,13 +727,14 @@ class DashScopeFiletransProvider:
                 else:  # PENDING or a status we do not know yet
                     report("cloud_queued", P_QUEUED, "Queued at DashScope")
                 if time.monotonic() > deadline:
-                    client.cancel_task(task_id)
                     raise ProviderError(
                         f"DashScope task did not finish within {self.timeout_s / 3600:.1f} h"
                     )
                 client_mod.sleep(self.poll_interval)
-        except (JobCancelled, KeyboardInterrupt):
-            client.cancel_task(task_id)
+        except BaseException:
+            for i, task_id in enumerate(task_ids):
+                if i not in outputs:
+                    client.cancel_task(task_id)
             raise
 
     @staticmethod

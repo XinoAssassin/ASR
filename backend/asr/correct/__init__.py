@@ -13,6 +13,12 @@ Runs after any provider, on the final segments:
 Every edit becomes a ``Correction`` whose ``offset`` is the code-point position of ``after`` in the
 final corrected text (overlapping edits of the two passes are joined into one), so a review can
 revert it exactly; callers keep the uncorrected segments as ``original``.
+
+A corrected segment's ``words`` are re-tiled onto the new text: words untouched by an edit keep
+their text and times, and the words an edit overlaps are merged into one word carrying the new
+text of that stretch and their combined time span (a collapsed repetition becomes one long word, a
+term replacement one word for the term). If the raw words cannot be mapped onto the raw text, the
+corrected segment gets no words rather than stale ones.
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from asr.providers.base import Correction, CorrectionOptions, Segment, Term
+from asr.providers.base import Correction, CorrectionOptions, Segment, Term, Word
 
 # A letter (any script) then up to 9 non-digit characters; never digits, never a newline.
 _UNIT_REPEAT = re.compile(r"([^\W\d_][^\d\n]{1,9}?)\1{4,}")
@@ -178,5 +184,75 @@ def correct_segments(
             for e in sorted(log.edits, key=lambda e: e.offset)
         ]
         text = log.text
-        out.append(seg if text == seg.text else seg.model_copy(update={"text": text}))
+        if text == seg.text:
+            out.append(seg)
+        else:
+            words = retile_words(seg.text, text, seg.words, log.edits)
+            out.append(seg.model_copy(update={"text": text, "words": words}))
     return out, corrections
+
+
+def retile_words(old: str, new: str, words: Sequence[Word], edits: Sequence[_Edit]) -> list[Word]:
+    """``words`` of ``old`` moved onto ``new`` (``edits`` turn one into the other, offsets in
+    ``new``); see the module docstring. ``[]`` when the words do not map onto ``old``."""
+    from asr.providers.local.merge import Token, token_spans
+
+    if not words:
+        return []
+    spans = token_spans(old, [Token(w.text, w.start, w.end) for w in words])
+    if spans is None:
+        return []
+    # Each edit in old- and new-text coordinates.
+    regions: list[tuple[int, int, int, int]] = []
+    shift = 0
+    for e in sorted(edits, key=lambda e: e.offset):
+        start = e.offset - shift
+        regions.append((start, start + len(e.before), e.offset, e.offset + len(e.after)))
+        shift += len(e.after) - len(e.before)
+
+    def moved(pos: int, *, end: bool) -> int:
+        """Position ``pos`` of ``old`` in ``new``; inside an edit: that edit's new edge."""
+        delta = 0
+        for os_, oe, ns, ne in regions:
+            if pos >= oe:
+                delta = ne - oe
+            elif pos > os_:
+                return ne if end else ns
+            else:
+                break
+        return pos + delta
+
+    out: list[Word] = []
+    i = 0
+    while i < len(words):
+        s, e = spans[i]
+        hit = [r for r in regions if r[0] < e and r[1] > s]
+        if not hit:
+            out.append(words[i])
+            i += 1
+            continue
+        # Absorb following words while they overlap one of the edits gathered so far.
+        j = i + 1
+        while j < len(words):
+            s2, e2 = spans[j]
+            more = [r for r in regions if r[0] < e2 and r[1] > s2]
+            if not any(r in hit for r in more):
+                break
+            hit += [r for r in more if r not in hit]
+            e = max(e, e2)
+            j += 1
+        lo = min(moved(s, end=False), *(r[2] for r in hit))
+        hi = max(moved(e, end=True), *(r[3] for r in hit))
+        text = new[lo:hi].strip()
+        if text:
+            out.append(
+                Word(
+                    text=text,
+                    start=min(w.start for w in words[i:j]),
+                    end=max(w.end for w in words[i:j]),
+                )
+            )
+        i = j
+    if token_spans(new, [Token(w.text, w.start, w.end) for w in out]) is None:
+        return []
+    return out
