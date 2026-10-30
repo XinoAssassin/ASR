@@ -110,7 +110,9 @@ export interface paths {
         /**
          * Delete Job
          * @description Cancels the job if active. With ``delete_audio`` the upload (record, stored file, browser
-         *     MP3 cache) is removed too, unless another job still references it.
+         *     MP3 cache) is removed too, unless another job still references it. A running job is given
+         *     a few seconds to stop first; a stored file that still cannot be deleted (Windows: open
+         *     elsewhere) is kept together with its upload record, and the job is deleted regardless.
          */
         delete: operations["delete_job_api_jobs__job_id__delete"];
         options?: never;
@@ -251,6 +253,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/siyuan/notebooks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Siyuan Notebooks */
+        get: operations["list_siyuan_notebooks_api_siyuan_notebooks_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/siyuan/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Siyuan Settings */
+        get: operations["get_siyuan_settings_api_siyuan_settings_get"];
+        /**
+         * Update Siyuan Settings
+         * @description Partial update; ``""`` resets a field. ``token`` is write-only. A changed ``endpoint``
+         *     without a ``token`` in the same request clears the stored token.
+         */
+        put: operations["update_siyuan_settings_api_siyuan_settings_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/siyuan/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test Siyuan
+         * @description Check the saved endpoint and token: kernel version and notebook list. Note that SiYuan
+         *     does not check the token for loopback requests when it has no access authorization code.
+         */
+        post: operations["test_siyuan_api_siyuan_test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/term-sets": {
         parameters: {
             query?: never;
@@ -338,7 +400,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Export Transcript */
+        /**
+         * Export Transcript
+         * @description Download the current segments as txt / srt / vtt / json / md. ``md`` is a Markdown note
+         *     (front matter, summary if any, speaker table, transcript; docs/research/siyuan-export.md).
+         */
         get: operations["export_transcript_api_transcripts__transcript_id__export_get"];
         put?: never;
         post?: never;
@@ -385,6 +451,29 @@ export interface paths {
          *     original but missing from the list is added back.
          */
         post: operations["revert_transcript_api_transcripts__transcript_id__revert_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/transcripts/{transcript_id}/siyuan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Push To Siyuan
+         * @description Create a SiYuan document from the current segments (SiYuan-flavoured Markdown: summary,
+         *     speaker table, one block per turn with ``custom-asr-speaker`` / ``-start`` / ``-end``
+         *     attributes) and set ``custom-asr-*`` document attributes and tags. Every call creates a new
+         *     document; an existing path gets a `` (2)`` suffix.
+         */
+        post: operations["push_to_siyuan_api_transcripts__transcript_id__siyuan_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -601,6 +690,11 @@ export interface components {
             api_key_masked: string | null;
             /** Api Key Set */
             api_key_set: boolean;
+            /**
+             * Api Key Source
+             * @description Where the effective DashScope key comes from: `settings` (the override set via PUT), `env` (DASHSCOPE_API_KEY; clearing the override falls back to it), or null.
+             */
+            api_key_source?: ("env" | "settings") | null;
             /** Endpoint */
             endpoint: string;
             /**
@@ -710,6 +804,83 @@ export interface components {
             segment_id: string;
             /** Text */
             text: string;
+        };
+        /**
+         * EnvironmentOut
+         * @description Read-only facts from the server environment (ARCH_REVIEW §4-f). Not updatable via
+         *     ``PUT /api/settings``; changed by editing the env / ``.env`` and restarting. No secrets.
+         */
+        EnvironmentOut: {
+            /**
+             * Allow Unauthenticated Network
+             * @description ASR_ALLOW_UNAUTHENTICATED_NETWORK.
+             */
+            allow_unauthenticated_network: boolean;
+            /**
+             * Allowed Hosts
+             * @description ASR_ALLOWED_HOSTS.
+             */
+            allowed_hosts: string[];
+            /**
+             * Api Key Required
+             * @description ASR_API_KEY is set (the key itself never is).
+             */
+            api_key_required: boolean;
+            /**
+             * Cors Origins
+             * @description ASR_CORS_ORIGINS.
+             */
+            cors_origins: string[];
+            /**
+             * Data Dir
+             * @description ASR_DATA_DIR (resolved).
+             */
+            data_dir: string;
+            /**
+             * Decoder
+             * @description ASR_DECODER.
+             */
+            decoder: string;
+            /**
+             * Llm Model
+             * @description ASR_LLM_MODEL (L3 suggestions / summary).
+             */
+            llm_model: string;
+            /**
+             * Local Dtype
+             * @description ASR_LOCAL_DTYPE.
+             */
+            local_dtype: string;
+            /**
+             * Log File
+             * @description ASR_LOG_FILE.
+             */
+            log_file: string | null;
+            /**
+             * Log Format
+             * @description ASR_LOG_FORMAT.
+             */
+            log_format: string;
+            /**
+             * Log Level
+             * @description ASR_LOG_LEVEL.
+             */
+            log_level: string;
+            /**
+             * Model Cache Dir
+             * @description ASR_MODEL_CACHE_DIR (resolved).
+             */
+            model_cache_dir: string;
+            /**
+             * Torch Threads
+             * @description ASR_TORCH_THREADS; null = automatic.
+             */
+            torch_threads: number | null;
+            /**
+             * Upload Roots
+             * @description ASR_UPLOAD_ROOTS (resolved).
+             */
+            upload_roots: string[];
         };
         /** FsDir */
         FsDir: {
@@ -1151,6 +1322,14 @@ export interface components {
             /** Api Key Required */
             api_key_required: boolean;
             cloud: components["schemas"]["CloudSettingsOut"];
+            /**
+             * Env Only
+             * @description Fields of this response that only the environment sets (dotted path -> variable name), for a 'set via environment' hint in the UI.
+             */
+            env_only: {
+                [key: string]: string;
+            };
+            environment: components["schemas"]["EnvironmentOut"];
             local: components["schemas"]["LocalSettingsOut"];
             /**
              * Provider Default
@@ -1169,6 +1348,135 @@ export interface components {
             local?: components["schemas"]["LocalSettingsUpdate"] | null;
             /** Provider Default */
             provider_default?: ("local" | "cloud") | null;
+        };
+        /** SiYuanNotebookOut */
+        SiYuanNotebookOut: {
+            /**
+             * Closed
+             * @description Closed notebooks cannot receive documents.
+             */
+            closed: boolean;
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+        };
+        /** SiYuanPushIn */
+        SiYuanPushIn: {
+            /**
+             * Locale
+             * @default zh
+             * @enum {string}
+             */
+            locale: "zh" | "en";
+            /**
+             * Merge Same Speaker
+             * @default false
+             */
+            merge_same_speaker: boolean;
+            /**
+             * Notebook
+             * @description Notebook id; default from settings.
+             */
+            notebook?: string | null;
+            /**
+             * Path
+             * @description Document path such as '/会议记录/周会'; default from `path_template`. An existing path gets a ' (2)' suffix.
+             */
+            path?: string | null;
+            /**
+             * Timestamps
+             * @default true
+             */
+            timestamps: boolean;
+        };
+        /** SiYuanPushOut */
+        SiYuanPushOut: {
+            /** Doc Id */
+            doc_id: string;
+            /** Notebook */
+            notebook: string;
+            /**
+             * Path
+             * @description Path actually used (may carry a ' (n)' suffix).
+             */
+            path: string;
+            /**
+             * Url
+             * @description siyuan://blocks/<doc_id>, opens the document in SiYuan.
+             */
+            url: string;
+            /** Warnings */
+            warnings?: string[];
+        };
+        /** SiYuanSettingsOut */
+        SiYuanSettingsOut: {
+            /**
+             * Endpoint
+             * @description SiYuan kernel URL as reached from the backend host.
+             */
+            endpoint: string;
+            /**
+             * Notebook
+             * @description Default notebook id, null if none chosen.
+             */
+            notebook: string | null;
+            /**
+             * Path Fields
+             * @description Placeholders allowed in `path_template`.
+             */
+            path_fields: string[];
+            /**
+             * Path Template
+             * @description Document path; placeholders {title} {date} {time} {source} {provider}.
+             */
+            path_template: string;
+            /**
+             * Token Masked
+             * @description E.g. '****abcd'; never the full token.
+             */
+            token_masked: string | null;
+            /** Token Set */
+            token_set: boolean;
+        };
+        /**
+         * SiYuanSettingsUpdate
+         * @description Partial update; omitted fields are unchanged and ``""`` resets a field to its default.
+         *     Changing ``endpoint`` without sending ``token`` in the same request clears the stored token,
+         *     so a saved token is never sent to a host it was not saved for.
+         */
+        SiYuanSettingsUpdate: {
+            /**
+             * Endpoint
+             * @description http(s) URL; default http://127.0.0.1:6806.
+             */
+            endpoint?: string | null;
+            /**
+             * Notebook
+             * @description Notebook id or ''.
+             */
+            notebook?: string | null;
+            /** Path Template */
+            path_template?: string | null;
+            /**
+             * Token
+             * @description Write-only API token (SiYuan: Settings - About). '' clears it.
+             */
+            token?: string | null;
+        };
+        /** SiYuanTestOut */
+        SiYuanTestOut: {
+            /** Message */
+            message: string;
+            /**
+             * Notebooks
+             * @description Number of notebooks visible.
+             */
+            notebooks?: number | null;
+            /** Ok */
+            ok: boolean;
+            /** Version */
+            version?: string | null;
         };
         /** Speaker */
         Speaker: {
@@ -1945,6 +2253,99 @@ export interface operations {
             };
         };
     };
+    list_siyuan_notebooks_api_siyuan_notebooks_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SiYuanNotebookOut"][];
+                };
+            };
+        };
+    };
+    get_siyuan_settings_api_siyuan_settings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SiYuanSettingsOut"];
+                };
+            };
+        };
+    };
+    update_siyuan_settings_api_siyuan_settings_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SiYuanSettingsUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SiYuanSettingsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    test_siyuan_api_siyuan_test_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SiYuanTestOut"];
+                };
+            };
+        };
+    };
     list_term_sets_api_term_sets_get: {
         parameters: {
             query?: never;
@@ -2202,9 +2603,11 @@ export interface operations {
     export_transcript_api_transcripts__transcript_id__export_get: {
         parameters: {
             query?: {
-                format?: "txt" | "srt" | "vtt" | "json";
+                format?: "txt" | "srt" | "vtt" | "json" | "md";
                 timestamps?: boolean;
                 merge_same_speaker?: boolean;
+                /** @description Headings and labels of `md`; other formats ignore it. */
+                locale?: "zh" | "en";
             };
             header?: never;
             path: {
@@ -2222,6 +2625,7 @@ export interface operations {
                 content: {
                     "application/json": string;
                     "application/x-subrip": string;
+                    "text/markdown": string;
                     "text/plain": string;
                     "text/vtt": string;
                 };
@@ -2298,6 +2702,53 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+        };
+    };
+    push_to_siyuan_api_transcripts__transcript_id__siyuan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                transcript_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SiYuanPushIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SiYuanPushOut"];
+                };
+            };
+            /** @description Transcript not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description SiYuan not configured, no notebook, or an invalid path. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description SiYuan unreachable or refused the request. */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
