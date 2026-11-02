@@ -260,6 +260,28 @@ recordings folder, and in the backend edition the managed environment, its data 
 (the wizard can still put models elsewhere). Without the marker the per-user locations are used.
 Deleting a portable folder deletes everything stored inside it.
 
+Layout (marker `portable` or `portable.txt`):
+
+```
+<root>\asr-recorder.exe, WebView2Loader.dll, portable, README.txt
+<root>\managed-backend\     bundled edition only: source\ (asr, server, pyproject.toml, uv.lock,
+                             .python-version), uv.exe, VERSION
+<root>\data\app\            backend.json, api-key, settings.json, recordings.json, sidecar.json,
+                             managed.json, proxy.json
+<root>\data\logs\           app, sidecar and managed-backend logs
+<root>\data\webview\        WebView2 profile (the SPA's localStorage)
+<root>\data\asr\            ASR_DATA_DIR (asr.db, uploads\)
+<root>\recordings\          default recordings folder
+<root>\models\              ASR_MODEL_CACHE_DIR (+ .cache\), can be moved in the wizard
+<root>\backend\             env-1\ / env-2\ (src\ + .venv\ each), uv-cache\, python\
+```
+
+The edition is decided by the presence of `managed-backend\` next to the exe. A portable copy uses
+its own single-instance id (per folder). Moving the folder re-roots the stored paths at the next
+start and rebuilds the Python environment in the other slot from the local cache. Without the
+marker: `%APPDATA%\dev.asr.recorder`, `%LOCALAPPDATA%\dev.asr.recorder\{logs,backend,data,models}`,
+`Documents\ASR Recordings`.
+
 ## Proxy
 
 The desktop app owns one proxy setting (D77). `system` reads the Windows settings

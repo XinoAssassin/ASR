@@ -429,6 +429,7 @@ Default local models (ModelScope, cached after first download):
 - Cloud file transfer: DashScope temporary upload is sufficient (confirmed); Alibaba OSS kept as an optional fallback; R2 and tunnels not offered.
 - All documentation in English; UI strings Chinese-first with i18n.
 - Desktop app: Tauri 2 wrapping the same SPA; records system audio + mic as a 2-channel 16 kHz FLAC and uploads via the normal API; Windows first, macOS second.
+- Desktop releases: portable zips only — recorder edition and "desktop + backend" edition (backend environment created on first run for CPU / CUDA / ROCm, then started automatically on 127.0.0.1); proxy setting (system / none / manual) applies to setup, backend and uploads.
 - Runtime: website, desktop app and a local backend natively on Windows (AMD iGPU via ROCm, measured RTF 0.17 for Qwen3-ASR-1.7B on a Radeon 8060S); remote backends from the ghcr.io images (cpu / cuda / rocm). WSL is the development environment. The NPU is not used for ASR (docs/research/amd-npu.md).
 - Export formats: txt / srt / vtt / json / Markdown (front matter, summary, speaker table, dialogue); a SiYuan push creates the same note in a SiYuan notebook through the SiYuan kernel API, token kept server-side. DOCX export was dropped (2026-10-30, not needed).
 
