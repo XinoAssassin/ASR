@@ -8,6 +8,9 @@
  *       ↑                         └─ failed ─(retry)→ install
  *       └──── cancel / choose other hardware ─┘
  *
+ * A cancelled or failed re-install / hardware switch keeps the previous working environment: the
+ * status stays (or returns to) `installed`, so the outcome is read from the progress events too.
+ *
  * The wizard opens by itself once at startup when the bundled backend is not installed and the
  * built-in "本机" profile is active; "稍后" closes it for this session, and the backend switcher /
  * Settings reopen it. An older core without these commands counts as the plain build
@@ -22,6 +25,7 @@ import {
   isDesktop,
   type HardwareSuggestion,
   type ManagedBackendStatus,
+  type ManagedFolder,
   type ManagedHardware,
   type ManagedInstallOptions,
   type ManagedProgress,
@@ -36,9 +40,6 @@ export type WizardStep = 'hardware' | 'folders' | 'install' | 'done' | 'failed'
 /** Log lines kept for the install log view. */
 export const LOG_LIMIT = 200
 
-/** Approximate download per hardware (docs/desktop-ipc.md), in GB. */
-export const DOWNLOAD_GB: Record<ManagedHardware, number> = { cpu: 1, cuda: 2.5, rocm: 5 }
-
 export function externalStatus(): ManagedBackendStatus {
   return {
     edition: 'external',
@@ -48,13 +49,16 @@ export function externalStatus(): ManagedBackendStatus {
     dataDir: null,
     modelsDir: null,
     envSizeBytes: null,
+    defaultDataDir: null,
+    defaultModelsDir: null,
+    portable: false,
     error: null,
   }
 }
 
 /** Only CPU is certain when detection failed. */
 export function fallbackSuggestions(): HardwareSuggestion[] {
-  return [{ id: 'cpu', available: true, recommended: true, label: 'CPU', detail: null }]
+  return [{ id: 'cpu', available: true, recommended: true, label: 'CPU', detail: null, downloadBytes: null }]
 }
 
 /**
@@ -106,6 +110,10 @@ export const useManagedBackendStore = defineStore('managedBackend', () => {
   const skipped = ref(false)
   /** The last setup was cancelled by the user (shown on the hardware step). */
   const cancelled = ref(false)
+  /** A cancel request is running: its status changes are not a "done". */
+  let cancelling = false
+  /** The last setup's outcome may still change (a late `failed` progress event). */
+  let attemptOpen = false
   /** Options of the last install request, for "retry". */
   const lastOptions = shallowRef<ManagedInstallOptions | null>(null)
 
@@ -128,19 +136,26 @@ export const useManagedBackendStore = defineStore('managedBackend', () => {
     void useProfilesStore().reloadLocal()
   }
 
+  /** The setup ended with `installed`: a success, unless it was a failed switch (env kept). */
+  function attemptFailed(s: ManagedBackendStatus): boolean {
+    return s.state === 'failed' || !!s.error || progress.value?.phase === 'failed'
+  }
+
   function applyStatus(s: ManagedBackendStatus): void {
-    const prev = status.value.state
     status.value = s
     if (s.state === 'installing') {
       step.value = 'install'
-    } else if (step.value === 'install') {
-      if (s.state === 'installed') step.value = 'done'
-      else if (s.state === 'failed') step.value = 'failed'
-      else step.value = 'hardware' // cancelled: the partial environment is gone
+      return
     }
-    if (s.state === 'installed' && prev === 'installing') {
-      // The core wrote + started the sidecar: pick up its config (the status follows by event),
-      // then reload what the pages showed while there was no backend.
+    if (step.value !== 'install' || cancelling) return // cancel() moves on by itself
+    if (s.state === 'not_installed') {
+      step.value = 'hardware' // cancelled elsewhere: the partial environment is gone
+    } else if (attemptFailed(s)) {
+      step.value = 'failed'
+    } else {
+      step.value = 'done'
+      // The core started the sidecar before reporting `installed`: pick up its config + status,
+      // then reload what the pages showed before (either event order is fine).
       reloadPending = true
       void useSidecarStore().reload().then(reloadWhenRunning)
     }
@@ -152,6 +167,8 @@ export const useManagedBackendStore = defineStore('managedBackend', () => {
       log.value.push(p.logLine)
       if (log.value.length > LOG_LIMIT) log.value.splice(0, log.value.length - LOG_LIMIT)
     }
+    // A failed switch keeps `installed`; its `failed` event may come after the status.
+    if (p.phase === 'failed' && step.value === 'done' && attemptOpen && !cancelling) step.value = 'failed'
     // The final event: make sure the status is current even if its event got lost.
     if (p.phase === 'done' || p.phase === 'failed') void refresh()
   }
@@ -241,6 +258,7 @@ export const useManagedBackendStore = defineStore('managedBackend', () => {
 
   /** Back to the hardware step with the folders of the current install (if any). */
   function startOver(): void {
+    attemptOpen = false
     step.value = 'hardware'
     choice.dataDir = status.value.dataDir ?? ''
     choice.modelsDir = status.value.modelsDir ?? ''
@@ -259,6 +277,7 @@ export const useManagedBackendStore = defineStore('managedBackend', () => {
   /** "稍后" / hide: close; a running setup continues in the background. */
   function closeWizard(): void {
     wizardOpen.value = false
+    if (step.value !== 'install') attemptOpen = false
     if (!installed.value) skipped.value = true
   }
 
@@ -287,6 +306,7 @@ export const useManagedBackendStore = defineStore('managedBackend', () => {
     log.value = []
     cancelled.value = false
     lastOptions.value = opts
+    attemptOpen = true
     try {
       applyStatus(await (await getDesktop()).managedBackend.install(opts))
       step.value = status.value.state === 'installing' ? 'install' : step.value
@@ -316,9 +336,13 @@ export const useManagedBackendStore = defineStore('managedBackend', () => {
     }
   }
 
-  /** Stop a running setup. Throws the IPC error. */
+  /**
+   * Stop a running setup; back to the hardware step. A re-install / switch keeps the previous
+   * environment (`installed`). Throws the IPC error.
+   */
   async function cancel(): Promise<void> {
     requesting.value = true
+    cancelling = true
     try {
       applyStatus(await (await getDesktop()).managedBackend.cancel())
       cancelled.value = status.value.state !== 'installing'
@@ -326,7 +350,32 @@ export const useManagedBackendStore = defineStore('managedBackend', () => {
     } catch (e) {
       throw new Error(ipcErrorMessage(e))
     } finally {
+      cancelling = false
       requesting.value = false
+    }
+  }
+
+  /** Native folder picker for the wizard's data / models field; keeps the field when cancelled. */
+  async function pickFolder(which: 'data' | 'models', title: string): Promise<void> {
+    const key = which === 'data' ? 'dataDir' : 'modelsDir'
+    const fallback = which === 'data' ? status.value.defaultDataDir : status.value.defaultModelsDir
+    try {
+      const picked = await (await getDesktop()).dialog.pickFolder({
+        title,
+        defaultPath: choice[key].trim() || fallback,
+      })
+      if (picked) choice[key] = picked
+    } catch (e) {
+      throw new Error(ipcErrorMessage(e))
+    }
+  }
+
+  /** Open a managed backend folder in Explorer. Throws the IPC error. */
+  async function reveal(which: ManagedFolder): Promise<void> {
+    try {
+      await (await getDesktop()).managedBackend.reveal(which)
+    } catch (e) {
+      throw new Error(ipcErrorMessage(e))
     }
   }
 
@@ -368,5 +417,7 @@ export const useManagedBackendStore = defineStore('managedBackend', () => {
     retry,
     repair,
     cancel,
+    pickFolder,
+    reveal,
   }
 })

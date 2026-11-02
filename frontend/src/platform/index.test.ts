@@ -86,6 +86,9 @@ describe('tauri facade (docs/desktop-ipc.md)', () => {
     await p.managedBackend.detect()
     await p.managedBackend.install(install)
     await p.managedBackend.cancel()
+    await p.managedBackend.reveal('models')
+    await p.dialog.pickFolder({ title: 'Pick', defaultPath: 'D:\\x' })
+    await p.dialog.pickFolder()
     const sent = fake.invoke.mock.calls.map(([cmd, args]) => [cmd, args])
     expect(sent).toEqual([
       ['recorder_devices', {}],
@@ -108,6 +111,9 @@ describe('tauri facade (docs/desktop-ipc.md)', () => {
       ['managed_backend_detect', {}],
       ['managed_backend_install', { options: install }],
       ['managed_backend_cancel', {}],
+      ['managed_backend_reveal', { which: 'models' }],
+      ['pick_folder', { title: 'Pick', defaultPath: 'D:\\x' }],
+      ['pick_folder', { title: undefined, defaultPath: null }],
     ])
   })
 

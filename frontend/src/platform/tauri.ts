@@ -12,8 +12,10 @@ import type {
   DeviceList,
   HardwareSuggestion,
   ManagedBackendStatus,
+  ManagedFolder,
   ManagedInstallOptions,
   ManagedProgress,
+  PickFolderOptions,
   Recording,
   AudioProcess,
   RecorderStatus,
@@ -53,6 +55,11 @@ export function createTauriPlatform(): DesktopPlatform {
       install: (options: ManagedInstallOptions) =>
         invoke<ManagedBackendStatus>('managed_backend_install', { options }),
       cancel: () => invoke<ManagedBackendStatus>('managed_backend_cancel'),
+      reveal: (which: ManagedFolder) => invoke<void>('managed_backend_reveal', { which }),
+    },
+    dialog: {
+      pickFolder: (options: PickFolderOptions = {}) =>
+        invoke<string | null>('pick_folder', { title: options.title, defaultPath: options.defaultPath ?? null }),
     },
     backendConfig: {
       get: () => invoke<BackendConfig>('backend_get_config'),

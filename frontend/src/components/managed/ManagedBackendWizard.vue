@@ -28,13 +28,14 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 
-import type { HardwareSuggestion } from '@/platform'
+import type { HardwareSuggestion, ManagedFolder } from '@/platform'
 import { useBackendSwitch } from '@/composables/useBackendSwitch'
 import { useHardwareStore } from '@/stores/hardware'
-import { DOWNLOAD_GB, folderError, useManagedBackendStore } from '@/stores/managedBackend'
+import { folderError, useManagedBackendStore } from '@/stores/managedBackend'
 import { LOCAL_PROFILE_ID, useProfilesStore } from '@/stores/profiles'
 import { useSettingsStore } from '@/stores/settings'
 import { useSidecarStore } from '@/stores/sidecar'
+import { formatBytes } from '@/utils/format'
 
 const { t } = useI18n()
 const message = useMessage()
@@ -72,10 +73,27 @@ async function onRetry(): Promise<void> {
   }
 }
 
+/** "CPU" / "AMD ROCm": the environment a cancelled / failed switch keeps. */
+const keptHardware = computed(() =>
+  managed.status.state === 'installed' && managed.status.hardware
+    ? t(`managed.hardwareName.${managed.status.hardware}`)
+    : null,
+)
+const cancelledText = computed(() =>
+  keptHardware.value
+    ? t('managed.install.cancelledSwitch', { hardware: keptHardware.value })
+    : t('managed.install.cancelled'),
+)
+
+/** A working environment exists (switch / repair): "关闭" instead of "稍后". */
+const laterText = computed(() =>
+  managed.status.state === 'installed' ? t('managed.wizard.close') : t('managed.wizard.later'),
+)
+
 async function onCancel(): Promise<void> {
   try {
     await managed.cancel()
-    if (managed.cancelled) message.info(t('managed.install.cancelled'))
+    if (managed.cancelled) message.info(cancelledText.value)
   } catch (e) {
     message.error(t('common.labelDetail', { label: t('managed.install.cancelFailed'), detail: (e as Error).message }))
   }
@@ -90,6 +108,29 @@ async function onDownloadModels(): Promise<void> {
   await router.push({ name: 'settings', hash: '#local-models' })
   await nextTick()
   document.getElementById('local-models')?.scrollIntoView({ block: 'start' })
+}
+
+// -- folders ----------------------------------------------------------------------------------
+
+/** Placeholder of a folder field: the real default path when the core reports it. */
+function defaultText(path: string | null): string {
+  return path ? t('managed.folders.defaultAt', { path }) : t('managed.folders.default')
+}
+
+async function onBrowse(which: 'data' | 'models'): Promise<void> {
+  try {
+    await managed.pickFolder(which, t(which === 'data' ? 'managed.folders.pickData' : 'managed.folders.pickModels'))
+  } catch (e) {
+    message.error(t('common.labelDetail', { label: t('managed.folders.pickFailed'), detail: (e as Error).message }))
+  }
+}
+
+async function onReveal(which: ManagedFolder): Promise<void> {
+  try {
+    await managed.reveal(which)
+  } catch (e) {
+    message.error(t('common.labelDetail', { label: t('managed.card.revealFailed'), detail: (e as Error).message }))
+  }
 }
 
 // -- progress + log ----------------------------------------------------------------------------
@@ -139,15 +180,16 @@ async function onUseBackend(): Promise<void> {
 
 // Finished while the wizard was closed: say so.
 watch(
-  () => managed.status.state,
+  () => managed.step,
   (now, before) => {
-    if (managed.wizardOpen || before !== 'installing') return
-    if (now === 'installed') message.success(t('managed.done.notify'))
+    if (managed.wizardOpen || before !== 'install') return
+    if (now === 'done') message.success(t('managed.done.notify'))
     else if (now === 'failed') message.error(t('managed.failed.notify'))
   },
 )
 
-const sizeText = (s: HardwareSuggestion): string => t('managed.downloadSize', { size: DOWNLOAD_GB[s.id] })
+const sizeText = (s: HardwareSuggestion): string | null =>
+  s.downloadBytes != null ? t('managed.downloadSize', { size: formatBytes(s.downloadBytes) }) : null
 </script>
 
 <template>
@@ -174,7 +216,7 @@ const sizeText = (s: HardwareSuggestion): string => t('managed.downloadSize', { 
     <template v-if="managed.step === 'hardware'">
       <NText depth="3" class="block">{{ t('managed.wizard.intro') }}</NText>
       <NAlert v-if="managed.cancelled" type="info" class="block" data-testid="managed-cancelled">
-        {{ t('managed.install.cancelled') }}
+        {{ cancelledText }}
       </NAlert>
       <NAlert v-if="managed.detectError" type="warning" class="block" data-testid="managed-detect-error">
         {{ t('managed.hardware.detectFailed', { error: managed.detectError }) }}
@@ -210,7 +252,9 @@ const sizeText = (s: HardwareSuggestion): string => t('managed.downloadSize', { 
             </div>
             <div class="hw-card__label">{{ s.label }}</div>
             <div v-if="s.detail" class="hw-card__detail">{{ s.detail }}</div>
-            <div v-if="s.available && !s.detail" class="hw-card__size">{{ sizeText(s) }}</div>
+            <div v-if="s.available && sizeText(s)" class="hw-card__size" :data-testid="`managed-hw-size-${s.id}`">
+              {{ sizeText(s) }}
+            </div>
           </div>
         </div>
       </NSpin>
@@ -220,30 +264,41 @@ const sizeText = (s: HardwareSuggestion): string => t('managed.downloadSize', { 
     <!-- 2. folders -->
     <template v-else-if="managed.step === 'folders'">
       <NText strong class="block">{{ t('managed.folders.title') }}</NText>
+      <NAlert v-if="managed.status.portable" type="warning" class="block" data-testid="managed-portable-note">
+        {{ t('managed.folders.portable') }}
+      </NAlert>
       <NForm label-placement="top">
         <NFormItem
           :label="t('managed.folders.data')"
           :validation-status="dataError ? 'error' : undefined"
           :feedback="dataError ? t(`managed.folders.errors.${dataError}`) : t('managed.folders.dataHint')"
         >
-          <NInput
-            v-model:value="managed.choice.dataDir"
-            :placeholder="t('managed.folders.default')"
-            clearable
-            data-testid="managed-data-dir"
-          />
+          <div class="folder-row">
+            <NInput
+              v-model:value="managed.choice.dataDir"
+              :placeholder="defaultText(managed.status.defaultDataDir)"
+              clearable
+              data-testid="managed-data-dir"
+            />
+            <NButton data-testid="managed-browse-data" @click="onBrowse('data')">{{ t('managed.folders.browse') }}</NButton>
+          </div>
         </NFormItem>
         <NFormItem
           :label="t('managed.folders.models')"
           :validation-status="modelsError ? 'error' : undefined"
           :feedback="modelsError ? t(`managed.folders.errors.${modelsError}`) : t('managed.folders.modelsHint')"
         >
-          <NInput
-            v-model:value="managed.choice.modelsDir"
-            :placeholder="t('managed.folders.default')"
-            clearable
-            data-testid="managed-models-dir"
-          />
+          <div class="folder-row">
+            <NInput
+              v-model:value="managed.choice.modelsDir"
+              :placeholder="defaultText(managed.status.defaultModelsDir)"
+              clearable
+              data-testid="managed-models-dir"
+            />
+            <NButton data-testid="managed-browse-models" @click="onBrowse('models')">
+              {{ t('managed.folders.browse') }}
+            </NButton>
+          </div>
         </NFormItem>
       </NForm>
       <NText depth="3" class="hint">{{ t('managed.folders.keepNote') }}</NText>
@@ -275,9 +330,14 @@ const sizeText = (s: HardwareSuggestion): string => t('managed.downloadSize', { 
               {{ t('managed.done.sidecarRunning', { url: sidecarUrl }) }}
             </NText>
             <NText v-else depth="3">{{ t('managed.done.sidecarStarting') }}</NText>
-            <NButton v-if="sidecarUrl && !followsSidecar" secondary data-testid="managed-use-backend" @click="onUseBackend">
-              {{ t('managed.done.useBackend') }}
-            </NButton>
+            <NSpace justify="center">
+              <NButton v-if="sidecarUrl && !followsSidecar" secondary data-testid="managed-use-backend" @click="onUseBackend">
+                {{ t('managed.done.useBackend') }}
+              </NButton>
+              <NButton secondary data-testid="managed-done-open-models" @click="onReveal('models')">
+                {{ t('managed.card.openModels') }}
+              </NButton>
+            </NSpace>
           </NSpace>
         </template>
       </NResult>
@@ -288,6 +348,9 @@ const sizeText = (s: HardwareSuggestion): string => t('managed.downloadSize', { 
       <NResult status="error" :title="t('managed.failed.title')" size="small">
         <template #footer>
           <NAlert type="error" :show-icon="false" data-testid="managed-error">{{ failure }}</NAlert>
+          <NAlert v-if="keptHardware" type="info" :show-icon="false" class="kept" data-testid="managed-kept">
+            {{ t('managed.failed.kept', { hardware: keptHardware }) }}
+          </NAlert>
         </template>
       </NResult>
     </template>
@@ -301,13 +364,13 @@ const sizeText = (s: HardwareSuggestion): string => t('managed.downloadSize', { 
     <template #footer>
       <NSpace justify="end">
         <template v-if="managed.step === 'hardware'">
-          <NButton data-testid="managed-later" @click="managed.closeWizard()">{{ t('managed.wizard.later') }}</NButton>
+          <NButton data-testid="managed-later" @click="managed.closeWizard()">{{ laterText }}</NButton>
           <NButton type="primary" :disabled="!managed.choice.hardware" data-testid="managed-next" @click="managed.next()">
             {{ t('managed.wizard.next') }}
           </NButton>
         </template>
         <template v-else-if="managed.step === 'folders'">
-          <NButton data-testid="managed-later" @click="managed.closeWizard()">{{ t('managed.wizard.later') }}</NButton>
+          <NButton data-testid="managed-later" @click="managed.closeWizard()">{{ laterText }}</NButton>
           <NButton data-testid="managed-back" @click="managed.back()">{{ t('managed.wizard.back') }}</NButton>
           <NButton
             type="primary"
@@ -340,7 +403,7 @@ const sizeText = (s: HardwareSuggestion): string => t('managed.downloadSize', { 
           </NButton>
         </template>
         <template v-else>
-          <NButton data-testid="managed-later" @click="managed.closeWizard()">{{ t('managed.wizard.later') }}</NButton>
+          <NButton data-testid="managed-later" @click="managed.closeWizard()">{{ laterText }}</NButton>
           <NButton data-testid="managed-other-hardware" @click="managed.startOver()">
             {{ t('managed.failed.otherHardware') }}
           </NButton>
@@ -422,6 +485,16 @@ const sizeText = (s: HardwareSuggestion): string => t('managed.downloadSize', { 
   opacity: 0.7;
   margin-top: 4px;
   overflow-wrap: anywhere;
+}
+
+.folder-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+
+.kept {
+  margin-top: 8px;
 }
 
 .status-line {

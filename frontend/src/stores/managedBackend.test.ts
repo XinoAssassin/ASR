@@ -8,7 +8,13 @@ import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { setDesktopPlatformForTests } from '@/platform'
-import { createFakeDesktop, FAKE_MANAGED_PORT, type FakeDesktop } from '@/platform/testing'
+import {
+  bundledManagedStatus,
+  createFakeDesktop,
+  FAKE_DEFAULT_DATA_DIR,
+  FAKE_MANAGED_PORT,
+  type FakeDesktop,
+} from '@/platform/testing'
 
 const storage = new Map<string, string>()
 
@@ -40,7 +46,7 @@ let fake: FakeDesktop
 const settle = () => new Promise((r) => setTimeout(r, 0))
 
 function bundled(patch: Partial<FakeDesktop['state']['managed']> = {}): void {
-  fake.state.managed = { ...fake.state.managed, edition: 'bundled', ...patch }
+  fake.state.managed = bundledManagedStatus(patch)
 }
 
 beforeEach(() => {
@@ -151,6 +157,7 @@ describe('first-run wizard', () => {
     expect(store.installed).toBe(true)
     expect(store.status.hardware).toBe('rocm')
     expect(store.status.modelsDir).toBe('E:\\ASR\\models')
+    expect(store.status.dataDir).toBe(FAKE_DEFAULT_DATA_DIR) // not chosen: the core's default
     // The core wrote + started the sidecar; the SPA picked up its config and the 本机 profile
     // (active, own URL empty) follows it.
     const sidecar = useSidecarStore()
@@ -377,5 +384,96 @@ describe('installed backend (Settings card)', () => {
     expect(store.detectError).toMatch(/not found/)
     expect(store.suggestions.map((s) => s.id)).toEqual(['cpu'])
     expect(store.choice.hardware).toBe('cpu')
+  })
+})
+
+describe('re-install keeps the previous environment (D76)', () => {
+  const installedCpu = {
+    state: 'installed' as const,
+    hardware: 'cpu' as const,
+    backendVersion: '0.9.0',
+    dataDir: 'D:\\ASR\\data',
+    modelsDir: 'E:\\models',
+    envSizeBytes: 1_000_000_000,
+  }
+
+  it('a cancelled switch returns to the hardware step, still installed on the old hardware', async () => {
+    bundled(installedCpu)
+    const store = useManagedBackendStore()
+    await store.startup()
+    store.switchHardware()
+    await settle()
+    store.choice.hardware = 'rocm'
+    store.next()
+    await store.install()
+    fake.tickInstall()
+    await store.cancel()
+    await settle()
+    expect(store.status).toMatchObject({ state: 'installed', hardware: 'cpu' })
+    expect(store.cancelled).toBe(true)
+    expect(store.step).toBe('hardware') // not "done"
+    expect(store.installed).toBe(true)
+  })
+
+  it('a failed switch shows "failed" although the status stays installed', async () => {
+    bundled(installedCpu)
+    fake.state.installFailAt = 1
+    const store = useManagedBackendStore()
+    await store.startup()
+    store.switchHardware()
+    await settle()
+    store.choice.hardware = 'rocm'
+    store.next()
+    await store.install()
+    fake.runInstall()
+    await settle()
+    expect(store.status).toMatchObject({ state: 'installed', hardware: 'cpu' })
+    expect(store.status.error).toMatch(/network/)
+    expect(store.step).toBe('failed')
+    expect(store.needsSetup).toBe(false) // 本机 keeps working
+  })
+
+  it('tolerates the failed progress event arriving after the status', async () => {
+    bundled(installedCpu)
+    const store = useManagedBackendStore()
+    await store.startup()
+    store.switchHardware()
+    await settle()
+    store.next()
+    await store.install()
+    // The core reports the kept environment first (no error field), then the failure.
+    fake.emitManagedStatus({ ...fake.state.managed, state: 'installed', hardware: 'cpu', error: null })
+    expect(store.step).toBe('done')
+    fake.emitManagedProgress({ phase: 'failed', message: 'failed', percent: null, logLine: null })
+    expect(store.step).toBe('failed')
+  })
+})
+
+describe('folders + reveal', () => {
+  it('picks a folder with the current value (or the default) as start; cancel keeps the field', async () => {
+    bundled()
+    const store = useManagedBackendStore()
+    await store.init()
+    await store.pickFolder('models', 'Choose')
+    expect(fake.calls.at(-1)).toEqual([
+      'pick_folder',
+      { title: 'Choose', defaultPath: fake.state.managed.defaultModelsDir },
+    ])
+    expect(store.choice.modelsDir).toBe('D:\\Picked\\Folder')
+    fake.state.pickedFolder = null
+    store.choice.dataDir = 'D:\\Mine'
+    await store.pickFolder('data', 'Choose')
+    expect(fake.calls.at(-1)).toEqual(['pick_folder', { title: 'Choose', defaultPath: 'D:\\Mine' }])
+    expect(store.choice.dataDir).toBe('D:\\Mine')
+  })
+
+  it('reveals folders and reports IPC errors', async () => {
+    bundled()
+    const store = useManagedBackendStore()
+    await store.init()
+    await store.reveal('backend')
+    expect(fake.calls.at(-1)).toEqual(['managed_backend_reveal', { which: 'backend' }])
+    fake.state.missing.add('managed_backend_reveal')
+    await expect(store.reveal('data')).rejects.toThrow(/not found/)
   })
 })

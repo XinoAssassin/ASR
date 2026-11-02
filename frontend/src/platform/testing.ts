@@ -4,10 +4,11 @@
  * `state.missing` simulates an older core without some commands.
  *
  * Managed backend ("desktop + backend" edition): `state.managed` starts as the plain build
- * (`edition: 'external'`); set `edition: 'bundled'` to simulate the bundled one. `install` starts
- * a scripted setup that the test drives with `tickInstall()` / `runInstall()` (one
+ * (`edition: 'external'`); use `bundledManagedStatus()` to simulate the bundled one. `install`
+ * starts a scripted setup that the test drives with `tickInstall()` / `runInstall()` (one
  * `managed-backend://progress` event per tick); `state.installFailAt` makes it fail at that tick.
- * Like the Rust core, a successful setup writes + starts the sidecar.
+ * Like the Rust core, a successful setup writes + starts the sidecar before reporting `installed`,
+ * and a cancelled / failed re-install keeps the previous working environment.
  */
 import type {
   AudioProcess,
@@ -62,6 +63,10 @@ export interface FakeDesktop extends DesktopPlatform {
     /** Next tick of the running setup. */
     installTick: number
     lastInstall: ManagedInstallOptions | null
+    /** The working environment a re-install / hardware switch started from (kept on cancel / failure). */
+    previous: ManagedBackendStatus | null
+    /** Folder `pick_folder` returns (null = the user cancelled the dialog). */
+    pickedFolder: string | null
   }
 }
 
@@ -69,20 +74,29 @@ export const FAKE_MANAGED_PORT = 8765
 
 export function defaultSuggestions(): HardwareSuggestion[] {
   return [
-    { id: 'cpu', available: true, recommended: false, label: 'AMD Ryzen AI Max+ 395 (CPU)', detail: '≈1 GB' },
+    {
+      id: 'cpu',
+      available: true,
+      recommended: false,
+      label: 'AMD Ryzen AI Max+ 395 (CPU)',
+      detail: null,
+      downloadBytes: 1_073_741_824,
+    },
     {
       id: 'cuda',
       available: false,
       recommended: false,
       label: 'NVIDIA CUDA',
       detail: 'No NVIDIA GPU found / 未检测到 NVIDIA 显卡',
+      downloadBytes: 2_684_354_560,
     },
     {
       id: 'rocm',
       available: true,
       recommended: true,
       label: 'AMD Radeon 8060S (ROCm, gfx1151)',
-      detail: '≈5 GB',
+      detail: null,
+      downloadBytes: 5_368_709_120,
     },
   ]
 }
@@ -106,7 +120,24 @@ export function externalManagedStatus(): ManagedBackendStatus {
     dataDir: null,
     modelsDir: null,
     envSizeBytes: null,
+    defaultDataDir: null,
+    defaultModelsDir: null,
+    portable: false,
     error: null,
+  }
+}
+
+export const FAKE_DEFAULT_DATA_DIR = 'C:\\Users\\me\\AppData\\Local\\ASR\\data'
+export const FAKE_DEFAULT_MODELS_DIR = 'C:\\Users\\me\\AppData\\Local\\ASR\\models'
+
+/** The bundled edition before its first setup (per-user defaults; not portable). */
+export function bundledManagedStatus(patch: Partial<ManagedBackendStatus> = {}): ManagedBackendStatus {
+  return {
+    ...externalManagedStatus(),
+    edition: 'bundled',
+    defaultDataDir: FAKE_DEFAULT_DATA_DIR,
+    defaultModelsDir: FAKE_DEFAULT_MODELS_DIR,
+    ...patch,
   }
 }
 
@@ -190,6 +221,8 @@ export function createFakeDesktop(): FakeDesktop {
     installFailAt: null,
     installTick: 0,
     lastInstall: null,
+    previous: null,
+    pickedFolder: 'D:\\Picked\\Folder',
   }
 
   const emitManagedStatus = (s: ManagedBackendStatus): void => managedHandlers.forEach((h) => h({ ...s }))
@@ -206,7 +239,8 @@ export function createFakeDesktop(): FakeDesktop {
     if (state.installFailAt != null && i >= state.installFailAt) {
       const error = 'uv sync failed: network unreachable / 网络不可用'
       emitManagedProgress({ phase: 'failed', message: '安装失败 / Setup failed', percent: null, logLine: `error: ${error}` })
-      setManaged({ state: 'failed', error })
+      // A failed re-install / switch keeps the previous working environment.
+      setManaged(state.previous ? { ...state.previous, error } : { state: 'failed', error })
       return true
     }
     const step = state.installScript[i]
@@ -230,9 +264,9 @@ export function createFakeDesktop(): FakeDesktop {
       state: 'installed',
       hardware: opts?.hardware ?? 'cpu',
       backendVersion: '0.9.0+abc1234',
-      dataDir: opts?.dataDir || 'C:\\Users\\me\\AppData\\Local\\ASR\\data',
-      modelsDir: opts?.modelsDir || 'C:\\Users\\me\\AppData\\Local\\ASR\\models',
-      envSizeBytes: 1_288_490_189,
+      dataDir: opts?.dataDir || state.managed.defaultDataDir,
+      modelsDir: opts?.modelsDir || state.managed.defaultModelsDir,
+      envSizeBytes: opts?.hardware === 'rocm' ? 5_368_709_120 : 1_288_490_189,
       error: null,
     })
     return true
@@ -326,14 +360,23 @@ export function createFakeDesktop(): FakeDesktop {
           if (state.managed.state === 'installing') throw 'already installing'
           state.lastInstall = structuredClone(options)
           state.installTick = 0
+          state.previous = state.managed.state === 'installed' ? { ...state.managed, error: null } : null
           return setManaged({ state: 'installing', error: null })
         }),
       cancel: () =>
         call('managed_backend_cancel', undefined, () => {
           if (state.managed.state !== 'installing') return { ...state.managed }
           emitManagedProgress({ phase: 'failed', message: '已取消 / Cancelled', percent: null, logLine: 'cancelled' })
-          return setManaged({ state: 'not_installed', hardware: null, envSizeBytes: null, error: null })
+          // A cancelled re-install / switch keeps the previous working environment.
+          return setManaged(
+            state.previous ?? { state: 'not_installed', hardware: null, envSizeBytes: null, error: null },
+          )
         }),
+      reveal: (which) => call('managed_backend_reveal', { which }, () => undefined),
+    },
+    dialog: {
+      pickFolder: (options = {}) =>
+        call('pick_folder', { title: options.title, defaultPath: options.defaultPath ?? null }, () => state.pickedFolder),
     },
     backendConfig: {
       get: () => call('backend_get_config', undefined, masked),

@@ -154,7 +154,7 @@ type ManagedProgress = {
 | `managed_backend_status` | — | `ManagedBackendStatus` | Bundled edition; `edition: 'external'` and `state: 'not_installed'` in the plain build |
 | `managed_backend_detect` | — | `HardwareSuggestion[]` | cpu / cuda / rocm with availability and one `recommended` |
 | `managed_backend_install` | `{ options: ManagedInstallOptions }` | `ManagedBackendStatus` | Starts (or re-runs, e.g. to switch hardware) the environment setup in the background; progress via `managed-backend://progress`; error if already installing |
-| `managed_backend_cancel` | — | `ManagedBackendStatus` | Stops a running setup (partial environment is removed; data and models are kept). When it was a re-install / hardware switch, the previous working environment is kept and stays `installed` |
+| `managed_backend_cancel` | — | `ManagedBackendStatus` | Stops a running setup (partial environment is removed; data and models are kept). When it was a re-install / hardware switch, the previous working environment is kept and stays `installed` (`error: null`); a *failed* switch also stays `installed`, with `error` set. During a switch the old sidecar keeps running and `state` is `installing` |
 | `managed_backend_reveal` | `{ which: 'data' \| 'models' \| 'backend' }` | — | Opens that folder in Explorer |
 | `pick_folder` | `{ title?: string, defaultPath?: string \| null }` | `string \| null` | Native folder picker (desktop only); null when cancelled |
 

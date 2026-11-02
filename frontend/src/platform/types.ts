@@ -136,6 +136,11 @@ export interface ManagedBackendStatus {
   modelsDir: string | null
   /** Python environment size on disk. */
   envSizeBytes: number | null
+  /** Where dataDir goes when not chosen (portable: inside the app folder). */
+  defaultDataDir: string | null
+  defaultModelsDir: string | null
+  /** App state lives next to the exe (portable marker present). */
+  portable: boolean
   /** Last failure, redacted. */
   error: string | null
 }
@@ -147,8 +152,18 @@ export interface HardwareSuggestion {
   recommended: boolean
   /** e.g. "AMD Radeon 8060S (ROCm, gfx1151)" */
   label: string
-  /** Why not available / download size hint. */
+  /** Why not available. */
   detail: string | null
+  /** Approximate one-time download for this choice. */
+  downloadBytes: number | null
+}
+
+/** Folder of the managed backend that `managed_backend_reveal` opens. */
+export type ManagedFolder = 'data' | 'models' | 'backend'
+
+export interface PickFolderOptions {
+  title?: string
+  defaultPath?: string | null
 }
 
 export interface ManagedInstallOptions {
@@ -201,8 +216,17 @@ export interface DesktopPlatform {
     detect(): Promise<HardwareSuggestion[]>
     /** Starts (or re-runs) the setup in the background; error if already installing. */
     install(options: ManagedInstallOptions): Promise<ManagedBackendStatus>
-    /** Stops a running setup (partial environment removed; data and models kept). */
+    /**
+     * Stops a running setup (partial environment removed; data and models kept). A re-install /
+     * hardware switch keeps the previous working environment (`installed`).
+     */
     cancel(): Promise<ManagedBackendStatus>
+    /** Open that folder in Explorer. */
+    reveal(which: ManagedFolder): Promise<void>
+  }
+  dialog: {
+    /** Native folder picker; null when cancelled. */
+    pickFolder(options?: PickFolderOptions): Promise<string | null>
   }
   backendConfig: {
     get(): Promise<BackendConfig>
