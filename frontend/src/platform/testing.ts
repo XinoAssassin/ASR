@@ -9,6 +9,10 @@
  * `managed-backend://progress` event per tick); `state.installFailAt` makes it fail at that tick.
  * Like the Rust core, a successful setup writes + starts the sidecar before reporting `installed`,
  * and a cancelled / failed re-install keeps the previous working environment.
+ *
+ * Proxy: `state.proxy` holds what was saved (URL with credentials in clear, like the core's store);
+ * reads return it masked, and sending the masked URL back keeps the stored credentials.
+ * `state.systemProxy` is what `system` mode resolves to; `state.proxyTest` the test answer.
  */
 import type {
   AudioProcess,
@@ -19,6 +23,9 @@ import type {
   ManagedBackendStatus,
   ManagedInstallOptions,
   ManagedProgress,
+  ProxySettings,
+  ProxyState,
+  ProxyTestResult,
   Recording,
   RecorderStatus,
   SidecarConfig,
@@ -67,7 +74,19 @@ export interface FakeDesktop extends DesktopPlatform {
     previous: ManagedBackendStatus | null
     /** Folder `pick_folder` returns (null = the user cancelled the dialog). */
     pickedFolder: string | null
+    proxy: ProxySettings
+    /** What "system" resolves to (registry / environment). */
+    systemProxy: ProxyState['effective']
+    proxyTest: ProxyTestResult
   }
+}
+
+export const DEFAULT_NO_PROXY = 'localhost,127.0.0.1,::1,10.*,172.16.*-172.31.*,192.168.*,*.local'
+
+/** `http://user:secret@host:1` → `http://user:***@host:1` (as the core masks credentials). */
+export function maskProxyUrl(url: string | null): string | null {
+  if (!url) return url
+  return url.replace(/^([a-z0-9]+:\/\/[^:@/]+):[^@/]*@/i, '$1:***@')
 }
 
 export const FAKE_MANAGED_PORT = 8765
@@ -223,6 +242,26 @@ export function createFakeDesktop(): FakeDesktop {
     lastInstall: null,
     previous: null,
     pickedFolder: 'D:\\Picked\\Folder',
+    proxy: { mode: 'system', url: null, noProxy: DEFAULT_NO_PROXY },
+    systemProxy: {
+      source: 'system',
+      url: 'http://127.0.0.1:7890',
+      noProxy: 'localhost,127.0.0.1,<local>',
+      pacUrl: null,
+      warnings: [],
+    },
+    proxyTest: { ok: true, message: 'pypi.org 200, modelscope.cn 200' },
+  }
+
+  function proxyState(): ProxyState {
+    const p = state.proxy
+    const effective: ProxyState['effective'] =
+      p.mode === 'system'
+        ? { ...state.systemProxy, warnings: [...state.systemProxy.warnings] }
+        : p.mode === 'manual'
+          ? { source: 'manual', url: maskProxyUrl(p.url), noProxy: p.noProxy, pacUrl: null, warnings: [] }
+          : { source: 'none', url: null, noProxy: p.noProxy, pacUrl: null, warnings: [] }
+    return { settings: { ...p, url: maskProxyUrl(p.url) }, effective }
   }
 
   const emitManagedStatus = (s: ManagedBackendStatus): void => managedHandlers.forEach((h) => h({ ...s }))
@@ -373,6 +412,19 @@ export function createFakeDesktop(): FakeDesktop {
           )
         }),
       reveal: (which) => call('managed_backend_reveal', { which }, () => undefined),
+    },
+    network: {
+      getProxy: () => call('network_get_proxy', undefined, proxyState),
+      setProxy: (settings: ProxySettings) =>
+        call('network_set_proxy', { settings }, () => {
+          if (settings.mode === 'manual' && !settings.url) throw 'manual proxy needs a URL'
+          // The masked URL sent back keeps the stored credentials.
+          const keep = settings.url != null && settings.url === maskProxyUrl(state.proxy.url)
+          state.proxy = { ...settings, url: keep ? state.proxy.url : settings.url }
+          return proxyState()
+        }),
+      testProxy: (settings?: ProxySettings) =>
+        call('network_test_proxy', settings ? { settings } : {}, () => ({ ...state.proxyTest })),
     },
     dialog: {
       pickFolder: (options = {}) =>

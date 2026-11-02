@@ -29,13 +29,15 @@ import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 
 import type { HardwareSuggestion, ManagedFolder } from '@/platform'
+import ProxySettingsForm from '@/components/proxy/ProxySettingsForm.vue'
 import { useBackendSwitch } from '@/composables/useBackendSwitch'
 import { useHardwareStore } from '@/stores/hardware'
 import { folderError, useManagedBackendStore } from '@/stores/managedBackend'
 import { LOCAL_PROFILE_ID, useProfilesStore } from '@/stores/profiles'
+import { useProxyStore } from '@/stores/proxy'
 import { useSettingsStore } from '@/stores/settings'
 import { useSidecarStore } from '@/stores/sidecar'
-import { formatBytes } from '@/utils/format'
+import { formatBytes, formatPercent } from '@/utils/format'
 
 const { t } = useI18n()
 const message = useMessage()
@@ -47,8 +49,26 @@ const backend = useBackendSwitch()
 const settings = useSettingsStore()
 const hardware = useHardwareStore()
 
-const STEP_INDEX = { hardware: 1, folders: 2, install: 3, failed: 3, done: 4 } as const
-const stepIndex = computed(() => STEP_INDEX[managed.step])
+const proxy = useProxyStore()
+/** The "网络" step exists when the core supports the proxy setting. */
+const withNetwork = computed(() => proxy.ready)
+const STEPS = computed(() =>
+  withNetwork.value
+    ? (['hardware', 'folders', 'network', 'install', 'done'] as const)
+    : (['hardware', 'folders', 'install', 'done'] as const),
+)
+const stepIndex = computed(() => {
+  const s = managed.step === 'failed' ? 'install' : managed.step
+  return (STEPS.value as readonly string[]).indexOf(s) + 1
+})
+watch(
+  () => managed.wizardOpen,
+  (open) => {
+    if (open) void proxy.load()
+  },
+  { immediate: true },
+)
+const proxyForm = ref<InstanceType<typeof ProxySettingsForm> | null>(null)
 
 function pick(s: HardwareSuggestion): void {
   if (s.available) managed.choice.hardware = s.id
@@ -58,6 +78,16 @@ const dataError = computed(() => folderError(managed.choice.dataDir))
 const modelsError = computed(() => folderError(managed.choice.modelsDir))
 
 async function onInstall(): Promise<void> {
+  // The proxy is saved before the setup starts (it downloads through it).
+  if (managed.step === 'network' && proxyForm.value) {
+    if (!proxyForm.value.valid) return
+    try {
+      await proxyForm.value.save()
+    } catch (e) {
+      message.error(t('common.labelDetail', { label: t('managed.network.saveFailed'), detail: (e as Error).message }))
+      return
+    }
+  }
   try {
     await managed.install()
   } catch (e) {
@@ -206,10 +236,7 @@ const sizeText = (s: HardwareSuggestion): string | null =>
     :data-step="managed.step"
   >
     <NSteps :current="stepIndex" :status="managed.step === 'failed' ? 'error' : 'process'" size="small" class="steps">
-      <NStep :title="t('managed.wizard.steps.hardware')" />
-      <NStep :title="t('managed.wizard.steps.folders')" />
-      <NStep :title="t('managed.wizard.steps.install')" />
-      <NStep :title="t('managed.wizard.steps.done')" />
+      <NStep v-for="s in STEPS" :key="s" :title="t(`managed.wizard.steps.${s}`)" />
     </NSteps>
 
     <!-- 1. hardware -->
@@ -304,6 +331,13 @@ const sizeText = (s: HardwareSuggestion): string | null =>
       <NText depth="3" class="hint">{{ t('managed.folders.keepNote') }}</NText>
     </template>
 
+    <!-- 3. network (proxy) -->
+    <template v-else-if="managed.step === 'network'">
+      <NText strong class="block">{{ t('managed.network.title') }}</NText>
+      <NText depth="3" class="block">{{ t('managed.network.hint') }}</NText>
+      <ProxySettingsForm ref="proxyForm" />
+    </template>
+
     <!-- 3. install -->
     <template v-else-if="managed.step === 'install'">
       <NText strong class="block" data-testid="managed-phase" :data-phase="managed.progress?.phase ?? ''">
@@ -316,7 +350,9 @@ const sizeText = (s: HardwareSuggestion): string | null =>
         :show-indicator="managed.percent != null"
         data-testid="managed-progress"
         :data-percent="managed.percent ?? ''"
-      />
+      >
+        {{ formatPercent(managed.percent) }}
+      </NProgress>
       <NText class="status-line" data-testid="managed-message">{{ managed.progress?.message ?? '' }}</NText>
       <NText depth="3" class="hint block">{{ t('managed.install.background') }}</NText>
     </template>
@@ -373,9 +409,32 @@ const sizeText = (s: HardwareSuggestion): string | null =>
           <NButton data-testid="managed-later" @click="managed.closeWizard()">{{ laterText }}</NButton>
           <NButton data-testid="managed-back" @click="managed.back()">{{ t('managed.wizard.back') }}</NButton>
           <NButton
+            v-if="withNetwork"
+            type="primary"
+            :disabled="!managed.foldersValid"
+            data-testid="managed-next"
+            @click="managed.next(true)"
+          >
+            {{ t('managed.wizard.next') }}
+          </NButton>
+          <NButton
+            v-else
             type="primary"
             :disabled="!managed.foldersValid"
             :loading="managed.requesting"
+            data-testid="managed-install"
+            @click="onInstall"
+          >
+            {{ t('managed.wizard.start') }}
+          </NButton>
+        </template>
+        <template v-else-if="managed.step === 'network'">
+          <NButton data-testid="managed-later" @click="managed.closeWizard()">{{ laterText }}</NButton>
+          <NButton data-testid="managed-back" @click="managed.back()">{{ t('managed.wizard.back') }}</NButton>
+          <NButton
+            type="primary"
+            :disabled="proxyForm ? !proxyForm.valid : false"
+            :loading="managed.requesting || proxy.saving"
             data-testid="managed-install"
             @click="onInstall"
           >

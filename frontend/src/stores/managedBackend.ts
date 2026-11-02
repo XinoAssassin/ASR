@@ -4,7 +4,7 @@
  * detection, install / cancel with live progress (`managed-backend://progress`, last log lines),
  * and the first-run wizard's state machine:
  *
- *   hardware → folders → install ─┬─ done
+ *   hardware → folders → [network] → install ─┬─ done
  *       ↑                         └─ failed ─(retry)→ install
  *       └──── cancel / choose other hardware ─┘
  *
@@ -31,11 +31,12 @@ import {
   type ManagedProgress,
   type Unlisten,
 } from '@/platform'
+import { roundPercent } from '@/utils/format'
 
 import { useProfilesStore } from './profiles'
 import { useSidecarStore } from './sidecar'
 
-export type WizardStep = 'hardware' | 'folders' | 'install' | 'done' | 'failed'
+export type WizardStep = 'hardware' | 'folders' | 'network' | 'install' | 'done' | 'failed'
 
 /** Log lines kept for the install log view. */
 export const LOG_LIMIT = 200
@@ -122,7 +123,8 @@ export const useManagedBackendStore = defineStore('managedBackend', () => {
   const installing = computed(() => bundled.value && status.value.state === 'installing')
   /** Bundled but not usable yet (not installed, installing or failed). */
   const needsSetup = computed(() => bundled.value && status.value.state !== 'installed')
-  const percent = computed(() => progress.value?.percent ?? null)
+  /** Overall percent, at most two decimals (the core may send more). */
+  const percent = computed(() => roundPercent(progress.value?.percent))
 
   let unlisten: Unlisten[] = []
   let initPromise: Promise<void> | null = null
@@ -281,12 +283,15 @@ export const useManagedBackendStore = defineStore('managedBackend', () => {
     if (!installed.value) skipped.value = true
   }
 
-  function next(): void {
+  /** `withNetwork`: the core supports the proxy, so the "网络" step follows the folders. */
+  function next(withNetwork = false): void {
     if (step.value === 'hardware' && choice.hardware) step.value = 'folders'
+    else if (step.value === 'folders' && withNetwork && foldersValid.value) step.value = 'network'
   }
 
   function back(): void {
     if (step.value === 'folders') step.value = 'hardware'
+    else if (step.value === 'network') step.value = 'folders'
   }
 
   const foldersValid = computed(() => !folderError(choice.dataDir) && !folderError(choice.modelsDir))

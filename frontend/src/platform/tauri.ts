@@ -16,6 +16,9 @@ import type {
   ManagedInstallOptions,
   ManagedProgress,
   PickFolderOptions,
+  ProxySettings,
+  ProxyState,
+  ProxyTestResult,
   Recording,
   AudioProcess,
   RecorderStatus,
@@ -60,6 +63,12 @@ export function createTauriPlatform(): DesktopPlatform {
     dialog: {
       pickFolder: (options: PickFolderOptions = {}) =>
         invoke<string | null>('pick_folder', { title: options.title, defaultPath: options.defaultPath ?? null }),
+    },
+    network: {
+      getProxy: () => invoke<ProxyState>('network_get_proxy'),
+      setProxy: (settings: ProxySettings) => invoke<ProxyState>('network_set_proxy', { settings }),
+      testProxy: (settings?: ProxySettings) =>
+        invoke<ProxyTestResult>('network_test_proxy', settings ? { settings } : {}),
     },
     backendConfig: {
       get: () => invoke<BackendConfig>('backend_get_config'),

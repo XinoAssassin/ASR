@@ -79,3 +79,19 @@ export function basename(path: string | null | undefined): string {
   const clean = path.split(/[?#]/)[0]!.replace(/[\\/]+$/, '')
   return clean.split(/[\\/]/).pop() ?? clean
 }
+
+/**
+ * A percentage clamped to 0..100 and rounded to at most `digits` decimals (36.60946… → 36.61);
+ * null for an unknown / non-finite value.
+ */
+export function roundPercent(value: number | null | undefined, digits = 2): number | null {
+  if (value == null || !Number.isFinite(value)) return null
+  const factor = 10 ** digits
+  return Math.round(Math.min(100, Math.max(0, value)) * factor) / factor
+}
+
+/** 36.60946… → "36.61%", 64 → "64%" (no trailing zeros); "" when unknown. */
+export function formatPercent(value: number | null | undefined, digits = 2): string {
+  const rounded = roundPercent(value, digits)
+  return rounded == null ? '' : `${rounded}%`
+}

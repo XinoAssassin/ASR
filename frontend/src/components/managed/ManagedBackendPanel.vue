@@ -19,7 +19,7 @@ import { useI18n } from 'vue-i18n'
 
 import type { ManagedFolder, ManagedState } from '@/platform'
 import { useManagedBackendStore } from '@/stores/managedBackend'
-import { formatBytes } from '@/utils/format'
+import { formatBytes, formatPercent } from '@/utils/format'
 
 const { t } = useI18n()
 const message = useMessage()
@@ -35,7 +35,7 @@ const STATE_TYPE: Record<ManagedState, 'default' | 'info' | 'success' | 'error' 
 }
 
 const stateText = computed(() => {
-  const pct = st.value.state === 'installing' && managed.percent != null ? ` ${Math.round(managed.percent)}%` : ''
+  const pct = st.value.state === 'installing' && managed.percent != null ? ` ${formatPercent(managed.percent, 0)}` : ''
   return t(`managed.state.${st.value.state}`) + pct
 })
 

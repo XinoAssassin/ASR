@@ -271,3 +271,8 @@ with a warning (choose manual). The effective proxy is passed as `HTTP_PROXY`, `
 sidecar process (model downloads, DashScope, the LLM), and is used by the uploader (private LAN
 addresses and loopback bypass it by default). `ManagedProgress.percent` is rounded to two decimals.
 
+Credentials: `network_get_proxy` / `network_set_proxy` return the URL with the password masked
+(`user:***@host`). Sending that masked URL back unchanged — same scheme, host, port and user —
+keeps the stored password (like the app's API key `"***"`); `network_test_proxy` with such a draft
+uses the stored password too. Any other change replaces the stored URL as given.
+

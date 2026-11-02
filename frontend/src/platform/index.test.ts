@@ -89,6 +89,11 @@ describe('tauri facade (docs/desktop-ipc.md)', () => {
     await p.managedBackend.reveal('models')
     await p.dialog.pickFolder({ title: 'Pick', defaultPath: 'D:\\x' })
     await p.dialog.pickFolder()
+    const proxy = { mode: 'manual' as const, url: 'http://p:1', noProxy: 'localhost' }
+    await p.network.getProxy()
+    await p.network.setProxy(proxy)
+    await p.network.testProxy(proxy)
+    await p.network.testProxy()
     const sent = fake.invoke.mock.calls.map(([cmd, args]) => [cmd, args])
     expect(sent).toEqual([
       ['recorder_devices', {}],
@@ -114,6 +119,10 @@ describe('tauri facade (docs/desktop-ipc.md)', () => {
       ['managed_backend_reveal', { which: 'models' }],
       ['pick_folder', { title: 'Pick', defaultPath: 'D:\\x' }],
       ['pick_folder', { title: undefined, defaultPath: null }],
+      ['network_get_proxy', {}],
+      ['network_set_proxy', { settings: proxy }],
+      ['network_test_proxy', { settings: proxy }],
+      ['network_test_proxy', {}],
     ])
   })
 

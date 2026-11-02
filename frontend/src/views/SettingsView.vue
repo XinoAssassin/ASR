@@ -16,7 +16,7 @@ import {
   type DataTableColumns,
   useMessage,
 } from 'naive-ui'
-import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
 
@@ -47,6 +47,8 @@ const settings = useSettingsStore()
 const hardware = useHardwareStore()
 const desktop = isDesktop()
 const route = useRoute()
+// Desktop only: a separate chunk the web build never loads.
+const ProxyCard = defineAsyncComponent(() => import('@/components/proxy/ProxyCard.vue'))
 
 /** Environment variable behind a settings field (`env_only`), for the "env" markers. */
 function envOf(field: string): string | null {
@@ -236,6 +238,7 @@ onMounted(() => {
     <!-- Desktop app only: what the Rust core uses for background uploads -->
     <DesktopSettingsCard v-if="desktop" />
     <SidecarCard v-if="desktop" />
+    <ProxyCard v-if="desktop" />
 
     <!-- Server-side: default provider, cloud recognition, LLM -->
     <OnlineServicesCard />

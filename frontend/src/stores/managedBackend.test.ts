@@ -292,6 +292,37 @@ describe('first-run wizard', () => {
     expect(store.percent).toBe(50)
   })
 
+  it('rounds the progress percent to at most two decimals', async () => {
+    bundled({ state: 'installing' })
+    const store = useManagedBackendStore()
+    await store.init()
+    fake.emitManagedProgress({ phase: 'packages', message: 'x', percent: 36.60946710640514, logLine: null })
+    expect(store.percent).toBe(36.61)
+    fake.emitManagedProgress({ phase: 'packages', message: 'x', percent: null, logLine: null })
+    expect(store.percent).toBeNull()
+  })
+
+  it('goes through the network step when the core supports the proxy', async () => {
+    bundled()
+    const store = useManagedBackendStore()
+    await store.startup()
+    await settle()
+    store.next()
+    store.choice.dataDir = 'relative'
+    store.next(true)
+    expect(store.step).toBe('folders') // invalid folders block it
+    store.choice.dataDir = ''
+    store.next() // without the proxy: the folders step starts the install itself
+    expect(store.step).toBe('folders')
+    store.next(true)
+    expect(store.step).toBe('network')
+    store.back()
+    expect(store.step).toBe('folders')
+    store.next(true)
+    await store.install()
+    expect(store.step).toBe('install')
+  })
+
   it('keeps the last LOG_LIMIT log lines', async () => {
     bundled({ state: 'installing' })
     const store = useManagedBackendStore()

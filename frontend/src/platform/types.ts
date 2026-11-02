@@ -185,6 +185,38 @@ export interface ManagedProgress {
   logLine: string | null
 }
 
+export type ProxyMode = 'system' | 'none' | 'manual'
+
+/** The desktop app's one proxy setting (setup, sidecar, uploader). */
+export interface ProxySettings {
+  /** Default 'system'. */
+  mode: ProxyMode
+  /** manual: http://host:port, https://… or socks5://host:port; credentials come back masked. */
+  url: string | null
+  /** Comma list. */
+  noProxy: string
+}
+
+export interface EffectiveProxy {
+  source: 'system' | 'env' | 'manual' | 'none'
+  /** Proxy actually used (credentials masked). */
+  url: string | null
+  noProxy: string
+  /** Windows "automatic configuration script": not supported -> warning. */
+  pacUrl: string | null
+  warnings: string[]
+}
+
+export interface ProxyState {
+  settings: ProxySettings
+  effective: EffectiveProxy
+}
+
+export interface ProxyTestResult {
+  ok: boolean
+  message: string
+}
+
 /** Value of `BackendConfig.apiKey` meaning "a key is stored" (read) / "keep the stored key" (write). */
 export const MASKED_KEY = '***'
 
@@ -227,6 +259,14 @@ export interface DesktopPlatform {
   dialog: {
     /** Native folder picker; null when cancelled. */
     pickFolder(options?: PickFolderOptions): Promise<string | null>
+  }
+  /** Proxy; an older core rejects these (hide the proxy UI). */
+  network: {
+    getProxy(): Promise<ProxyState>
+    /** Uploader at once, the next managed setup, the sidecar on its next start. */
+    setProxy(settings: ProxySettings): Promise<ProxyState>
+    /** Reaches the package index + model hub through `settings` (or the saved ones). */
+    testProxy(settings?: ProxySettings): Promise<ProxyTestResult>
   }
   backendConfig: {
     get(): Promise<BackendConfig>

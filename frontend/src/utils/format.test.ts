@@ -1,8 +1,34 @@
 import { describe, expect, it } from 'vitest'
 
-import { basename, elapsedSeconds, formatBytes, formatClock, formatDuration, formatTimestamp } from './format'
+import {
+  basename,
+  elapsedSeconds,
+  formatBytes,
+  formatClock,
+  formatDuration,
+  formatPercent,
+  formatTimestamp,
+  roundPercent,
+} from './format'
 
 describe('format', () => {
+  it('rounds percentages to at most two decimals', () => {
+    expect(roundPercent(36.60946710640514)).toBe(36.61)
+    expect(roundPercent(64)).toBe(64)
+    expect(roundPercent(12.5)).toBe(12.5)
+    expect(roundPercent(99.999)).toBe(100)
+    expect(roundPercent(-3)).toBe(0)
+    expect(roundPercent(250)).toBe(100)
+    expect(roundPercent(null)).toBeNull()
+    expect(roundPercent(Number.NaN)).toBeNull()
+    expect(roundPercent(36.6, 0)).toBe(37)
+    expect(formatPercent(36.60946710640514)).toBe('36.61%')
+    expect(formatPercent(64)).toBe('64%')
+    expect(formatPercent(0.005)).toBe('0.01%')
+    expect(formatPercent(36.6, 0)).toBe('37%')
+    expect(formatPercent(undefined)).toBe('')
+  })
+
   it('formats durations', () => {
     expect(formatDuration(0)).toBe('0:00')
     expect(formatDuration(65.9)).toBe('1:05')

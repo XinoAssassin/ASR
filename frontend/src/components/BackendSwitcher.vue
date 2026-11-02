@@ -15,6 +15,7 @@ import { useManagedBackendStore } from '@/stores/managedBackend'
 import { LOCAL_PROFILE_ID, useProfilesStore } from '@/stores/profiles'
 import { useSettingsStore } from '@/stores/settings'
 import { useSidecarStore } from '@/stores/sidecar'
+import { formatPercent } from '@/utils/format'
 import { activeHardwareLabel } from '@/utils/hardware'
 
 const { t } = useI18n()
@@ -42,7 +43,7 @@ const sidecarBusy = computed(() => sidecar.starting || sidecar.status.state === 
 const managedTag = computed(() => {
   if (!managed.needsSetup) return null
   const state = managed.status.state
-  const pct = state === 'installing' && managed.percent != null ? ` ${Math.round(managed.percent)}%` : ''
+  const pct = state === 'installing' && managed.percent != null ? ` ${formatPercent(managed.percent, 0)}` : ''
   return {
     state,
     text: t(`managed.state.${state}`) + pct,
