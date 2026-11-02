@@ -102,6 +102,9 @@ type ManagedBackendStatus = {          // "desktop + backend" edition only
   dataDir: string | null               // ASR_DATA_DIR of the managed backend (asr.db, uploads)
   modelsDir: string | null             // ASR_MODEL_CACHE_DIR (large; may live on another drive)
   envSizeBytes: number | null          // Python environment size on disk
+  defaultDataDir: string | null        // where dataDir goes when not chosen (portable: inside the app folder)
+  defaultModelsDir: string | null
+  portable: boolean                    // app state lives next to the exe (portable marker present)
   error: string | null                 // last failure, redacted
 }
 
@@ -110,7 +113,8 @@ type HardwareSuggestion = {
   available: boolean                   // a matching GPU / build exists for this PC
   recommended: boolean
   label: string                        // e.g. "AMD Radeon 8060S (ROCm, gfx1151)"
-  detail: string | null                // why not available / download size hint
+  detail: string | null                // why not available
+  downloadBytes: number | null         // approximate one-time download for this choice
 }
 
 type ManagedInstallOptions = {
@@ -150,7 +154,9 @@ type ManagedProgress = {
 | `managed_backend_status` | — | `ManagedBackendStatus` | Bundled edition; `edition: 'external'` and `state: 'not_installed'` in the plain build |
 | `managed_backend_detect` | — | `HardwareSuggestion[]` | cpu / cuda / rocm with availability and one `recommended` |
 | `managed_backend_install` | `{ options: ManagedInstallOptions }` | `ManagedBackendStatus` | Starts (or re-runs, e.g. to switch hardware) the environment setup in the background; progress via `managed-backend://progress`; error if already installing |
-| `managed_backend_cancel` | — | `ManagedBackendStatus` | Stops a running setup (partial environment is removed; data and models are kept) |
+| `managed_backend_cancel` | — | `ManagedBackendStatus` | Stops a running setup (partial environment is removed; data and models are kept). When it was a re-install / hardware switch, the previous working environment is kept and stays `installed` |
+| `managed_backend_reveal` | `{ which: 'data' \| 'models' \| 'backend' }` | — | Opens that folder in Explorer |
+| `pick_folder` | `{ title?: string, defaultPath?: string \| null }` | `string \| null` | Native folder picker (desktop only); null when cancelled |
 
 ## Events (`listen(name)`)
 
@@ -215,8 +221,10 @@ on first run (D75):
 - `managed_backend_install` runs `uv` with the locked dependencies (`--frozen --no-dev`, extras
   `<hardware>` + `local`) into a per-user environment under `%LOCALAPPDATA%`, using a uv-managed
   Python 3.12. Needs internet once (≈1 GB CPU, ≈2.5 GB CUDA, ≈5 GB ROCm).
+- A re-install or hardware switch builds the new environment next to the old one and swaps it in only on success, so a cancelled or failed switch keeps the previous working backend.
 - On success the app writes the sidecar config itself (enabled, `asr serve` on 127.0.0.1, a free
-  port) and starts it; the SPA's 本机 profile follows the sidecar URL. The managed backend listens
+  port) and starts it, and only then emits `installed` (a failed start is reported through
+  `sidecar://status`); the SPA's 本机 profile follows the sidecar URL. The managed backend listens
   on loopback only, with no API key (open mode).
 - The sidecar gets `ASR_DATA_DIR`, `ASR_UPLOAD_ROOTS`, `ASR_MODEL_CACHE_DIR`, `ASR_DEVICE` and
   `ASR_PROVIDER_DEFAULT=local` from the managed install, plus the CORS origins.
@@ -224,4 +232,12 @@ on first run (D75):
   only our source changed). Switching hardware re-runs the install with another extra.
 - Uninstalling the app removes the Python environment but never the data or models folders.
 - Models are downloaded afterwards from the SPA (Settings → local models), as for any backend.
+
+## Portable mode
+
+Releases are portable zips (D76). A `portable` marker file next to the exe puts all app state in
+the app folder instead of `%APPDATA%` / `%LOCALAPPDATA%`: app settings, logs and the default
+recordings folder, and in the backend edition the managed environment, its data and the models
+(the wizard can still put models elsewhere). Without the marker the per-user locations are used.
+Deleting a portable folder deletes everything stored inside it.
 
