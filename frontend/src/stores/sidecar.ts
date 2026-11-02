@@ -89,6 +89,20 @@ export const useSidecarStore = defineStore('sidecar', () => {
     return initPromise
   }
 
+  /** Re-read config + status (e.g. after the managed setup wrote the config). Never throws. */
+  async function reload(): Promise<void> {
+    if (!available) return
+    try {
+      await init()
+      const platform = await getDesktop()
+      const [c, s] = await Promise.all([platform.sidecar.getConfig(), platform.sidecar.status()])
+      config.value = c
+      status.value = s
+    } catch {
+      // keep the last known values; init() reports load errors
+    }
+  }
+
   function dispose(): void {
     unlisten?.()
     unlisten = null
@@ -153,6 +167,7 @@ export const useSidecarStore = defineStore('sidecar', () => {
     stopping,
     error,
     init,
+    reload,
     dispose,
     saveConfig,
     start,

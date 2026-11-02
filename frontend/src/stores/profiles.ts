@@ -381,6 +381,20 @@ export const useProfilesStore = defineStore('profiles', () => {
     return switchTo(LOCAL_PROFILE_ID, options)
   }
 
+  /**
+   * The built-in backend just came up for the first time (managed setup finished, sidecar
+   * running): what the pages loaded before came from nowhere, so reload them all — unless that
+   * would lose transcript edits or interrupt uploads. Resolves whether it reloaded.
+   */
+  async function reloadLocal(): Promise<boolean> {
+    if (!isLocalActive.value) return false
+    onSidecarStatus(useSidecarStore().status)
+    if ((await pendingWork()).length) return false
+    resetBackendState()
+    await pushDesktop(null)
+    return true
+  }
+
   return {
     profiles,
     activeId,
@@ -402,5 +416,6 @@ export const useProfilesStore = defineStore('profiles', () => {
     test,
     init,
     useSidecar,
+    reloadLocal,
   }
 })

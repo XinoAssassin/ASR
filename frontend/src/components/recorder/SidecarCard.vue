@@ -2,6 +2,8 @@
 /**
  * Settings → "本地后端" (desktop only, M10): the optional `asr serve` process the desktop app
  * starts. Config, live status (`sidecar://status`), start / stop, and "use this backend".
+ * In the "desktop + backend" edition the app manages the command / args / port itself: the
+ * manual fields are replaced by the managed backend panel (hardware, folders, reinstall).
  */
 import {
   NAlert,
@@ -18,11 +20,12 @@ import {
   NText,
   useMessage,
 } from 'naive-ui'
-import { computed, onMounted, reactive, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, reactive, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import type { SidecarConfig, SidecarState } from '@/platform'
 import { useBackendSwitch } from '@/composables/useBackendSwitch'
+import { useManagedBackendStore } from '@/stores/managedBackend'
 import { useProfilesStore } from '@/stores/profiles'
 import { defaultSidecarConfig, syncPortArg, useSidecarStore } from '@/stores/sidecar'
 
@@ -31,6 +34,14 @@ const message = useMessage()
 const sidecar = useSidecarStore()
 const profiles = useProfilesStore()
 const backend = useBackendSwitch()
+const managed = useManagedBackendStore()
+// Bundled edition only: loaded on demand.
+const ManagedBackendPanel = defineAsyncComponent(() => import('@/components/managed/ManagedBackendPanel.vue'))
+/** Bundled edition: no manual command; external (or an older core): the full form. */
+const managedMode = computed(() => managed.bundled)
+const showForm = computed(() => managed.loaded && !managed.bundled)
+/** Nothing to start before the managed setup finished. */
+const canStart = computed(() => !managedMode.value || managed.installed)
 
 const form = reactive<SidecarConfig & { cwdText: string }>({ ...defaultSidecarConfig(), cwdText: '' })
 
@@ -85,12 +96,15 @@ async function onSave(): Promise<void> {
 }
 
 async function onStart(): Promise<void> {
-  if (!form.command.trim()) {
-    message.warning(t('recorder.sidecar.needCommand'))
-    return
+  // Managed: the core wrote the config itself; nothing to save.
+  if (!managedMode.value) {
+    if (!form.command.trim()) {
+      message.warning(t('recorder.sidecar.needCommand'))
+      return
+    }
+    // The core starts what it has stored: save the form first.
+    if (!(await save())) return
   }
-  // The core starts what it has stored: save the form first.
-  if (!(await save())) return
   try {
     const result = await sidecar.start()
     if (result.state === 'running') message.success(t('recorder.sidecar.started'))
@@ -117,7 +131,10 @@ async function onUse(): Promise<void> {
   }
 }
 
-onMounted(() => void sidecar.init())
+onMounted(() => {
+  void sidecar.init()
+  void managed.init()
+})
 </script>
 
 <template>
@@ -133,10 +150,11 @@ onMounted(() => void sidecar.init())
       {{ t('recorder.sidecar.unavailable', { error: sidecar.error }) }}
     </NAlert>
     <template v-else>
-      <NText depth="3" class="intro">{{ t('recorder.sidecar.intro') }}</NText>
+      <ManagedBackendPanel v-if="managedMode" />
+      <NText v-else depth="3" class="intro">{{ t('recorder.sidecar.intro') }}</NText>
       <NAlert v-if="st.error" type="error" class="block" data-testid="sidecar-error">{{ st.error }}</NAlert>
 
-      <NForm label-placement="left" label-width="120" :disabled="!sidecar.config">
+      <NForm v-if="showForm" label-placement="left" label-width="120" :disabled="!sidecar.config">
         <NFormItem :label="t('recorder.sidecar.enabled')">
           <NSpace align="center">
             <NSwitch v-model:value="form.enabled" data-testid="sidecar-enabled" />
@@ -181,12 +199,19 @@ onMounted(() => void sidecar.init())
         </NFormItem>
       </NForm>
 
-      <NSpace align="center">
-        <NButton :loading="sidecar.saving" :disabled="!sidecar.config" data-testid="sidecar-save" @click="onSave">
+      <!-- A plain flex row: NSpace re-keys the v-if children (duplicate key warnings). -->
+      <div class="actions">
+        <NButton
+          v-if="showForm"
+          :loading="sidecar.saving"
+          :disabled="!sidecar.config"
+          data-testid="sidecar-save"
+          @click="onSave"
+        >
           {{ t('recorder.sidecar.save') }}
         </NButton>
         <NButton
-          v-if="st.state !== 'running'"
+          v-if="st.state !== 'running' && canStart"
           type="primary"
           :loading="sidecar.starting || st.state === 'starting'"
           :disabled="!sidecar.config || busy"
@@ -196,7 +221,7 @@ onMounted(() => void sidecar.init())
           {{ t('recorder.sidecar.start') }}
         </NButton>
         <NButton
-          v-else
+          v-else-if="st.state === 'running'"
           :loading="sidecar.stopping"
           :disabled="busy"
           data-testid="sidecar-stop"
@@ -213,7 +238,7 @@ onMounted(() => void sidecar.init())
             {{ t('recorder.sidecar.useBackend') }}
           </NButton>
         </template>
-      </NSpace>
+      </div>
     </template>
   </NCard>
 </template>
@@ -230,5 +255,12 @@ onMounted(() => void sidecar.init())
 
 .hint {
   font-size: 12px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
 }
 </style>

@@ -201,7 +201,8 @@ onMounted(() => {
   void settings.load()
   void hardware.load()
   void refreshLocalModels()
-  // Deep links: #siyuan (SiYuan dialog), #backends / #sidecar (top-bar backend menu).
+  // Deep links: #siyuan (SiYuan dialog), #backends / #sidecar (top-bar backend menu),
+  // #local-models (managed backend wizard: "下载模型").
   const anchor = route.hash.slice(1)
   if (anchor) {
     void nextTick(() => document.getElementById(anchor)?.scrollIntoView({ block: 'start' }))
@@ -240,7 +241,7 @@ onMounted(() => {
     <OnlineServicesCard />
 
     <!-- Local models: download state; downloads go through `asr models download` (rule 6) -->
-    <NCard :title="t('settings.local.title')">
+    <NCard id="local-models" :title="t('settings.local.title')">
       <NAlert type="info" style="margin-bottom: 16px">{{ t('settings.local.downloadHint') }}</NAlert>
       <NDescriptions
         v-if="settings.server"

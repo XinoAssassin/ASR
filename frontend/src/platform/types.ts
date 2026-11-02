@@ -117,6 +117,59 @@ export interface BackendConfig {
   extraTerms: Term[]
 }
 
+export type ManagedHardware = 'cpu' | 'cuda' | 'rocm'
+
+export type ManagedState = 'not_installed' | 'installing' | 'installed' | 'failed'
+
+/** "Desktop + backend" edition: the backend environment the app creates and runs itself. */
+export interface ManagedBackendStatus {
+  /** external = plain recorder build (no bundled backend). */
+  edition: 'bundled' | 'external'
+  state: ManagedState
+  /** What the environment was built for. */
+  hardware: ManagedHardware | null
+  /** Bundled backend source version / hash. */
+  backendVersion: string | null
+  /** ASR_DATA_DIR of the managed backend (asr.db, uploads). */
+  dataDir: string | null
+  /** ASR_MODEL_CACHE_DIR (large; may live on another drive). */
+  modelsDir: string | null
+  /** Python environment size on disk. */
+  envSizeBytes: number | null
+  /** Last failure, redacted. */
+  error: string | null
+}
+
+export interface HardwareSuggestion {
+  id: ManagedHardware
+  /** A matching GPU / build exists for this PC. */
+  available: boolean
+  recommended: boolean
+  /** e.g. "AMD Radeon 8060S (ROCm, gfx1151)" */
+  label: string
+  /** Why not available / download size hint. */
+  detail: string | null
+}
+
+export interface ManagedInstallOptions {
+  hardware: ManagedHardware
+  /** null = default under %LOCALAPPDATA%. */
+  dataDir?: string | null
+  modelsDir?: string | null
+}
+
+export type ManagedPhase = 'prepare' | 'python' | 'packages' | 'finalize' | 'done' | 'failed'
+
+export interface ManagedProgress {
+  phase: ManagedPhase
+  /** Bilingual short status. */
+  message: string
+  /** Overall 0..100 when known. */
+  percent: number | null
+  /** Raw installer output line (redacted), for a log view. */
+  logLine: string | null
+}
+
 /** Value of `BackendConfig.apiKey` meaning "a key is stored" (read) / "keep the stored key" (write). */
 export const MASKED_KEY = '***'
 
@@ -142,6 +195,15 @@ export interface DesktopPlatform {
     start(): Promise<SidecarStatus>
     stop(): Promise<SidecarStatus>
   }
+  /** "Desktop + backend" edition; an older core rejects these (treat as `edition: 'external'`). */
+  managedBackend: {
+    status(): Promise<ManagedBackendStatus>
+    detect(): Promise<HardwareSuggestion[]>
+    /** Starts (or re-runs) the setup in the background; error if already installing. */
+    install(options: ManagedInstallOptions): Promise<ManagedBackendStatus>
+    /** Stops a running setup (partial environment removed; data and models kept). */
+    cancel(): Promise<ManagedBackendStatus>
+  }
   backendConfig: {
     get(): Promise<BackendConfig>
     set(config: BackendConfig): Promise<BackendConfig>
@@ -158,5 +220,9 @@ export interface DesktopPlatform {
     onRecordingChanged(handler: (recording: Recording) => void): Promise<Unlisten>
     /** `sidecar://status` */
     onSidecarStatus(handler: (status: SidecarStatus) => void): Promise<Unlisten>
+    /** `managed-backend://progress` */
+    onManagedProgress(handler: (progress: ManagedProgress) => void): Promise<Unlisten>
+    /** `managed-backend://status` */
+    onManagedStatus(handler: (status: ManagedBackendStatus) => void): Promise<Unlisten>
   }
 }

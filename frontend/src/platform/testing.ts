@@ -2,12 +2,22 @@
  * In-memory `DesktopPlatform` for unit tests (no Tauri). Records every call and lets the test
  * emit `recorder://status` / `recordings://changed` / `sidecar://status` events.
  * `state.missing` simulates an older core without some commands.
+ *
+ * Managed backend ("desktop + backend" edition): `state.managed` starts as the plain build
+ * (`edition: 'external'`); set `edition: 'bundled'` to simulate the bundled one. `install` starts
+ * a scripted setup that the test drives with `tickInstall()` / `runInstall()` (one
+ * `managed-backend://progress` event per tick); `state.installFailAt` makes it fail at that tick.
+ * Like the Rust core, a successful setup writes + starts the sidecar.
  */
 import type {
   AudioProcess,
   BackendConfig,
   DesktopPlatform,
   DeviceList,
+  HardwareSuggestion,
+  ManagedBackendStatus,
+  ManagedInstallOptions,
+  ManagedProgress,
   Recording,
   RecorderStatus,
   SidecarConfig,
@@ -20,6 +30,12 @@ export interface FakeDesktop extends DesktopPlatform {
   emitStatus(status: RecorderStatus): void
   emitRecording(recording: Recording): void
   emitSidecar(status: SidecarStatus): void
+  emitManagedProgress(progress: ManagedProgress): void
+  emitManagedStatus(status: ManagedBackendStatus): void
+  /** Emit the next scripted progress event of a running setup; false when none is running. */
+  tickInstall(): boolean
+  /** Tick until the setup finished (or failed). */
+  runInstall(): void
   listenerCount(): number
   state: {
     devices: DeviceList
@@ -37,6 +53,60 @@ export interface FakeDesktop extends DesktopPlatform {
     sidecar: SidecarStatus
     /** Commands that reject like an older core would. */
     missing: Set<string>
+    managed: ManagedBackendStatus
+    suggestions: HardwareSuggestion[]
+    /** Progress events of one setup (the final `done` / `failed` is added by the fake). */
+    installScript: ManagedProgress[]
+    /** Fail the setup at this tick (index into `installScript`); null = succeed. */
+    installFailAt: number | null
+    /** Next tick of the running setup. */
+    installTick: number
+    lastInstall: ManagedInstallOptions | null
+  }
+}
+
+export const FAKE_MANAGED_PORT = 8765
+
+export function defaultSuggestions(): HardwareSuggestion[] {
+  return [
+    { id: 'cpu', available: true, recommended: false, label: 'AMD Ryzen AI Max+ 395 (CPU)', detail: '≈1 GB' },
+    {
+      id: 'cuda',
+      available: false,
+      recommended: false,
+      label: 'NVIDIA CUDA',
+      detail: 'No NVIDIA GPU found / 未检测到 NVIDIA 显卡',
+    },
+    {
+      id: 'rocm',
+      available: true,
+      recommended: true,
+      label: 'AMD Radeon 8060S (ROCm, gfx1151)',
+      detail: '≈5 GB',
+    },
+  ]
+}
+
+export function defaultInstallScript(): ManagedProgress[] {
+  return [
+    { phase: 'prepare', message: '准备安装 / Preparing', percent: 2, logLine: 'checking disk space' },
+    { phase: 'python', message: '下载 Python 3.12 / Downloading Python 3.12', percent: 10, logLine: 'Installed Python 3.12.11' },
+    { phase: 'packages', message: '安装依赖 / Installing packages', percent: 35, logLine: 'Downloading torch (812.3MiB)' },
+    { phase: 'packages', message: '安装依赖 / Installing packages', percent: 70, logLine: 'Prepared 142 packages in 3m 12s' },
+    { phase: 'finalize', message: '完成配置 / Finishing', percent: 95, logLine: 'Installed 142 packages in 41s' },
+  ]
+}
+
+export function externalManagedStatus(): ManagedBackendStatus {
+  return {
+    edition: 'external',
+    state: 'not_installed',
+    hardware: null,
+    backendVersion: null,
+    dataDir: null,
+    modelsDir: null,
+    envSizeBytes: null,
+    error: null,
   }
 }
 
@@ -65,6 +135,8 @@ export function createFakeDesktop(): FakeDesktop {
   const statusHandlers = new Set<(s: RecorderStatus) => void>()
   const recordingHandlers = new Set<(r: Recording) => void>()
   const sidecarHandlers = new Set<(s: SidecarStatus) => void>()
+  const progressHandlers = new Set<(p: ManagedProgress) => void>()
+  const managedHandlers = new Set<(s: ManagedBackendStatus) => void>()
   const calls: Array<[string, unknown]> = []
   const state: FakeDesktop['state'] = {
     devices: {
@@ -112,6 +184,58 @@ export function createFakeDesktop(): FakeDesktop {
     },
     sidecar: { state: 'stopped', pid: null, url: null, error: null },
     missing: new Set(),
+    managed: externalManagedStatus(),
+    suggestions: defaultSuggestions(),
+    installScript: defaultInstallScript(),
+    installFailAt: null,
+    installTick: 0,
+    lastInstall: null,
+  }
+
+  const emitManagedStatus = (s: ManagedBackendStatus): void => managedHandlers.forEach((h) => h({ ...s }))
+  const emitManagedProgress = (p: ManagedProgress): void => progressHandlers.forEach((h) => h({ ...p }))
+  const setManaged = (patch: Partial<ManagedBackendStatus>): ManagedBackendStatus => {
+    state.managed = { ...state.managed, ...patch }
+    emitManagedStatus(state.managed)
+    return { ...state.managed }
+  }
+
+  function tickInstall(): boolean {
+    if (state.managed.state !== 'installing') return false
+    const i = state.installTick++
+    if (state.installFailAt != null && i >= state.installFailAt) {
+      const error = 'uv sync failed: network unreachable / 网络不可用'
+      emitManagedProgress({ phase: 'failed', message: '安装失败 / Setup failed', percent: null, logLine: `error: ${error}` })
+      setManaged({ state: 'failed', error })
+      return true
+    }
+    const step = state.installScript[i]
+    if (step) {
+      emitManagedProgress(step)
+      return true
+    }
+    // Like the Rust core: write + start the sidecar, then report done.
+    const opts = state.lastInstall
+    state.sidecarConfig = {
+      enabled: true,
+      command: 'C:\\Users\\me\\AppData\\Local\\ASR\\env\\Scripts\\asr.exe',
+      args: ['serve', '--host', '127.0.0.1', '--port', String(FAKE_MANAGED_PORT)],
+      cwd: null,
+      port: FAKE_MANAGED_PORT,
+    }
+    state.sidecar = { state: 'running', pid: 999, url: `http://127.0.0.1:${FAKE_MANAGED_PORT}`, error: null }
+    sidecarHandlers.forEach((h) => h({ ...state.sidecar }))
+    emitManagedProgress({ phase: 'done', message: '安装完成 / Setup complete', percent: 100, logLine: null })
+    setManaged({
+      state: 'installed',
+      hardware: opts?.hardware ?? 'cpu',
+      backendVersion: '0.9.0+abc1234',
+      dataDir: opts?.dataDir || 'C:\\Users\\me\\AppData\\Local\\ASR\\data',
+      modelsDir: opts?.modelsDir || 'C:\\Users\\me\\AppData\\Local\\ASR\\models',
+      envSizeBytes: 1_288_490_189,
+      error: null,
+    })
+    return true
   }
 
   const masked = (): BackendConfig => ({ ...state.config, apiKey: state.storedKey ? '***' : null })
@@ -193,6 +317,24 @@ export function createFakeDesktop(): FakeDesktop {
           return { ...state.sidecar }
         }),
     },
+    managedBackend: {
+      status: () => call('managed_backend_status', undefined, () => ({ ...state.managed })),
+      detect: () => call('managed_backend_detect', undefined, () => structuredClone(state.suggestions)),
+      install: (options: ManagedInstallOptions) =>
+        call('managed_backend_install', { options }, () => {
+          if (state.managed.edition !== 'bundled') throw 'not the bundled edition'
+          if (state.managed.state === 'installing') throw 'already installing'
+          state.lastInstall = structuredClone(options)
+          state.installTick = 0
+          return setManaged({ state: 'installing', error: null })
+        }),
+      cancel: () =>
+        call('managed_backend_cancel', undefined, () => {
+          if (state.managed.state !== 'installing') return { ...state.managed }
+          emitManagedProgress({ phase: 'failed', message: '已取消 / Cancelled', percent: null, logLine: 'cancelled' })
+          return setManaged({ state: 'not_installed', hardware: null, envSizeBytes: null, error: null })
+        }),
+    },
     backendConfig: {
       get: () => call('backend_get_config', undefined, masked),
       set: (config: BackendConfig) =>
@@ -226,11 +368,30 @@ export function createFakeDesktop(): FakeDesktop {
         sidecarHandlers.add(handler)
         return () => sidecarHandlers.delete(handler)
       },
+      onManagedProgress: async (handler) => {
+        progressHandlers.add(handler)
+        return () => progressHandlers.delete(handler)
+      },
+      onManagedStatus: async (handler) => {
+        managedHandlers.add(handler)
+        return () => managedHandlers.delete(handler)
+      },
     },
     emitStatus: (s) => statusHandlers.forEach((h) => h(s)),
     emitRecording: (r) => recordingHandlers.forEach((h) => h(r)),
     emitSidecar: (s) => sidecarHandlers.forEach((h) => h(s)),
-    listenerCount: () => statusHandlers.size + recordingHandlers.size + sidecarHandlers.size,
+    emitManagedProgress,
+    emitManagedStatus,
+    tickInstall,
+    runInstall: () => {
+      for (let i = 0; i < 1000 && tickInstall(); i++);
+    },
+    listenerCount: () =>
+      statusHandlers.size +
+      recordingHandlers.size +
+      sidecarHandlers.size +
+      progressHandlers.size +
+      managedHandlers.size,
   }
   return fake
 }

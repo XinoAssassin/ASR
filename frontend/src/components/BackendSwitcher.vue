@@ -11,6 +11,7 @@ import { useRouter } from 'vue-router'
 import { useBackendSwitch } from '@/composables/useBackendSwitch'
 import { useHardwareStore } from '@/stores/hardware'
 import { useHealthStore } from '@/stores/health'
+import { useManagedBackendStore } from '@/stores/managedBackend'
 import { LOCAL_PROFILE_ID, useProfilesStore } from '@/stores/profiles'
 import { useSettingsStore } from '@/stores/settings'
 import { useSidecarStore } from '@/stores/sidecar'
@@ -24,6 +25,7 @@ const health = useHealthStore()
 const hardware = useHardwareStore()
 const settings = useSettingsStore()
 const sidecar = useSidecarStore()
+const managed = useManagedBackendStore()
 const { switchTo, profileName } = useBackendSwitch()
 
 /** HTML attributes of a menu entry (Naive's typing has no `data-*`). */
@@ -31,9 +33,39 @@ const testId = (id: string): HTMLAttributes => ({ 'data-testid': id }) as HTMLAt
 
 const START_LOCAL = '__start-local'
 const MANAGE = '__manage'
+const MANAGED_SETUP = '__managed-setup'
 
 const sidecarRunning = computed(() => sidecar.status.state === 'running')
 const sidecarBusy = computed(() => sidecar.starting || sidecar.status.state === 'starting')
+
+/** Bundled edition, backend not usable yet: "未安装" / "安装中 45%" / "安装失败" on 本机. */
+const managedTag = computed(() => {
+  if (!managed.needsSetup) return null
+  const state = managed.status.state
+  const pct = state === 'installing' && managed.percent != null ? ` ${Math.round(managed.percent)}%` : ''
+  return {
+    state,
+    text: t(`managed.state.${state}`) + pct,
+    type: state === 'failed' ? ('error' as const) : state === 'installing' ? ('info' as const) : ('warning' as const),
+  }
+})
+
+function managedTagNode() {
+  const tag = managedTag.value
+  if (!tag) return null
+  return h(
+    NTag,
+    {
+      size: 'tiny',
+      type: tag.type,
+      round: true,
+      style: 'margin-left: 6px',
+      'data-testid': 'backend-local-managed',
+      'data-state': tag.state,
+    } as never,
+    () => tag.text,
+  )
+}
 
 function urlText(id: string): string {
   const p = profiles.find(id)
@@ -51,12 +83,20 @@ const options = computed<DropdownOption[]>(() => {
           p.id === profiles.activeId
             ? h(NTag, { size: 'tiny', type: 'success', round: true, style: 'margin-left: 6px' }, () => t('profiles.active'))
             : null,
+          p.id === LOCAL_PROFILE_ID ? managedTagNode() : null,
         ]),
         h('span', { class: 'backend-option__url' }, urlText(p.id)),
       ]),
   }))
   items.push({ type: 'divider', key: '__d1' })
-  if (sidecar.available && !sidecarRunning.value) {
+  if (managed.needsSetup) {
+    const state = managed.status.state === 'not_installed' ? 'install' : managed.status.state
+    items.push({
+      key: MANAGED_SETUP,
+      label: t(`managed.switcher.${state}`),
+      props: testId('backend-managed-setup'),
+    })
+  } else if (sidecar.available && !sidecarRunning.value) {
     items.push({
       key: START_LOCAL,
       label: t('profiles.startLocal'),
@@ -91,6 +131,7 @@ function onSelect(key: string | number): void {
   const k = String(key)
   if (k === MANAGE) void router.push({ name: 'settings', hash: '#backends' })
   else if (k === START_LOCAL) void startLocal()
+  else if (k === MANAGED_SETUP) managed.openWizard()
   else void switchTo(k)
 }
 
@@ -138,6 +179,18 @@ watch(
         {{ profileName(profiles.active) }}
       </NButton>
     </NDropdown>
+    <NTag
+      v-if="managedTag && profiles.isLocalActive"
+      size="small"
+      round
+      :type="managedTag.type"
+      class="managed-tag"
+      data-testid="backend-managed-state"
+      :data-state="managedTag.state"
+      @click="managed.openWizard()"
+    >
+      {{ managedTag.text }}
+    </NTag>
     <NTooltip v-if="hardwareText">
       <template #trigger>
         <NTag size="small" round :bordered="false" data-testid="active-hardware">{{ hardwareText }}</NTag>
@@ -153,6 +206,10 @@ watch(
   align-items: center;
   gap: 8px;
   white-space: nowrap;
+}
+
+.managed-tag {
+  cursor: pointer;
 }
 
 .backend-switcher__dot {

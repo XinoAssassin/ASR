@@ -20,7 +20,7 @@ import {
   useOsTheme,
   zhCN,
 } from 'naive-ui'
-import { computed, h, onBeforeUnmount, onMounted } from 'vue'
+import { computed, defineAsyncComponent, h, onBeforeUnmount, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 
@@ -28,6 +28,7 @@ import BackendSwitcher from '@/components/BackendSwitcher.vue'
 import { LOCALE_STORAGE_KEY, type AppLocale } from '@/locales'
 import { isDesktop } from '@/platform'
 import { useHealthStore } from '@/stores/health'
+import { useManagedBackendStore } from '@/stores/managedBackend'
 import { useProfilesStore } from '@/stores/profiles'
 import { useRecorderStore } from '@/stores/recorder'
 
@@ -38,6 +39,9 @@ const osTheme = useOsTheme()
 const desktop = isDesktop()
 const recorder = useRecorderStore()
 const profiles = useProfilesStore()
+const managed = useManagedBackendStore()
+// Desktop + backend edition only; a separate chunk the web build never loads.
+const ManagedBackendWizard = defineAsyncComponent(() => import('@/components/managed/ManagedBackendWizard.vue'))
 
 const theme = computed(() => (osTheme.value === 'dark' ? darkTheme : null))
 const naiveLocale = computed(() => (locale.value === 'en' ? enUS : zhCN))
@@ -105,7 +109,11 @@ onMounted(() => {
   document.documentElement.lang = locale.value
   health.startPolling()
   profiles.init() // desktop: the built-in profile follows the sidecar
-  if (desktop) void recorder.init()
+  if (desktop) {
+    void recorder.init()
+    // Bundled edition, backend not installed yet: the first-run wizard opens by itself.
+    void managed.startup()
+  }
 })
 onBeforeUnmount(() => health.stopPolling())
 </script>
@@ -158,6 +166,7 @@ onBeforeUnmount(() => health.stopPolling())
             </RouterView>
           </NLayoutContent>
         </NLayout>
+        <ManagedBackendWizard v-if="desktop && managed.bundled" />
       </NDialogProvider>
     </NMessageProvider>
   </NConfigProvider>

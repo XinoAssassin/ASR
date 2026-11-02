@@ -10,6 +10,10 @@ import type {
   BackendConfig,
   DesktopPlatform,
   DeviceList,
+  HardwareSuggestion,
+  ManagedBackendStatus,
+  ManagedInstallOptions,
+  ManagedProgress,
   Recording,
   AudioProcess,
   RecorderStatus,
@@ -22,6 +26,8 @@ export const EVENTS = {
   recorderStatus: 'recorder://status',
   recordingsChanged: 'recordings://changed',
   sidecarStatus: 'sidecar://status',
+  managedProgress: 'managed-backend://progress',
+  managedStatus: 'managed-backend://status',
 } as const
 
 export function createTauriPlatform(): DesktopPlatform {
@@ -41,6 +47,13 @@ export function createTauriPlatform(): DesktopPlatform {
       start: () => invoke<SidecarStatus>('sidecar_start'),
       stop: () => invoke<SidecarStatus>('sidecar_stop'),
     },
+    managedBackend: {
+      status: () => invoke<ManagedBackendStatus>('managed_backend_status'),
+      detect: () => invoke<HardwareSuggestion[]>('managed_backend_detect'),
+      install: (options: ManagedInstallOptions) =>
+        invoke<ManagedBackendStatus>('managed_backend_install', { options }),
+      cancel: () => invoke<ManagedBackendStatus>('managed_backend_cancel'),
+    },
     backendConfig: {
       get: () => invoke<BackendConfig>('backend_get_config'),
       set: (config: BackendConfig) => invoke<BackendConfig>('backend_set_config', { config }),
@@ -57,6 +70,10 @@ export function createTauriPlatform(): DesktopPlatform {
         listen<Recording>(EVENTS.recordingsChanged, (e) => handler(e.payload)),
       onSidecarStatus: (handler) =>
         listen<SidecarStatus>(EVENTS.sidecarStatus, (e) => handler(e.payload)),
+      onManagedProgress: (handler) =>
+        listen<ManagedProgress>(EVENTS.managedProgress, (e) => handler(e.payload)),
+      onManagedStatus: (handler) =>
+        listen<ManagedBackendStatus>(EVENTS.managedStatus, (e) => handler(e.payload)),
     },
   }
 }

@@ -81,6 +81,11 @@ describe('tauri facade (docs/desktop-ipc.md)', () => {
     await p.sidecar.status()
     await p.sidecar.start()
     await p.sidecar.stop()
+    const install = { hardware: 'rocm' as const, dataDir: null, modelsDir: 'E:\\models' }
+    await p.managedBackend.status()
+    await p.managedBackend.detect()
+    await p.managedBackend.install(install)
+    await p.managedBackend.cancel()
     const sent = fake.invoke.mock.calls.map(([cmd, args]) => [cmd, args])
     expect(sent).toEqual([
       ['recorder_devices', {}],
@@ -99,6 +104,10 @@ describe('tauri facade (docs/desktop-ipc.md)', () => {
       ['sidecar_status', {}],
       ['sidecar_start', {}],
       ['sidecar_stop', {}],
+      ['managed_backend_status', {}],
+      ['managed_backend_detect', {}],
+      ['managed_backend_install', { options: install }],
+      ['managed_backend_cancel', {}],
     ])
   })
 
@@ -122,6 +131,10 @@ describe('tauri facade (docs/desktop-ipc.md)', () => {
     expect(fake.invoke.mock.calls.at(-1)![1]).toMatchObject({ event: 'recordings://changed' })
     await p.events.onSidecarStatus(() => {})
     expect(fake.invoke.mock.calls.at(-1)![1]).toMatchObject({ event: 'sidecar://status' })
+    await p.events.onManagedProgress(() => {})
+    expect(fake.invoke.mock.calls.at(-1)![1]).toMatchObject({ event: 'managed-backend://progress' })
+    await p.events.onManagedStatus(() => {})
+    expect(fake.invoke.mock.calls.at(-1)![1]).toMatchObject({ event: 'managed-backend://status' })
 
     off()
     await vi.waitFor(() =>
