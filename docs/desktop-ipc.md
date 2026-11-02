@@ -129,6 +129,22 @@ type ManagedProgress = {
   percent: number | null               // overall 0..100 when known
   logLine: string | null               // raw installer output line (redacted), for a log view
 }
+
+type ProxyMode = 'system' | 'none' | 'manual'
+
+type ProxySettings = {
+  mode: ProxyMode                      // default 'system'
+  url: string | null                   // manual: http://host:port, https://… or socks5://host:port (credentials allowed, never echoed)
+  noProxy: string                      // comma list; default "localhost,127.0.0.1,::1,10.*,172.16.*-172.31.*,192.168.*,*.local"
+}
+
+type EffectiveProxy = {
+  source: 'system' | 'env' | 'manual' | 'none'
+  url: string | null                   // proxy actually used (credentials masked)
+  noProxy: string
+  pacUrl: string | null                // Windows "automatic configuration script": not supported -> warning
+  warnings: string[]
+}
 ```
 
 ## Commands (`invoke(name, args)`)
@@ -156,6 +172,9 @@ type ManagedProgress = {
 | `managed_backend_install` | `{ options: ManagedInstallOptions }` | `ManagedBackendStatus` | Starts (or re-runs, e.g. to switch hardware) the environment setup in the background; progress via `managed-backend://progress`; error if already installing |
 | `managed_backend_cancel` | — | `ManagedBackendStatus` | Stops a running setup (partial environment is removed; data and models are kept). When it was a re-install / hardware switch, the previous working environment is kept and stays `installed` (`error: null`); a *failed* switch also stays `installed`, with `error` set. During a switch the old sidecar keeps running and `state` is `installing` |
 | `managed_backend_reveal` | `{ which: 'data' \| 'models' \| 'backend' }` | — | Opens that folder in Explorer |
+| `network_get_proxy` | — | `{ settings: ProxySettings; effective: EffectiveProxy }` | |
+| `network_set_proxy` | `{ settings: ProxySettings }` | `{ settings: ProxySettings; effective: EffectiveProxy }` | Applies to the next managed setup, the uploader immediately, and the sidecar on its next start (the SPA offers a restart) |
+| `network_test_proxy` | `{ settings?: ProxySettings }` | `{ ok: boolean; message: string }` | Reaches the package index and the model hub through the given (or saved) settings |
 | `pick_folder` | `{ title?: string, defaultPath?: string \| null }` | `string \| null` | Native folder picker (desktop only); null when cancelled |
 
 ## Events (`listen(name)`)
@@ -240,4 +259,15 @@ the app folder instead of `%APPDATA%` / `%LOCALAPPDATA%`: app settings, logs and
 recordings folder, and in the backend edition the managed environment, its data and the models
 (the wizard can still put models elsewhere). Without the marker the per-user locations are used.
 Deleting a portable folder deletes everything stored inside it.
+
+## Proxy
+
+The desktop app owns one proxy setting (D77). `system` reads the Windows settings
+(`HKCU\…\Internet Settings`: `ProxyEnable`, `ProxyServer` incl. per-protocol lists,
+`ProxyOverride` → no-proxy, `<local>` → local names); an `HTTP(S)_PROXY` environment variable of
+the app process wins over the registry (`source: 'env'`); a PAC script is reported in `pacUrl`
+with a warning (choose manual). The effective proxy is passed as `HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY` and `NO_PROXY` (plus lowercase variants) to `uv` during managed setup and to the
+sidecar process (model downloads, DashScope, the LLM), and is used by the uploader (private LAN
+addresses and loopback bypass it by default). `ManagedProgress.percent` is rounded to two decimals.
 
