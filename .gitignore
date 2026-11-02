@@ -49,3 +49,5 @@ Thumbs.db
 /*.wav
 /*.mp3
 
+# desktop: staged backend resources, downloads and release zips (scripts/stage-backend.py, package-portable.ps1)
+desktop/build/

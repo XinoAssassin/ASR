@@ -36,6 +36,25 @@ pub struct LocalSettings {
     /// Output folders used so far (scanned for orphaned partial files at startup).
     #[serde(default)]
     pub out_dirs: Vec<PathBuf>,
+    /// Portable mode: the folder the app ran from last time (a move rebases stored paths).
+    #[serde(default)]
+    pub portable_root: Option<PathBuf>,
+}
+
+impl LocalSettings {
+    /// Paths under `old_root` follow a moved portable folder.
+    pub fn rebase(&mut self, old_root: &Path, new_root: &Path) {
+        let rb =
+            |p: &PathBuf| crate::paths::rebase(p, old_root, new_root).unwrap_or_else(|| p.clone());
+        self.out_dirs = self.out_dirs.iter().map(rb).collect();
+        self.active_partial = self.active_partial.as_ref().map(rb);
+        if let Some(o) = self.last_start.as_mut() {
+            o.out_dir = o
+                .out_dir
+                .as_deref()
+                .map(|d| crate::paths::rebase_str(d, old_root, new_root));
+        }
+    }
 }
 
 pub struct ConfigStore {
@@ -203,6 +222,35 @@ mod tests {
         assert_eq!(s.get_with_key().api_key.as_deref(), Some("k-old"));
         let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn settings_follow_a_moved_folder() {
+        let mut s = LocalSettings {
+            last_start: Some(StartOptions {
+                out_dir: Some("/old/root/recordings".into()),
+                ..Default::default()
+            }),
+            active_partial: Some("/old/root/recordings/a.partial.wav".into()),
+            out_dirs: vec!["/old/root/recordings".into(), "/other/rec".into()],
+            portable_root: Some("/old/root".into()),
+        };
+        s.rebase(Path::new("/old/root"), Path::new("/new place/root"));
+        assert_eq!(
+            s.last_start.unwrap().out_dir.map(PathBuf::from),
+            Some(PathBuf::from("/new place/root/recordings"))
+        );
+        assert_eq!(
+            s.active_partial,
+            Some(PathBuf::from("/new place/root/recordings/a.partial.wav"))
+        );
+        assert_eq!(
+            s.out_dirs,
+            vec![
+                PathBuf::from("/new place/root/recordings"),
+                PathBuf::from("/other/rec")
+            ]
+        );
     }
 
     #[test]

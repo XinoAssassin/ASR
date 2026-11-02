@@ -18,6 +18,15 @@ const TAIL_LINES: usize = 20;
 
 pub type OnStatus = Arc<dyn Fn(&SidecarStatus) + Send + Sync>;
 
+/// The managed backend of the bundled edition: when the configured `command` is this program,
+/// the sidecar gets these environment variables (data / models folders, device, ...). Set from
+/// Rust only; the public `SidecarConfig` has no environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedLaunch {
+    pub command: PathBuf,
+    pub env: Vec<(String, String)>,
+}
+
 struct Running {
     child: Child,
     #[cfg(windows)]
@@ -37,15 +46,17 @@ pub struct Sidecar {
     tail: Arc<Mutex<Vec<String>>>,
     on_status: OnStatus,
     health_timeout: Duration,
+    managed: Mutex<Option<ManagedLaunch>>,
+    proxy: Mutex<Option<crate::proxy::ProxyFn>>,
 }
 
 /// Rotating append-only log file (one `.1` backup).
-struct LogFile {
-    path: PathBuf,
+pub(crate) struct LogFile {
+    pub(crate) path: PathBuf,
 }
 
 impl LogFile {
-    fn write_line(&self, line: &str) {
+    pub(crate) fn write_line(&self, line: &str) {
         static LOCK: Mutex<()> = Mutex::new(());
         let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
         if std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0) > LOG_MAX {
@@ -219,7 +230,50 @@ impl Sidecar {
             tail: Arc::new(Mutex::new(Vec::new())),
             on_status,
             health_timeout: HEALTH_TIMEOUT,
+            managed: Mutex::new(None),
+            proxy: Mutex::new(None),
         })
+    }
+
+    /// The app's proxy setting, applied to the process at each start (`HTTP(S)_PROXY`,
+    /// `ALL_PROXY`, `NO_PROXY`).
+    pub fn set_proxy(&self, p: crate::proxy::ProxyFn) {
+        *crate::util::lock(&self.proxy) = Some(p);
+    }
+
+    pub fn set_managed_launch(&self, m: Option<ManagedLaunch>) {
+        *crate::util::lock(&self.managed) = m;
+    }
+
+    pub fn managed_launch(&self) -> Option<ManagedLaunch> {
+        crate::util::lock(&self.managed).clone()
+    }
+
+    /// A moved portable folder: a stored `command` / `cwd` under `old_root` follows it.
+    pub fn rebase(&self, old_root: &Path, new_root: &Path) {
+        let old = self.config();
+        let mut c = old.clone();
+        c.command = crate::paths::rebase_str(&c.command, old_root, new_root);
+        c.cwd = c
+            .cwd
+            .map(|d| crate::paths::rebase_str(&d, old_root, new_root));
+        if c != old {
+            let msg = format!("folder moved: command {:?} -> {:?}", old.command, c.command);
+            log::info!("sidecar: {msg}");
+            LogFile {
+                path: self.log_path.clone(),
+            }
+            .write_line(&msg);
+            match serde_json::to_vec_pretty(&c) {
+                Ok(b) => {
+                    if let Err(e) = crate::util::write_atomic(&self.config_path, &b) {
+                        log::warn!("sidecar: cannot store the rebased config: {e}");
+                    }
+                }
+                Err(e) => log::warn!("sidecar: {e}"),
+            }
+            *crate::util::lock(&self.config) = c;
+        }
     }
 
     #[cfg(test)]
@@ -331,6 +385,29 @@ impl Sidecar {
             cfg.command
         ));
         let mut cmd = Command::new(&cfg.command);
+        let managed = crate::util::lock(&self.managed)
+            .clone()
+            .filter(|m| Path::new(cfg.command.trim()) == m.command);
+        if let Some(m) = managed {
+            let shown: Vec<String> = m
+                .env
+                .iter()
+                .filter(|(k, _)| k.starts_with("ASR_") && !k.contains("KEY"))
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
+            log.write_line(&format!("managed backend: {}", shown.join(" ")));
+            cmd.envs(m.env.iter().map(|(k, v)| (k, v)));
+        }
+        let proxy = crate::util::lock(&self.proxy).clone();
+        if let Some(p) = proxy {
+            let r = p();
+            log.write_line(&format!(
+                "proxy: {:?} {}",
+                r.effective.source,
+                r.effective.url.as_deref().unwrap_or("-")
+            ));
+            r.apply(&mut cmd);
+        }
         cmd.args(&args)
             // The SPA in the app's WebView calls this backend directly (CORS + Origin check).
             .env("ASR_CORS_ORIGINS", &cors)
@@ -567,7 +644,7 @@ fn kill_tree(run: &mut Running) {
 }
 
 #[cfg(windows)]
-mod win {
+pub(crate) mod win {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::Console::{
         AttachConsole, FreeConsole, GenerateConsoleCtrlEvent, GetConsoleWindow,

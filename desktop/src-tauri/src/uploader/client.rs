@@ -148,7 +148,11 @@ pub fn body_timeout(len: u64) -> Duration {
 }
 
 impl Client {
-    pub fn new(cfg: &BackendConfig) -> Result<Self, String> {
+    /// `proxy`: the app's proxy setting (None = reqwest's defaults, as before it existed).
+    pub fn new(
+        cfg: &BackendConfig,
+        proxy: Option<&crate::proxy::Resolved>,
+    ) -> Result<Self, String> {
         let mut b = reqwest::blocking::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(REQUEST_TIMEOUT)
@@ -158,6 +162,12 @@ impl Client {
         if is_loopback(&cfg.base_url) {
             // Never route a same-machine backend through an env-configured proxy.
             b = b.no_proxy();
+        } else if let Some(r) = proxy {
+            // Only the app's setting (LAN / loopback bypass it), not reqwest's env / system lookup.
+            b = b.no_proxy();
+            if let Some(p) = r.reqwest_proxy() {
+                b = b.proxy(p);
+            }
         }
         let http = b.build().map_err(|e| e.to_string())?;
         Ok(Self {

@@ -11,9 +11,14 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use crate::config::ConfigStore;
 use crate::ipc::{
-    AudioProcess, BackendConfig, DeviceList, RecorderState, RecorderStatus, Recording,
-    SidecarConfig, SidecarStatus, StartOptions,
+    AudioProcess, BackendConfig, DeviceList, HardwareSuggestion, ManagedBackendStatus,
+    ManagedHardware, ManagedInstallOptions, ManagedPhase, ManagedProgress, ProxySettings,
+    ProxyState, ProxyTest, RecorderState, RecorderStatus, Recording, SidecarConfig, SidecarStatus,
+    StartOptions,
 };
+use crate::managed::{env::Bundle, Managed, ManagedPaths, RevealTarget};
+use crate::paths::{AppPaths, PerUserDirs};
+use crate::proxy::ProxyStore;
 use crate::recorder::{capture, Recorder};
 use crate::sidecar::Sidecar;
 use crate::uploader::{queue::Store, Uploader};
@@ -21,6 +26,8 @@ use crate::uploader::{queue::Store, Uploader};
 pub const EV_STATUS: &str = "recorder://status";
 pub const EV_RECORDINGS: &str = "recordings://changed";
 pub const EV_SIDECAR: &str = "sidecar://status";
+pub const EV_MANAGED_PROGRESS: &str = "managed-backend://progress";
+pub const EV_MANAGED_STATUS: &str = "managed-backend://status";
 const HOTKEY: &str = "ctrl+alt+r";
 
 pub struct AppState {
@@ -28,6 +35,8 @@ pub struct AppState {
     config: Arc<ConfigStore>,
     uploader: Arc<Uploader>,
     sidecar: Arc<Sidecar>,
+    managed: Arc<Managed>,
+    proxy: Arc<ProxyStore>,
     default_out: PathBuf,
     tray_toggle: Mutex<Option<MenuItem<Wry>>>,
 }
@@ -213,6 +222,110 @@ async fn sidecar_stop(app: AppHandle) -> Res<SidecarStatus> {
 }
 
 #[tauri::command]
+fn managed_backend_status(state: State<'_, AppState>) -> ManagedBackendStatus {
+    state.managed.status()
+}
+
+/// Async + `spawn_blocking`: DXGI enumeration loads the graphics stack.
+#[tauri::command]
+async fn managed_backend_detect(app: AppHandle) -> Res<Vec<HardwareSuggestion>> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppState>().managed.detect())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn managed_backend_install(
+    app: AppHandle,
+    options: ManagedInstallOptions,
+) -> Res<ManagedBackendStatus> {
+    log::info!("managed backend: install requested: {options:?}");
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppState>().managed.install(options))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Blocks until the setup has stopped and cleaned up.
+#[tauri::command]
+async fn managed_backend_cancel(app: AppHandle) -> Res<ManagedBackendStatus> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppState>().managed.cancel())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn network_get_proxy(state: State<'_, AppState>) -> ProxyState {
+    state.proxy.state()
+}
+
+/// Applies to uploads at once (failed ones are re-armed), the next managed setup and the next
+/// sidecar start.
+#[tauri::command]
+async fn network_set_proxy(app: AppHandle, settings: ProxySettings) -> Res<ProxyState> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let out = state.proxy.set(settings)?;
+        state.uploader.config_changed();
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Reach the package index, the Python download host and the model hub (short timeouts).
+#[tauri::command]
+async fn network_test_proxy(app: AppHandle, settings: Option<ProxySettings>) -> Res<ProxyTest> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<AppState>().proxy.clone();
+        let r = match settings {
+            Some(s) => store.resolve_with(&store.unmask(s)),
+            None => store.resolve(),
+        };
+        crate::proxy::test(&r)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn managed_backend_reveal(state: State<'_, AppState>, which: RevealTarget) -> Res<()> {
+    let dir = state.managed.reveal_dir(which)?;
+    open_folder(&dir)
+}
+
+/// Native folder dialog, modal to the main window; null when cancelled.
+#[tauri::command]
+async fn pick_folder(
+    app: AppHandle,
+    title: Option<String>,
+    default_path: Option<String>,
+) -> Res<Option<String>> {
+    #[cfg(windows)]
+    let owner = app
+        .get_webview_window("main")
+        .and_then(|w| w.hwnd().ok())
+        .map(|h| h.0 as isize);
+    #[cfg(not(windows))]
+    let owner = {
+        let _ = &app;
+        None
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::folder_picker::pick_folder(
+            owner,
+            title.as_deref(),
+            default_path
+                .as_deref()
+                .filter(|p| !p.trim().is_empty())
+                .map(std::path::Path::new),
+        )
+        .map(|p| p.map(|p| p.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn recorder_status(state: State<'_, AppState>) -> RecorderStatus {
     state.recorder.status(false)
 }
@@ -256,16 +369,22 @@ fn recording_reveal(state: State<'_, AppState>, id: String) -> Res<()> {
     reveal(&path)
 }
 
+/// `%WINDIR%\explorer.exe` by full path: a bare name would be searched in the (user-writable)
+/// app directory first.
 #[cfg(windows)]
-fn reveal(path: &std::path::Path) -> Res<()> {
-    use std::os::windows::process::CommandExt;
-    // Full path: a bare name would be searched in the (user-writable) app directory first.
+fn explorer() -> std::process::Command {
     let windir = std::env::var_os("WINDIR")
         .or_else(|| std::env::var_os("SystemRoot"))
         .map(PathBuf::from)
         .filter(|d| d.is_absolute())
         .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-    let mut cmd = std::process::Command::new(windir.join("explorer.exe"));
+    std::process::Command::new(windir.join("explorer.exe"))
+}
+
+#[cfg(windows)]
+fn reveal(path: &std::path::Path) -> Res<()> {
+    use std::os::windows::process::CommandExt;
+    let mut cmd = explorer();
     if path.exists() {
         // explorer parses its own command line: pass `/select,"<path>"` verbatim.
         cmd.raw_arg(format!("/select,\"{}\"", path.display()));
@@ -273,6 +392,22 @@ fn reveal(path: &std::path::Path) -> Res<()> {
         cmd.arg(dir);
     }
     cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Open a folder itself in Explorer.
+#[cfg(windows)]
+fn open_folder(dir: &std::path::Path) -> Res<()> {
+    use std::os::windows::process::CommandExt;
+    explorer()
+        .raw_arg(format!("\"{}\"", dir.display()))
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(windows))]
+fn open_folder(dir: &std::path::Path) -> Res<()> {
+    reveal(&dir.join("."))
 }
 
 #[cfg(not(windows))]
@@ -291,17 +426,77 @@ fn reveal(path: &std::path::Path) -> Res<()> {
 }
 
 // ---------------------------------------------------------------------------------------- setup
+/// The app's folders: portable (marker next to the exe) or the per-user OS folders.
+fn app_paths(app: &tauri::App) -> Result<AppPaths, Box<dyn std::error::Error>> {
+    let exe = std::env::current_exe()?;
+    let path = app.path();
+    let per_user = || -> Result<PerUserDirs, tauri::Error> {
+        let app_data = path.app_data_dir()?;
+        let app_local_data = path.app_local_data_dir()?;
+        Ok(PerUserDirs {
+            app_log: path
+                .app_log_dir()
+                .unwrap_or_else(|_| app_local_data.join("logs")),
+            documents: path.document_dir().ok(),
+            app_data,
+            app_local_data,
+        })
+    };
+    Ok(match crate::paths::portable_root(&exe) {
+        Some(root) => AppPaths::portable(&root),
+        None => AppPaths::per_user(&per_user()?),
+    })
+}
+
+/// The main window, created here (not from the config) so a portable build can keep the
+/// WebView2 profile (the SPA's local storage) inside its folder.
+fn create_main_window(
+    app: &tauri::App,
+    paths: &AppPaths,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == "main")
+        .cloned()
+        .ok_or("no main window in tauri.conf.json")?;
+    let mut b = tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?;
+    if let Some(dir) = paths.webview.as_ref() {
+        std::fs::create_dir_all(dir)?;
+        b = b.data_directory(dir.clone());
+    }
+    b.build()?;
+    Ok(())
+}
+
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
-    let data_dir = app.path().app_data_dir()?;
+    let paths = app_paths(app)?;
+    let data_dir = paths.app_data.clone();
     std::fs::create_dir_all(&data_dir)?;
-    let default_out = app
-        .path()
-        .document_dir()
-        .unwrap_or_else(|_| data_dir.clone())
-        .join("ASR Recordings");
+    create_main_window(app, &paths)?;
+    let default_out = paths.recordings.clone();
     let config = Arc::new(ConfigStore::open(&data_dir));
     let store = Arc::new(Store::open(&data_dir.join("recordings.json")));
+    // A moved portable folder (other drive letter, USB stick): stored paths follow it.
+    let moved_from = paths.portable_root.as_ref().and_then(|root| {
+        let old = config.settings().portable_root.filter(|o| o != root);
+        if let Some(old) = old.as_ref() {
+            log::info!(
+                "portable folder moved from {} to {}",
+                old.display(),
+                root.display()
+            );
+            config.update_settings(|s| s.rebase(old, root));
+            store.update_all(|e| {
+                e.recording.path = crate::paths::rebase_str(&e.recording.path, old, root);
+            });
+        }
+        config.update_settings(|s| s.portable_root = Some(root.clone()));
+        old
+    });
     let ev = handle.clone();
     let uploader = Uploader::new(
         store,
@@ -310,10 +505,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             let _ = ev.emit(EV_RECORDINGS, r);
         }),
     );
-    let log_dir = app
-        .path()
-        .app_log_dir()
-        .unwrap_or_else(|_| data_dir.join("logs"));
+    let log_dir = paths.logs.clone();
     let ev = handle.clone();
     let sidecar = Sidecar::new(
         &data_dir,
@@ -322,7 +514,72 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             let _ = ev.emit(EV_SIDECAR, st);
         }),
     );
-    if sidecar.config().enabled {
+    // One proxy setting for uploads, the sidecar and the managed setup (read at each use).
+    let proxy = ProxyStore::open(&data_dir);
+    let proxy_fn: crate::proxy::ProxyFn = {
+        let p = proxy.clone();
+        Arc::new(move || p.resolve())
+    };
+    {
+        let e = proxy.state().effective;
+        log::info!(
+            "proxy: {:?} {} {:?}",
+            e.source,
+            e.url.as_deref().unwrap_or("-"),
+            e.warnings
+        );
+    }
+    uploader.set_proxy(proxy_fn.clone());
+    sidecar.set_proxy(proxy_fn.clone());
+    // "Desktop + backend" edition: the backend source and uv ship as resources.
+    let bundle = app
+        .path()
+        .resource_dir()
+        .ok()
+        .and_then(|d| Bundle::detect(&crate::paths::strip_verbatim(&d)));
+    log::info!(
+        "edition: {}; portable: {}",
+        if bundle.is_some() {
+            "bundled"
+        } else {
+            "external"
+        },
+        paths.is_portable()
+    );
+    let (ev, ev2) = (handle.clone(), handle.clone());
+    let last_phase = Mutex::new(None::<ManagedPhase>);
+    let managed = Managed::new(
+        ManagedPaths {
+            app_data: data_dir.clone(),
+            logs: log_dir.clone(),
+            root: paths.managed_root.clone(),
+            default_data: paths.managed_data.clone(),
+            default_models: paths.models.clone(),
+            portable: paths.is_portable(),
+        },
+        bundle,
+        sidecar.clone(),
+        Arc::new(move |p: &ManagedProgress| {
+            let mut last = crate::util::lock(&last_phase);
+            if *last != Some(p.phase) {
+                log::info!("managed backend: {:?}: {}", p.phase, p.message);
+                *last = Some(p.phase);
+            }
+            let _ = ev.emit(EV_MANAGED_PROGRESS, p);
+        }),
+        Arc::new(move |st: &ManagedBackendStatus| {
+            log::info!("managed backend status: {:?} {:?}", st.state, st.error);
+            let _ = ev2.emit(EV_MANAGED_STATUS, st);
+        }),
+    );
+    managed.set_proxy(proxy_fn);
+    if let (Some(old), Some(root)) = (moved_from.as_ref(), paths.portable_root.as_ref()) {
+        sidecar.rebase(old, root);
+        managed.rebase(old, root);
+    }
+    // The managed backend starts its sidecar itself (after a re-sync when the bundled backend
+    // changed); any other configured sidecar starts here.
+    if !managed.startup() && sidecar.config().enabled {
         let sc = sidecar.clone();
         std::thread::spawn(move || {
             let st = sc.start();
@@ -334,6 +591,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         config: config.clone(),
         uploader: uploader.clone(),
         sidecar,
+        managed: managed.clone(),
+        proxy,
         default_out: default_out.clone(),
         tray_toggle: Mutex::new(None),
     });
@@ -495,6 +754,44 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Test hook: run the managed backend setup for this hardware right after start, and
+    // optionally quit N seconds after it finished (automated end-to-end check).
+    if let Some(hw) = std::env::var("ASR_RECORDER_AUTO_MANAGED_INSTALL")
+        .ok()
+        .and_then(|v| serde_json::from_value::<ManagedHardware>(v.trim().into()).ok())
+    {
+        let managed = managed.clone();
+        let handle = handle.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(2));
+            let opts = ManagedInstallOptions {
+                hardware: hw,
+                data_dir: None,
+                models_dir: None,
+            };
+            match managed.install(opts) {
+                Ok(_) => log::info!("auto managed install started: {}", hw.as_str()),
+                Err(e) => return log::error!("auto managed install: {e}"),
+            }
+            while managed.status().state == crate::ipc::ManagedState::Installing {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            let st = managed.status();
+            log::info!(
+                "auto managed install finished: {}",
+                serde_json::to_string(&st).unwrap_or_default()
+            );
+            if let Some(secs) = std::env::var("ASR_RECORDER_AUTO_EXIT_AFTER_MANAGED")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+            {
+                std::thread::sleep(Duration::from_secs(secs));
+                log::info!("ASR_RECORDER_AUTO_EXIT_AFTER_MANAGED reached");
+                quit(&handle);
+            }
+        });
+    }
+
     // Test hook: exit after N seconds (used by the automated launch check).
     if let Some(secs) = std::env::var("ASR_RECORDER_AUTO_EXIT")
         .ok()
@@ -512,15 +809,36 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub fn run() {
+    use tauri_plugin_log::{Target, TargetKind};
+    // Portable mode: the log goes to <root>\data\logs instead of %LOCALAPPDATA%.
+    let portable = std::env::current_exe()
+        .ok()
+        .and_then(|exe| crate::paths::portable_root(&exe));
+    let mut log = tauri_plugin_log::Builder::new().level(log::LevelFilter::Info);
+    if let Some(root) = portable.as_ref() {
+        log = log.clear_targets().targets([
+            Target::new(TargetKind::Stdout),
+            Target::new(TargetKind::Folder {
+                path: AppPaths::portable(root).logs,
+                file_name: None,
+            }),
+        ]);
+    }
+    let mut context = tauri::generate_context!();
+    if let Some(root) = portable.as_ref() {
+        // Each portable folder is its own app instance (single-instance lock, window class).
+        let id = format!(
+            "{}.portable-{}",
+            context.config().identifier,
+            crate::paths::instance_key(root)
+        );
+        context.config_mut().identifier = id;
+    }
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main(app)
         }))
-        .plugin(
-            tauri_plugin_log::Builder::new()
-                .level(log::LevelFilter::Info)
-                .build(),
-        )
+        .plugin(log.build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -557,8 +875,17 @@ pub fn run() {
             sidecar_status,
             sidecar_start,
             sidecar_stop,
+            managed_backend_status,
+            managed_backend_detect,
+            managed_backend_install,
+            managed_backend_cancel,
+            managed_backend_reveal,
+            pick_folder,
+            network_get_proxy,
+            network_set_proxy,
+            network_test_proxy,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building the Tauri application");
     app.run(|handle, event| {
         if let RunEvent::ExitRequested { api, code, .. } = &event {

@@ -14,14 +14,26 @@ library (see the status table at the end). The IPC contract with the SPA is froz
 desktop/
   package.json              tauri CLI (pnpm tauri dev / build)
   scripts/make_icons.py     regenerates src-tauri/icons (stdlib only)
+  scripts/stage-backend.py  stages the bundled backend + pinned uv.exe into build/managed-backend
+  scripts/package-portable.ps1  release zips (both editions), optional NSIS installers
+  build/                    git-ignored: staged resources, downloads, dist/ (release zips)
   src-tauri/
     Cargo.toml              feature `app` (default) = Tauri shell; without it a plain library
     tauri.conf.json         frontendDist ../../frontend/dist, devUrl http://localhost:5173
+    tauri.bundled.conf.json  "desktop + backend" installer: managed-backend/ resources + NSIS hooks
+    nsis/                   uninstall hooks of that installer
     capabilities/           main window: event listen / unlisten only
     src/
       ipc.rs                contract payload types (serde camelCase)
       config.rs             BackendConfig store (key in its own file, masked as "***")
       sidecar.rs            optional local backend: spawn, health check, logs, stop (tree)
+      paths.rs              where state lives: portable folder or per-user OS folders
+      folder_picker.rs      native folder dialog (pick_folder; Windows IFileOpenDialog)
+      managed/              "desktop + backend" edition: managed Python environment
+        mod.rs              install / switch / cancel worker, startup re-sync, sidecar wiring
+        env.rs              resources, slot layout, uv / backend command lines and env vars
+        hardware.rs         DXGI adapter list -> cpu / cuda / rocm suggestions
+        progress.rs         uv output -> ManagedProgress (phase, percent, redacted line)
       recorder/
         capture.rs          CaptureSource trait, monotonic clock, devices, processes
         wasapi_capture.rs   WASAPI loopback / capture / process loopback, QPC (Windows)
@@ -100,6 +112,187 @@ Test hooks (environment variables, for automated checks only):
 | `ASR_RECORDER_AUTO_RECORD_PID=<pid>` | auto recording captures only this process tree |
 | `ASR_RECORDER_AUTO_TOGGLE=<s>` | press the tray / hotkey toggle, and again `s` seconds later |
 | `ASR_RECORDER_TEST_MIC_SKEW_PPM=<n>` | pretend the mic clock is off by `n` ppm (drift-controller test) |
+| `ASR_RECORDER_AUTO_MANAGED_INSTALL=cpu\|cuda\|rocm` | run `managed_backend_install` 2 s after start (bundled edition) |
+| `ASR_RECORDER_AUTO_EXIT_AFTER_MANAGED=<s>` | with the above: quit `s` seconds after the setup finished |
+
+## Editions, portable releases and the managed backend
+
+### Two editions, one exe
+
+| Edition | Contents | `managed_backend_status().edition` |
+|---|---|---|
+| Recorder | `asr-recorder.exe` (+ `WebView2Loader.dll`) | `external`: connects to a backend you run elsewhere |
+| Desktop + backend | the same exe + `managed-backend\` (backend source, `uv.exe`, `VERSION`) | `bundled`: sets up and runs a local backend itself |
+
+The edition is detected at runtime: `managed-backend\` must hold `uv.exe`, `source\pyproject.toml`
+and `source\uv.lock` in Tauri's resource dir, which on Windows is the exe's folder (also for an
+unpacked, not installed exe). The resource is staged by `scripts/stage-backend.py`: `backend/asr`,
+`backend/server`, `pyproject.toml`, `uv.lock`, `.python-version` (no tests, data, models, `.venv`,
+caches) into `build/managed-backend/source/`, plus `uv.exe` of **uv 0.13.1**
+(`x86_64-pc-windows-msvc`, from the astral-sh/uv GitHub release; SHA-256
+`3b2661a4…80a672`, checked against both the value pinned in the script and the release's
+`.sha256` file) and `VERSION` = `<project version>+<sha256 of the staged source, 12 hex>`.
+The repository has no licence file; `README.txt` in the resource names uv's licence (MIT / Apache-2.0).
+
+### Releases are portable zips
+
+```powershell
+# Windows: rustup/cargo, pnpm and Python 3.11+ on PATH (proxy variables are honoured)
+powershell -ExecutionPolicy Bypass -File desktop\scripts\package-portable.ps1   # [-SkipFrontend] [-SkipBuild] [-Installer]
+```
+
+builds the SPA, the release exe (`cargo build --release --features tauri/custom-protocol`),
+stages the backend and writes to `desktop\build\dist\`:
+
+| File | Size (0.1.0) | Contents |
+|---|---|---|
+| `ASR-Recorder-<v>-win-x64-portable.zip` | 4.3 MB | exe, `WebView2Loader.dll`, `portable`, `README.txt` |
+| `ASR-Recorder-<v>-win-x64-with-backend-portable.zip` | 18.8 MB | the same + `managed-backend\` (33 MB unpacked, 32 MB of it uv.exe) |
+
+Each zip holds one top-level folder. `-Installer` additionally builds the two NSIS installers
+(`pnpm tauri build`, and `pnpm tauri build --config src-tauri/tauri.bundled.conf.json` renamed to
+`…_x64_with-backend-setup.exe`); releases do not use them.
+
+**WebView2**: Windows 11 includes it. Windows 10 without it needs the Evergreen Runtime from
+<https://developer.microsoft.com/microsoft-edge/webview2/> (a zip cannot run the bootstrapper);
+the zip's `README.txt` says so.
+
+### Portable mode
+
+A file `portable` (or `portable.txt`) next to the exe puts **all** state under that folder
+(`src/paths.rs`, one resolution used by the config store, upload queue, sidecar, managed backend,
+log plugin and WebView):
+
+```
+<root>\asr-recorder.exe, WebView2Loader.dll, portable, README.txt, managed-backend\
+<root>\data\app\       backend.json, api-key, settings.json, recordings.json, sidecar.json, managed.json
+<root>\data\logs\      ASR Recorder.log, sidecar.log, managed-backend.log
+<root>\data\webview\   WebView2 profile (the SPA's local storage: backend profiles, UI settings)
+<root>\data\asr\       ASR_DATA_DIR of the managed backend (asr.db, uploads\, config.toml)
+<root>\recordings\      default recordings folder
+<root>\models\          ASR_MODEL_CACHE_DIR (+ .cache\ for the hub libraries / MIOpen); can be moved in the wizard
+<root>\backend\         managed environment: env-1\ / env-2\ (src\ + .venv\), uv-cache\, python\
+```
+
+Without the marker the per-user folders are used as before (`%APPDATA%\dev.asr.recorder`,
+`%LOCALAPPDATA%\dev.asr.recorder\logs`, `Documents\ASR Recordings`; managed backend in
+`%LOCALAPPDATA%\dev.asr.recorder\{backend,data,models}`).
+
+* Each portable folder is its own app instance: the identifier becomes
+  `dev.asr.recorder.portable-<hash of the folder>` (single-instance lock, window class), so a
+  portable copy runs next to an installed one. Both register Ctrl+Alt+R; the second one logs that
+  the shortcut is taken.
+* Moving the folder (another drive letter, a USB stick) is supported: the last root is stored in
+  `settings.json`; at the next start paths under the old root (recordings index, output folders,
+  sidecar command / cwd, chosen data / models folders) are rebased, and the managed environment
+  (venvs hold absolute paths) is rebuilt in the other slot from the local uv cache.
+* Removing the app = quit it and delete the folder. **That also deletes the recordings, the
+  backend database / uploads and the models stored inside it** (the wizard can put models
+  elsewhere; recordings can go to any folder). The zip's `README.txt` warns about this.
+
+### Managed backend (desktop + backend edition)
+
+First run (the SPA's setup wizard calls the commands of `docs/desktop-ipc.md`):
+
+1. `managed_backend_detect`: display adapters via DXGI. NVIDIA → `cuda` (CUDA 12.6 build; RTX 50 /
+   Blackwell is reported unavailable: no sm_100/120 kernels). AMD gfx1151 (Strix Halo, Radeon
+   8060S / 8050S / 8040S, PCI 1002:1586) → `rocm`; other AMD GPUs are unavailable with the reason
+   (the Windows ROCm build has gfx1151 kernels only; e.g. Radeon 890M is gfx1150). Else `cpu`.
+   One option is `recommended` (CUDA, then ROCm, then CPU); `downloadBytes` ≈ 1 / 2.5 / 5 GB.
+2. `managed_backend_install { hardware, dataDir?, modelsDir? }` runs in a background thread
+   (no console windows, proxy variables inherited, every step logged to `managed-backend.log`):
+   * `prepare`: folders; the target slot is wiped and gets a copy of the bundled source;
+   * `python`: `uv python install 3.12 --no-bin --no-registry` into `<backend>\python`
+     (`UV_PYTHON_INSTALL_DIR`; nothing in `~\.local\bin` or the registry);
+   * `packages`: `uv sync --frozen --no-dev --extra <hw> --extra local --managed-python` with
+     `UV_PROJECT_ENVIRONMENT=<slot>\.venv`, `UV_CACHE_DIR=<backend>\uv-cache`;
+   * `finalize`: `<slot>\.venv\Scripts\python.exe` imports torch / transformers / funasr /
+     `server.cli`; for `cuda` / `rocm` it requires the matching torch build,
+     `torch.cuda.is_available()` and a small kernel on the GPU, else the setup **fails** with a
+     clear message (no silent CPU fallback).
+   Progress: `managed-backend://progress` (phase, bilingual message, percent weighted by
+   download sizes and rounded to two decimals, redacted uv line: credentials / query strings
+   stripped).
+3. On success the slot becomes active, the app writes the sidecar config (enabled,
+   `<slot>\.venv\Scripts\asr.exe serve --host 127.0.0.1 --port <free port>`, cwd = backend
+   root) and starts it, then reports `installed`. Inside Rust (not in the public `SidecarConfig`)
+   the managed sidecar gets `ASR_DATA_DIR`, `ASR_UPLOAD_ROOTS=<data>\uploads`,
+   `ASR_MODEL_CACHE_DIR`, `ASR_DEVICE=<hw>`, `ASR_PROVIDER_DEFAULT=local`, `ASR_API_KEY=` (open
+   loopback mode), `MODELSCOPE_CACHE` / `HF_HOME` / `MIOPEN_*` under `<models>\.cache`,
+   `PYTHONUTF8=1`, plus `ASR_CORS_ORIGINS` as for any sidecar.
+4. Models are then downloaded from the SPA (Settings → local models).
+
+Two slots make re-installs safe: switching hardware (or a re-sync) builds the inactive slot while
+the current backend keeps running (`state: installing`), stops it only to swap, then deletes the
+old slot. A cancelled switch returns to `installed` (`error: null`), a failed one to `installed`
+with `error` set; the partial slot is removed either way, data and models are never touched.
+A cancelled / failed first install ends `not_installed` / `failed`.
+
+At app start (bundled edition, installed): if the bundled `VERSION` differs from the installed one
+(app update), the root moved, or the active venv is incomplete, the environment is re-synced
+(`installing`, fast from the cache when only our source changed) before the sidecar starts;
+otherwise the managed sidecar starts directly (on its stored port, or a new free one if that is
+taken). A sidecar the user pointed elsewhere (`sidecar_set_config`) is left alone.
+
+`managed_backend_reveal { which: data | models | backend }` opens the folder in Explorer
+(`%WINDIR%\explorer.exe` by full path); `pick_folder { title?, defaultPath? }` shows the shell's
+folder dialog (IFileOpenDialog, modal to the main window) and returns the path or null — no
+dialog / fs plugin is exposed to the WebView.
+
+Disk usage: ≈1.5 GB for CPU (venv 1.3 GB, uv-managed Python 68 MB, cache ≈0.1 GB beyond the
+hard-linked wheels), ROCm ≈5 GB more; models come on top (several GB). uv hard-links wheels from
+its cache into the venvs (same volume); during a switch two environments exist until the swap.
+
+### End-to-end check (2026-11-02, this PC: Ryzen AI MAX+ 392 / Radeon 8060S, Windows 11)
+
+Portable "with backend" zip unpacked to `D:\tmp\asr-bundled\portable-test\ASR 录音 测试\`
+(spaces + CJK), launched with `ASR_RECORDER_AUTO_MANAGED_INSTALL=cpu`:
+
+| Step | Result |
+|---|---|
+| detect | rocm recommended (`AMD Radeon(TM) 8060S Graphics (ROCm, gfx1151)`, DXGI 1002:1586), cuda unavailable |
+| cpu setup | python 21 s, packages 6 min 07 s (109 packages, downloads through the proxy), verify 14 s (torch 2.14.1+cpu); 410 s in total |
+| sidecar | `env-1\.venv\Scripts\asr.exe serve --host 127.0.0.1 --port 58422`; `/api/health` ok, `/api/system/hardware` default cpu; `managed_backend_status` = installed, `envSizeBytes` 1.35 GB |
+| relaunch | managed sidecar running 2 s after start, no uv call |
+| folder moved (`ASR moved 移动`) | paths rebased, environment rebuilt in `env-2` from the cache in 31 s, old slot removed, same port |
+| switch to rocm | old CPU backend kept answering during the setup (`installing`); the run was cancelled after 19 min while `rocm-sdk-core` was still downloading → back to `installed` (cpu), `error: null`, partial `env-1` removed |
+| exit | no process left from the folder (job object) |
+| per-user folders | nothing new or changed under `%APPDATA%` / `%LOCALAPPDATA%\dev.asr.recorder*` from these runs |
+
+Not verified here: a completed ROCm (or CUDA) setup and its GPU check, the NSIS installers at
+run time (both build; the uninstall hook is untested), macOS / Linux shells.
+
+### Proxy (`src/proxy.rs`)
+
+One setting (`proxy.json` in the app data dir, portable-aware): `system` (default), `none` or
+`manual` (`http://`, `https://`, `socks5://`, credentials allowed) plus a no-proxy list (default
+`localhost,127.0.0.1,::1,10.*,172.16.*-172.31.*,192.168.*,*.local`).
+
+* `system`: an `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` variable of the app process wins
+  (`source: env`, its `NO_PROXY` is added); else the Windows settings
+  (`HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`: `ProxyEnable`,
+  `ProxyServer` — `host:port` or `http=…;https=…;socks=…`, https first — and `ProxyOverride`,
+  `<local>` = names without a dot). A PAC script (`AutoConfigURL`) is reported in `pacUrl` with
+  a warning (not supported: choose manual).
+* The effective proxy is re-read at each use and goes to `uv` (every managed setup step) and to
+  every sidecar start as `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` (+ lowercase; removed for `none`)
+  and `NO_PROXY` in the conventional form (`10.0.0.0/8`, `172.16.0.0/12`, `.local`, …); the
+  uploader uses it for non-loopback backends with the no-proxy list (wildcards, ranges, CIDR,
+  `<local>`), loopback always direct; SOCKS is left to uv / Python (the uploader goes direct).
+* Credentials: stored in `proxy.json` (0600 on Unix), returned and logged only as
+  `user:***@host`; sending that masked URL back keeps the stored password (also for
+  `network_test_proxy` drafts), any other URL replaces it.
+* `network_test_proxy` fetches PyPI, GitHub (python-build-standalone) and Hugging Face through the
+  setting (5 s connect / 10 s total, in parallel) and reports each with its latency.
+* Verified on the dev PC (registry: `127.0.0.1:1081` with a LAN override list, no env variables in
+  the app): `system` → `http://127.0.0.1:1081`, all three hosts reachable through it; a manual URL
+  with credentials came back masked and the masked draft tested with the stored password.
+
+**Installed (NSIS) edition, uninstall**: the hook `nsis/managed-backend-hooks.nsh` deletes
+`%LOCALAPPDATA%\dev.asr.recorder\backend` (venvs, uv cache, Python) but never `data\` or
+`models\`; with "delete app data" ticked, Tauri removes the whole `%LOCALAPPDATA%` folder, so the
+hook moves `data\` and `models\` aside first and back afterwards. Updates (`/UPDATE`) keep
+everything; the next start re-syncs.
 
 ## How recording works
 
@@ -248,6 +441,8 @@ redacted (no query strings / keys). Recordings are never deleted.
 * The WebView may only use the event API (`capabilities/default.json`: `core:event:allow-listen`
   / `allow-unlisten`; the app's own commands need no permission). No window / tray / menu / path
   / shell / fs APIs are exposed to the SPA.
+* `managed_backend_install` runs only the bundled `uv.exe` and the venv it created; the WebView
+  chooses the hardware and folders, never a program.
 * `sidecar_set_config` + `sidecar_start` let the WebView choose a program the app runs: the one
   IPC path to code execution. It is limited by the CSP (only the bundled scripts run in the
   WebView), by accepting only an absolute path to an existing file, and by logging every

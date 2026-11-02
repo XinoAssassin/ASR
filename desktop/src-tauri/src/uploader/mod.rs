@@ -26,6 +26,7 @@ pub struct Uploader {
     config: Arc<ConfigStore>,
     wake: (Mutex<bool>, Condvar),
     on_change: OnChange,
+    proxy: Mutex<Option<crate::proxy::ProxyFn>>,
 }
 
 fn chrono_after(d: Duration) -> DateTime<Utc> {
@@ -93,7 +94,13 @@ impl Uploader {
             config,
             wake: (Mutex::new(false), Condvar::new()),
             on_change,
+            proxy: Mutex::new(None),
         })
+    }
+
+    /// The app's proxy setting for uploads (read at each request).
+    pub fn set_proxy(&self, p: crate::proxy::ProxyFn) {
+        *crate::util::lock(&self.proxy) = Some(p);
     }
 
     pub fn store(&self) -> &Store {
@@ -238,7 +245,8 @@ impl Uploader {
     pub fn step(&self, id: &str) {
         let Some(e) = self.store.get(id) else { return };
         let cfg = self.config.get_with_key();
-        let client = match Client::new(&cfg) {
+        let proxy = crate::util::lock(&self.proxy).clone().map(|p| p());
+        let client = match Client::new(&cfg, proxy.as_ref()) {
             Ok(c) => c,
             Err(err) => {
                 self.fail(id, Stage::Upload, ApiError::Transient(err));

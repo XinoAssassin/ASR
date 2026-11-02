@@ -159,6 +159,158 @@ impl SidecarStatus {
     }
 }
 
+/// Torch flavour of the managed backend ("desktop + backend" edition).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum ManagedHardware {
+    Cpu,
+    Cuda,
+    Rocm,
+}
+
+impl ManagedHardware {
+    pub const ALL: [ManagedHardware; 3] = [Self::Cpu, Self::Cuda, Self::Rocm];
+
+    /// The `uv sync --extra` name and the backend's `ASR_DEVICE` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Cuda => "cuda",
+            Self::Rocm => "rocm",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Edition {
+    Bundled,
+    External,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedState {
+    NotInstalled,
+    Installing,
+    Installed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedBackendStatus {
+    pub edition: Edition,
+    pub state: ManagedState,
+    pub hardware: Option<ManagedHardware>,
+    pub backend_version: Option<String>,
+    pub data_dir: Option<String>,
+    pub models_dir: Option<String>,
+    pub env_size_bytes: Option<u64>,
+    /// Where dataDir / modelsDir go when not chosen (portable: inside the app folder).
+    pub default_data_dir: Option<String>,
+    pub default_models_dir: Option<String>,
+    /// App state lives next to the exe (portable marker present).
+    pub portable: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HardwareSuggestion {
+    pub id: ManagedHardware,
+    pub available: bool,
+    pub recommended: bool,
+    pub label: String,
+    /// Why it is not available (None when it is).
+    pub detail: Option<String>,
+    /// Approximate one-time download for this choice.
+    pub download_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedInstallOptions {
+    pub hardware: ManagedHardware,
+    #[serde(default)]
+    pub data_dir: Option<String>,
+    #[serde(default)]
+    pub models_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum ManagedPhase {
+    Prepare,
+    Python,
+    Packages,
+    Finalize,
+    Done,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedProgress {
+    pub phase: ManagedPhase,
+    pub message: String,
+    pub percent: Option<f64>,
+    pub log_line: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyMode {
+    System,
+    None,
+    Manual,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxySettings {
+    pub mode: ProxyMode,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub no_proxy: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxySource {
+    System,
+    Env,
+    Manual,
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EffectiveProxy {
+    pub source: ProxySource,
+    /// Credentials masked.
+    pub url: Option<String>,
+    pub no_proxy: String,
+    pub pac_url: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+/// `network_get_proxy` / `network_set_proxy` result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyState {
+    pub settings: ProxySettings,
+    pub effective: EffectiveProxy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyTest {
+    pub ok: bool,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum UploadState {
@@ -279,6 +431,88 @@ mod tests {
         assert_eq!(u["state"], "transcribing");
         assert!(u.get("transcriptId").is_some());
         assert!(u.get("nextRetryAt").is_some());
+    }
+
+    #[test]
+    fn managed_payloads_match_the_contract() {
+        let st = ManagedBackendStatus {
+            edition: Edition::Bundled,
+            state: ManagedState::NotInstalled,
+            hardware: Some(ManagedHardware::Rocm),
+            backend_version: None,
+            data_dir: None,
+            models_dir: None,
+            env_size_bytes: Some(1),
+            default_data_dir: Some("d".into()),
+            default_models_dir: Some("m".into()),
+            portable: true,
+            error: None,
+        };
+        let v = serde_json::to_value(&st).unwrap();
+        assert_eq!(v["edition"], "bundled");
+        assert_eq!(v["state"], "not_installed");
+        assert_eq!(v["hardware"], "rocm");
+        for k in [
+            "backendVersion",
+            "dataDir",
+            "modelsDir",
+            "envSizeBytes",
+            "defaultDataDir",
+            "defaultModelsDir",
+            "error",
+        ] {
+            assert!(v.get(k).is_some(), "{k}");
+        }
+        let o: ManagedInstallOptions =
+            serde_json::from_value(serde_json::json!({"hardware": "cuda"})).unwrap();
+        assert_eq!(o.hardware, ManagedHardware::Cuda);
+        assert_eq!(o.data_dir, None);
+        let p = serde_json::to_value(ManagedProgress {
+            phase: ManagedPhase::Packages,
+            message: "m".into(),
+            percent: None,
+            log_line: Some("l".into()),
+        })
+        .unwrap();
+        assert_eq!(p["phase"], "packages");
+        assert_eq!(p["logLine"], "l");
+        assert!(p["percent"].is_null());
+        let h = serde_json::to_value(HardwareSuggestion {
+            id: ManagedHardware::Cpu,
+            available: true,
+            recommended: true,
+            label: "CPU".into(),
+            detail: None,
+            download_bytes: Some(1_000_000_000),
+        })
+        .unwrap();
+        assert_eq!(h["id"], "cpu");
+        assert_eq!(h["downloadBytes"], 1_000_000_000u64);
+        assert_eq!(v["portable"], true);
+        assert!(h.get("detail").is_some());
+    }
+
+    #[test]
+    fn proxy_payloads_match_the_contract() {
+        let s: ProxySettings = serde_json::from_value(serde_json::json!({
+            "mode": "manual", "url": "http://h:1", "noProxy": "localhost"
+        }))
+        .unwrap();
+        assert_eq!(s.mode, ProxyMode::Manual);
+        let v = serde_json::to_value(ProxyState {
+            settings: s,
+            effective: EffectiveProxy {
+                source: ProxySource::Env,
+                url: None,
+                no_proxy: String::new(),
+                pac_url: None,
+                warnings: vec![],
+            },
+        })
+        .unwrap();
+        assert_eq!(v["settings"]["noProxy"], "localhost");
+        assert_eq!(v["effective"]["source"], "env");
+        assert!(v["effective"].get("pacUrl").is_some());
     }
 
     #[test]
