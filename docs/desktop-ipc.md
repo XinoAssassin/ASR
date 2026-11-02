@@ -92,6 +92,39 @@ type BackendConfig = {
   termSetIds: string[]         // body.term_set_ids for POST /api/jobs
   extraTerms: object[]         // body.extra_terms (Term objects)
 }
+type ManagedHardware = 'cpu' | 'cuda' | 'rocm'
+
+type ManagedBackendStatus = {          // "desktop + backend" edition only
+  edition: 'bundled' | 'external'      // external = plain recorder build (no bundled backend)
+  state: 'not_installed' | 'installing' | 'installed' | 'failed'
+  hardware: ManagedHardware | null     // what the environment was built for
+  backendVersion: string | null        // bundled backend source version / hash
+  dataDir: string | null               // ASR_DATA_DIR of the managed backend (asr.db, uploads)
+  modelsDir: string | null             // ASR_MODEL_CACHE_DIR (large; may live on another drive)
+  envSizeBytes: number | null          // Python environment size on disk
+  error: string | null                 // last failure, redacted
+}
+
+type HardwareSuggestion = {
+  id: ManagedHardware
+  available: boolean                   // a matching GPU / build exists for this PC
+  recommended: boolean
+  label: string                        // e.g. "AMD Radeon 8060S (ROCm, gfx1151)"
+  detail: string | null                // why not available / download size hint
+}
+
+type ManagedInstallOptions = {
+  hardware: ManagedHardware
+  dataDir?: string | null              // null = default under %LOCALAPPDATA%
+  modelsDir?: string | null
+}
+
+type ManagedProgress = {
+  phase: 'prepare' | 'python' | 'packages' | 'finalize' | 'done' | 'failed'
+  message: string                      // bilingual short status
+  percent: number | null               // overall 0..100 when known
+  logLine: string | null               // raw installer output line (redacted), for a log view
+}
 ```
 
 ## Commands (`invoke(name, args)`)
@@ -114,6 +147,10 @@ type BackendConfig = {
 | `sidecar_status` | — | `SidecarStatus` | M10 |
 | `sidecar_start` | — | `SidecarStatus` | M10; resolves once healthy or failed (timeout 120 s) |
 | `sidecar_stop` | — | `SidecarStatus` | M10 |
+| `managed_backend_status` | — | `ManagedBackendStatus` | Bundled edition; `edition: 'external'` and `state: 'not_installed'` in the plain build |
+| `managed_backend_detect` | — | `HardwareSuggestion[]` | cpu / cuda / rocm with availability and one `recommended` |
+| `managed_backend_install` | `{ options: ManagedInstallOptions }` | `ManagedBackendStatus` | Starts (or re-runs, e.g. to switch hardware) the environment setup in the background; progress via `managed-backend://progress`; error if already installing |
+| `managed_backend_cancel` | — | `ManagedBackendStatus` | Stops a running setup (partial environment is removed; data and models are kept) |
 
 ## Events (`listen(name)`)
 
@@ -122,6 +159,8 @@ type BackendConfig = {
 | `recorder://status` | `RecorderStatus` | ~10 Hz while recording, once on each state change |
 | `recordings://changed` | `Recording` | On every upload state change |
 | `sidecar://status` | `SidecarStatus` | M10: on every state change |
+| `managed-backend://progress` | `ManagedProgress` | During setup; a final `done` / `failed` |
+| `managed-backend://status` | `ManagedBackendStatus` | On every state change |
 
 ## Recording file
 
@@ -166,3 +205,23 @@ or a config change. Warning strings are bilingual and shown verbatim.
   requests and need no CORS.
 - With `ASR_API_KEY` empty the backend accepts only loopback Host names, so a remote backend needs
   a key.
+
+## "Desktop + backend" edition
+
+A second installer ships the same app plus the backend source (`backend/asr`, `backend/server`,
+`pyproject.toml`, `uv.lock`) and `uv.exe` as Tauri resources. The Python environment is created
+on first run (D75):
+
+- `managed_backend_install` runs `uv` with the locked dependencies (`--frozen --no-dev`, extras
+  `<hardware>` + `local`) into a per-user environment under `%LOCALAPPDATA%`, using a uv-managed
+  Python 3.12. Needs internet once (≈1 GB CPU, ≈2.5 GB CUDA, ≈5 GB ROCm).
+- On success the app writes the sidecar config itself (enabled, `asr serve` on 127.0.0.1, a free
+  port) and starts it; the SPA's 本机 profile follows the sidecar URL. The managed backend listens
+  on loopback only, with no API key (open mode).
+- The sidecar gets `ASR_DATA_DIR`, `ASR_UPLOAD_ROOTS`, `ASR_MODEL_CACHE_DIR`, `ASR_DEVICE` and
+  `ASR_PROVIDER_DEFAULT=local` from the managed install, plus the CORS origins.
+- App updates that change the bundled backend re-sync the environment on the next start (fast when
+  only our source changed). Switching hardware re-runs the install with another extra.
+- Uninstalling the app removes the Python environment but never the data or models folders.
+- Models are downloaded afterwards from the SPA (Settings → local models), as for any backend.
+
