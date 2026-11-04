@@ -16,6 +16,7 @@ avoided on purpose.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
@@ -34,6 +35,11 @@ from av.audio.resampler import AudioResampler
 from asr.audio.types import ProbeInfo
 
 TARGET_RATE = 16_000
+# A recording with a few damaged frames (e.g. a phone app that wrote a bad MP3 frame) is decoded
+# with silence in their place; more than this share of damaged packets means the file is broken.
+MAX_BAD_PACKET_SHARE = 0.02
+
+log = logging.getLogger(__name__)
 
 DecoderBackend = Literal["pyav", "imageio"]
 
@@ -282,28 +288,64 @@ def _iter_pyav(
         resampler: AudioResampler | None = None
         layout = None
         current = None
+        packets = bad = 0
         try:
-            for frame in container.decode(stream):
-                key = (frame.format.name, frame.layout.name, frame.sample_rate)
-                if resampler is None:
-                    layout = frame.layout.name
-                elif key != current:
-                    yield from (f.to_ndarray() for f in resampler.resample(None))
-                    resampler = None
-                if resampler is None:
-                    resampler = AudioResampler(format="fltp", layout=layout, rate=rate)
-                    current = key
-                out = resampler.resample(frame)
-                for f in out:
-                    block = f.to_ndarray()
-                    produced += block.shape[1]
-                    yield block
+            for packet in container.demux(stream):
+                packets += 1
+                try:
+                    frames = packet.decode()
+                except av.error.InvalidDataError as exc:
+                    # A damaged packet: keep going like the ffmpeg CLI does, with silence of the
+                    # packet's length so later timestamps stay right.
+                    bad += 1
+                    if bad == 1:
+                        log.warning("%s: skipping damaged audio data (%s)", path.name, exc)
+                    missing = _packet_samples(packet, stream, rate)
+                    if missing:
+                        channels = (
+                            len(av.AudioLayout(layout).channels) if layout else stream.channels
+                        )
+                        produced += missing
+                        yield np.zeros((max(1, channels), missing), dtype=np.float32)
+                    continue
+                for frame in frames:
+                    key = (frame.format.name, frame.layout.name, frame.sample_rate)
+                    if resampler is None:
+                        layout = frame.layout.name
+                    elif key != current:
+                        yield from (f.to_ndarray() for f in resampler.resample(None))
+                        resampler = None
+                    if resampler is None:
+                        resampler = AudioResampler(format="fltp", layout=layout, rate=rate)
+                        current = key
+                    for f in resampler.resample(frame):
+                        block = f.to_ndarray()
+                        produced += block.shape[1]
+                        yield block
                 if limit is not None and produced >= limit:
                     return
             for f in resampler.resample(None) if resampler is not None else []:
                 yield f.to_ndarray()
         except av.FFmpegError as exc:
             raise AudioDecodeError(f"cannot decode {path.name}: {_ffmpeg_reason(exc)}") from exc
+        if bad:
+            if resampler is None or bad > max(1, MAX_BAD_PACKET_SHARE * packets):
+                raise AudioDecodeError(
+                    f"cannot decode {path.name}: {bad} of {packets} audio packets are damaged"
+                )
+            log.warning(
+                "%s: replaced %d damaged audio packet(s) of %d with silence",
+                path.name,
+                bad,
+                packets,
+            )
+
+
+def _packet_samples(packet: av.Packet, stream: av.audio.stream.AudioStream, rate: int) -> int:
+    """Length of ``packet`` in output samples (0 when the container does not say)."""
+    if not packet.duration or packet.time_base is None:
+        return 0
+    return round(float(packet.duration * packet.time_base) * rate)
 
 
 # --------------------------------------------------------------------------------- imageio-ffmpeg

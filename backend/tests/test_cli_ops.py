@@ -156,7 +156,9 @@ def test_batch_rejects_bad_terms_file_and_empty_input(batch_provider, tmp_path):
     bad.write_text("x,notanumber\n", encoding="utf-8")
     _audio(tmp_path, "m.wav")
     result = runner.invoke(server_cli.app, ["batch", str(tmp_path), "--terms-file", str(bad)])
-    assert result.exit_code == 2 and "line 1" in result.output
+    assert result.exit_code == 2 and "line 1" in " ".join(
+        result.output.split()
+    )  # rich wraps long paths
     empty = tmp_path / "empty"
     empty.mkdir()
     assert runner.invoke(server_cli.app, ["batch", str(empty)]).exit_code == 2

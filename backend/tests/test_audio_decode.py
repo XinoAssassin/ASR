@@ -296,3 +296,63 @@ def test_mid_stream_layout_change_keeps_first_layout(tmp_path: Path, backend: st
     multi = decode.decode_multichannel(path, rate=16_000)
     assert multi.shape[0] == 1 and multi.shape[1] / 16_000 == pytest.approx(2.0, abs=0.2)
     assert decode.decode_pcm16k(path).shape == (multi.shape[1],)
+
+
+class _DamagedPackets:
+    """Wraps a PyAV container so that the packets at ``bad`` (demux order) fail to decode."""
+
+    def __init__(self, container, bad: set[int]) -> None:
+        self._c, self._bad = container, bad
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+    def __enter__(self):
+        self._c.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._c.__exit__(*exc)
+
+    def demux(self, *streams):
+        for i, packet in enumerate(self._c.demux(*streams)):
+            yield _BadPacket(packet) if i in self._bad and packet.size else packet
+
+
+class _BadPacket:
+    def __init__(self, packet) -> None:
+        self._p = packet
+
+    def __getattr__(self, name):
+        return getattr(self._p, name)
+
+    def decode(self):
+        import av
+
+        raise av.error.InvalidDataError(1094995529, "Invalid data found when processing input")
+
+
+def _with_damage(monkeypatch: pytest.MonkeyPatch, bad: set[int]) -> None:
+    real = decode._open_pyav
+    monkeypatch.setattr(decode, "_open_pyav", lambda path: _DamagedPackets(real(path), bad))
+
+
+def test_damaged_packet_is_bridged_with_silence(tmp_path: Path, monkeypatch, caplog) -> None:
+    monkeypatch.setenv("ASR_DECODER", "pyav")
+    path = write_audio(tmp_path, "mp3", seconds=5.0)
+    clean = decode.decode_pcm16k(path)
+    _with_damage(monkeypatch, {3})
+    with caplog.at_level("WARNING", logger="asr.audio.decode"):
+        damaged = decode.decode_pcm16k(path)
+    # timeline kept: silence instead of the lost packet (±1 output sample of rounding)
+    assert abs(len(damaged) - len(clean)) <= 1
+    assert np.count_nonzero(damaged == 0) > np.count_nonzero(clean == 0)
+    assert "damaged" in caplog.text
+
+
+def test_mostly_damaged_file_still_fails(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ASR_DECODER", "pyav")
+    path = write_audio(tmp_path, "mp3", seconds=5.0)
+    _with_damage(monkeypatch, set(range(0, 1000, 2)))
+    with pytest.raises(AudioDecodeError, match="damaged"):
+        decode.decode_pcm16k(path)
