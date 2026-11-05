@@ -10,6 +10,11 @@
  * Like the Rust core, a successful setup writes + starts the sidecar before reporting `installed`,
  * and a cancelled / failed re-install keeps the previous working environment.
  *
+ * Meeting end detection: `autoStop(reason, trimmedSeconds)` ends the recording like the core does
+ * after a silence limit / the captured app exiting (status back to idle, `recordings://changed`
+ * with `endReason` / `trimmedSeconds`). Set `state.status.silentFor` / `autoStopIn` and emit it to
+ * drive the countdown. `state.legacyStatus` strips the D78 fields like an older core.
+ *
  * Proxy: `state.proxy` holds what was saved (URL with credentials in clear, like the core's store);
  * reads return it masked, and sending the masked URL back keeps the stored credentials.
  * `state.systemProxy` is what `system` mode resolves to; `state.proxyTest` the test answer.
@@ -44,6 +49,8 @@ export interface FakeDesktop extends DesktopPlatform {
   tickInstall(): boolean
   /** Tick until the setup finished (or failed). */
   runInstall(): void
+  /** End the running recording by itself (silence limit / captured app exited). */
+  autoStop(reason: 'silence' | 'app_exited', trimmedSeconds?: number): Recording
   listenerCount(): number
   state: {
     devices: DeviceList
@@ -57,6 +64,8 @@ export interface FakeDesktop extends DesktopPlatform {
     noMic: boolean
     /** What `recorder_set_options` / `recorder_start` stored for the tray / hotkey toggle. */
     lastOptions: StartOptions | null
+    /** Behave like a core before meeting end detection (no silentFor / autoStopIn / endReason). */
+    legacyStatus: boolean
     sidecarConfig: SidecarConfig
     sidecar: SidecarStatus
     /** Commands that reject like an older core would. */
@@ -205,6 +214,8 @@ export function createFakeDesktop(): FakeDesktop {
       warnings: [],
       sources: { system: false, mic: false },
       processId: null,
+      silentFor: 0,
+      autoStopIn: null,
     },
     recordings: [makeRecording('2026-10-28_09-00-00', { state: 'done', jobId: 'job-1' })],
     config: {
@@ -225,6 +236,7 @@ export function createFakeDesktop(): FakeDesktop {
     ],
     noMic: false,
     lastOptions: null,
+    legacyStatus: false,
     sidecarConfig: {
       enabled: false,
       command: '',
@@ -311,6 +323,36 @@ export function createFakeDesktop(): FakeDesktop {
     return true
   }
 
+  /** The status as the core would send it (an older one lacks the D78 fields). */
+  function statusOut(): RecorderStatus {
+    const out = structuredClone(state.status)
+    if (state.legacyStatus) {
+      delete (out as Partial<RecorderStatus>).silentFor
+      delete (out as Partial<RecorderStatus>).autoStopIn
+    }
+    return out
+  }
+
+  function endRecording(endReason: Recording['endReason'], trimmedSeconds = 0): Recording {
+    const rec = makeRecording('2026-10-29_10-00-00')
+    if (!state.legacyStatus) {
+      rec.endReason = endReason
+      rec.trimmedSeconds = trimmedSeconds
+      rec.duration = Math.max(0, state.status.elapsed - trimmedSeconds) || rec.duration
+    }
+    state.recordings.unshift(rec)
+    state.status = {
+      ...state.status,
+      state: 'idle',
+      elapsed: 0,
+      sources: { system: false, mic: false },
+      processId: null,
+      silentFor: 0,
+      autoStopIn: null,
+    }
+    return rec
+  }
+
   const masked = (): BackendConfig => ({ ...state.config, apiKey: state.storedKey ? '***' : null })
 
   async function call<T>(name: string, args: unknown, run: () => T): Promise<T> {
@@ -341,23 +383,13 @@ export function createFakeDesktop(): FakeDesktop {
             sources: { system: options.system, mic },
             processId: options.processId ?? null,
             warnings: options.mic && !mic ? ['microphone unavailable, recording system audio only'] : [],
+            silentFor: 0,
+            autoStopIn: null,
           }
-          return structuredClone(state.status)
+          return statusOut()
         }),
-      stop: () =>
-        call('recorder_stop', undefined, () => {
-          const rec = makeRecording('2026-10-29_10-00-00')
-          state.recordings.unshift(rec)
-          state.status = {
-            ...state.status,
-            state: 'idle',
-            elapsed: 0,
-            sources: { system: false, mic: false },
-            processId: null,
-          }
-          return rec
-        }),
-      status: () => call('recorder_status', undefined, () => structuredClone(state.status)),
+      stop: () => call('recorder_stop', undefined, () => endRecording('manual')),
+      status: () => call('recorder_status', undefined, statusOut),
       processes: () => call('recorder_processes', undefined, () => structuredClone(state.processes)),
       setOptions: (options: StartOptions) =>
         call('recorder_set_options', { options }, () => {
@@ -480,6 +512,13 @@ export function createFakeDesktop(): FakeDesktop {
     tickInstall,
     runInstall: () => {
       for (let i = 0; i < 1000 && tickInstall(); i++);
+    },
+    autoStop: (reason, trimmedSeconds = 0) => {
+      if (state.status.state !== 'recording') throw new Error('not recording')
+      const rec = endRecording(reason, trimmedSeconds)
+      statusHandlers.forEach((h) => h(statusOut()))
+      recordingHandlers.forEach((h) => h(structuredClone(rec)))
+      return structuredClone(rec)
     },
     listenerCount: () =>
       statusHandlers.size +

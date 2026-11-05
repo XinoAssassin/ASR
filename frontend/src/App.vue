@@ -20,7 +20,7 @@ import {
   useOsTheme,
   zhCN,
 } from 'naive-ui'
-import { computed, defineAsyncComponent, h, onBeforeUnmount, onMounted } from 'vue'
+import { computed, defineAsyncComponent, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 
@@ -31,6 +31,7 @@ import { useHealthStore } from '@/stores/health'
 import { useManagedBackendStore } from '@/stores/managedBackend'
 import { useProfilesStore } from '@/stores/profiles'
 import { useRecorderStore } from '@/stores/recorder'
+import { useSetupGuideStore } from '@/stores/setupGuide'
 
 const { t, locale } = useI18n()
 const route = useRoute()
@@ -40,6 +41,17 @@ const desktop = isDesktop()
 const recorder = useRecorderStore()
 const profiles = useProfilesStore()
 const managed = useManagedBackendStore()
+const guide = useSetupGuideStore()
+// Mounted on first open only (a separate chunk).
+const SetupGuide = defineAsyncComponent(() => import('@/components/setup/SetupGuide.vue'))
+const guideMounted = ref(false)
+watch(
+  () => guide.open,
+  (v) => {
+    if (v) guideMounted.value = true
+  },
+  { immediate: true },
+)
 // Desktop + backend edition only; a separate chunk the web build never loads.
 const ManagedBackendWizard = defineAsyncComponent(() => import('@/components/managed/ManagedBackendWizard.vue'))
 
@@ -111,8 +123,11 @@ onMounted(() => {
   profiles.init() // desktop: the built-in profile follows the sidecar
   if (desktop) {
     void recorder.init()
-    // Bundled edition, backend not installed yet: the first-run wizard opens by itself.
-    void managed.startup()
+    // Bundled edition, backend not installed yet: the first-run wizard opens by itself; the
+    // setup guide only after it (or right away when there is no wizard to show).
+    void managed.startup().finally(() => void guide.startup())
+  } else {
+    void guide.startup()
   }
 })
 onBeforeUnmount(() => health.stopPolling())
@@ -144,6 +159,21 @@ onBeforeUnmount(() => health.stopPolling())
               </template>
               {{ healthTooltip }}
             </NTooltip>
+            <NTooltip>
+              <template #trigger>
+                <NButton
+                  size="small"
+                  quaternary
+                  circle
+                  :aria-label="t('guide.open')"
+                  data-testid="guide-open"
+                  @click="guide.openGuide()"
+                >
+                  ?
+                </NButton>
+              </template>
+              {{ t('guide.open') }}
+            </NTooltip>
             <NButton size="small" quaternary data-testid="locale-toggle" @click="toggleLocale">
               {{ locale === 'en' ? '中文' : 'EN' }}
             </NButton>
@@ -167,6 +197,7 @@ onBeforeUnmount(() => health.stopPolling())
           </NLayoutContent>
         </NLayout>
         <ManagedBackendWizard v-if="desktop && managed.bundled" />
+        <SetupGuide v-if="guideMounted" />
       </NDialogProvider>
     </NMessageProvider>
   </NConfigProvider>

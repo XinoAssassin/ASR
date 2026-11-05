@@ -16,6 +16,7 @@ import {
   ipcErrorMessage,
   isDesktop,
   type AudioProcess,
+  type AutoStopOptions,
   type BackendConfig,
   type DeviceList,
   type Recording,
@@ -28,6 +29,55 @@ const OPTIONS_KEY = 'asr.recorder.startOptions'
 /** Debounce for pushing start options to the core (`recorder_set_options`). */
 export const SET_OPTIONS_DEBOUNCE_MS = 500
 const SOURCE_KEY = 'asr.recorder.systemSource'
+
+/** One-click source setups; they only set the system / mic toggles (devices stay as chosen). */
+export type SourcePreset = 'online' | 'room' | 'system'
+
+export const SOURCE_PRESETS: Record<SourcePreset, { system: boolean; mic: boolean }> = {
+  /** Online meeting: the others through the speakers + you through the mic. */
+  online: { system: true, mic: true },
+  /** Meeting room: everyone in front of the microphone. */
+  room: { system: false, mic: true },
+  /** Computer audio only (webinar, video). */
+  system: { system: true, mic: false },
+}
+
+/** The preset matching the toggles, or null (both off). */
+export function presetOf(o: { system: boolean; mic: boolean }): SourcePreset | null {
+  const hit = (Object.keys(SOURCE_PRESETS) as SourcePreset[]).find(
+    (k) => SOURCE_PRESETS[k].system === o.system && SOURCE_PRESETS[k].mic === o.mic,
+  )
+  return hit ?? null
+}
+
+/** Silence limits offered for auto-stop, minutes (null = off). */
+export const SILENCE_MINUTE_CHOICES = [5, 10, 15, 20, 30, 45, 60] as const
+const MAX_SILENCE_MINUTES = 240
+
+/** The core's defaults (docs/desktop-ipc.md, D78). */
+export function defaultAutoStop(): AutoStopOptions {
+  return { silenceMinutes: 10, whenAppExits: true, trimSilence: true }
+}
+
+/** Stored / restored auto-stop options; anything malformed falls back to the default. */
+export function parseAutoStop(raw: unknown): AutoStopOptions {
+  const d = defaultAutoStop()
+  if (!raw || typeof raw !== 'object') return d
+  const o = raw as Partial<Record<keyof AutoStopOptions, unknown>>
+  let silenceMinutes = d.silenceMinutes
+  if (o.silenceMinutes === null) silenceMinutes = null
+  else if (typeof o.silenceMinutes === 'number' && Number.isFinite(o.silenceMinutes) && o.silenceMinutes > 0) {
+    silenceMinutes = Math.min(MAX_SILENCE_MINUTES, Math.max(1, Math.round(o.silenceMinutes)))
+  }
+  return {
+    silenceMinutes,
+    whenAppExits: typeof o.whenAppExits === 'boolean' ? o.whenAppExits : d.whenAppExits,
+    trimSilence: typeof o.trimSilence === 'boolean' ? o.trimSilence : d.trimSilence,
+  }
+}
+
+/** Start options as kept by the page: `autoStop` always present. */
+export type RecorderOptions = StartOptions & { autoStop: AutoStopOptions }
 
 /** System track: the whole render device, or one application's process tree (M10). */
 export type SystemSourceMode = 'device' | 'process'
@@ -49,16 +99,25 @@ export const IDLE_STATUS: RecorderStatus = {
   warnings: [],
   sources: { system: false, mic: false },
   processId: null,
+  silentFor: 0,
+  autoStopIn: null,
 }
 
-/** Fill fields an older (M9) core does not send yet. */
+/** Fill fields an older core does not send yet (M9: sources / processId; D78: silence). */
 export function normalizeStatus(s: RecorderStatus, requested?: StartOptions): RecorderStatus {
   const sources =
     s.sources ??
     (s.state === 'idle'
       ? { system: false, mic: false }
       : { system: requested?.system ?? true, mic: requested?.mic ?? true })
-  return { ...s, warnings: s.warnings ?? [], sources, processId: s.processId ?? null }
+  return {
+    ...s,
+    warnings: s.warnings ?? [],
+    sources,
+    processId: s.processId ?? null,
+    silentFor: typeof s.silentFor === 'number' ? s.silentFor : 0,
+    autoStopIn: typeof s.autoStopIn === 'number' ? s.autoStopIn : null,
+  }
 }
 
 function readSystemSource(): StoredSystemSource {
@@ -73,11 +132,18 @@ function readSystemSource(): StoredSystemSource {
   }
 }
 
-export function defaultStartOptions(): StartOptions {
-  return { system: true, mic: true, outputDevice: null, inputDevice: null, outDir: null }
+export function defaultStartOptions(): RecorderOptions {
+  return {
+    system: true,
+    mic: true,
+    outputDevice: null,
+    inputDevice: null,
+    outDir: null,
+    autoStop: defaultAutoStop(),
+  }
 }
 
-function readStartOptions(): StartOptions {
+function readStartOptions(): RecorderOptions {
   const defaults = defaultStartOptions()
   try {
     const raw: unknown = JSON.parse(readStorage(OPTIONS_KEY) ?? 'null')
@@ -90,6 +156,7 @@ function readStartOptions(): StartOptions {
       outputDevice: str(o.outputDevice),
       inputDevice: str(o.inputDevice),
       outDir: str(o.outDir),
+      autoStop: parseAutoStop(o.autoStop),
     }
   } catch {
     return defaults
@@ -113,7 +180,7 @@ export const useRecorderStore = defineStore('recorder', () => {
   const devices = ref<DeviceList>({ outputs: [], inputs: [] })
   const recordings = ref<Recording[]>([])
   const config = ref<BackendConfig | null>(null)
-  const options = ref<StartOptions>(readStartOptions())
+  const options = ref<RecorderOptions>(readStartOptions())
   const storedSource = readSystemSource()
   const sourceMode = ref<SystemSourceMode>(storedSource.mode)
   /** Chosen application (in-memory: a pid is only valid for this run of the app). */
@@ -143,7 +210,14 @@ export const useRecorderStore = defineStore('recorder', () => {
   const startOptions = computed<StartOptions>(() => ({
     ...options.value,
     processId: options.value.system && sourceMode.value === 'process' ? processId.value : null,
+    autoStop: { ...options.value.autoStop },
   }))
+  /** Which preset the toggles match (null: both off). */
+  const preset = computed(() => presetOf(options.value))
+  /** Seconds until the core stops a silent recording by itself (null: not pending). */
+  const autoStopIn = computed(() =>
+    status.value.state === 'recording' ? status.value.autoStopIn : null,
+  )
   const needsProcess = computed(
     () => options.value.system && sourceMode.value === 'process' && processId.value == null,
   )
@@ -201,6 +275,10 @@ export const useRecorderStore = defineStore('recorder', () => {
     // sync: the `initialized` gate must see the state at the moment of the change.
     { deep: true, flush: 'sync' },
   )
+
+  function applyPreset(p: SourcePreset): void {
+    Object.assign(options.value, SOURCE_PRESETS[p])
+  }
 
   function selectProcess(pid: number | null): void {
     processId.value = pid
@@ -450,6 +528,9 @@ export const useRecorderStore = defineStore('recorder', () => {
     loadingProcesses,
     processesError,
     startOptions,
+    preset,
+    autoStopIn,
+    applyPreset,
     needsProcess,
     capturedProcess,
     transcriptIds,

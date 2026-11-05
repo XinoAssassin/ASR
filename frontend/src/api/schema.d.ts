@@ -717,6 +717,11 @@ export interface components {
              * @description Speaker name or person named in the meeting, when stated.
              */
             owner?: string | null;
+            /**
+             * Refs
+             * @description Ids of the segments the item is based on (at most 3), in transcript order: the first is the earliest supporting line. Empty for summaries written before citations existed, and an id may no longer exist after edits (merge) - clients skip those.
+             */
+            refs?: string[];
             /** Task */
             task: string;
         };
@@ -1717,6 +1722,22 @@ export interface components {
             /** Segment Id */
             segment_id: string;
         };
+        /**
+         * SummaryPoint
+         * @description A key point or decision with the segments it cites.
+         *
+         *     Summaries stored before citations existed hold plain strings; they load as
+         *     ``{"text": "...", "refs": []}``.
+         */
+        SummaryPoint: {
+            /**
+             * Refs
+             * @description Ids of the segments the item is based on (at most 3), in transcript order: the first is the earliest supporting line. Empty for summaries written before citations existed, and an id may no longer exist after edits (merge) - clients skip those.
+             */
+            refs?: string[];
+            /** Text */
+            text: string;
+        };
         /** Term */
         Term: {
             /**
@@ -1836,7 +1857,23 @@ export interface components {
             /** Ops */
             ops: (components["schemas"]["EditTextOp"] | components["schemas"]["SetSpeakerOp"] | components["schemas"]["SplitOp"] | components["schemas"]["MergeOp"] | components["schemas"]["ReplaceOp"] | components["schemas"]["MergeSpeakersOp"] | components["schemas"]["ReviewCorrectionOp"])[];
         };
-        /** TranscriptSummary */
+        /**
+         * TranscriptSummary
+         * @description LLM meeting summary.
+         *
+         *     JSON shape::
+         *
+         *         {"overview": "...",
+         *          "key_points": [{"text": "...", "refs": ["seg_00012"]}],
+         *          "decisions": [{"text": "...", "refs": ["seg_00030", "seg_00031"]}],
+         *          "action_items": [{"task": "...", "owner": "张三" | null, "due": "周五" | null,
+         *                            "refs": ["seg_00041"]}],
+         *          "model": "qwen-plus", "chunks": 1, "created_at": "2026-11-05T10:00:00Z"}
+         *
+         *     ``refs`` are segment ids (see ``SummaryPoint``). Older stored summaries with
+         *     ``key_points`` / ``decisions`` as lists of strings and action items without ``refs`` are
+         *     still accepted and come out in the shape above with empty ``refs``.
+         */
         TranscriptSummary: {
             /** Action Items */
             action_items?: components["schemas"]["ActionItem"][];
@@ -1852,9 +1889,9 @@ export interface components {
              */
             created_at: string;
             /** Decisions */
-            decisions?: string[];
+            decisions?: components["schemas"]["SummaryPoint"][];
             /** Key Points */
-            key_points?: string[];
+            key_points?: components["schemas"]["SummaryPoint"][];
             /**
              * Model
              * @description Chat model that wrote the summary.

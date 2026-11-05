@@ -1,8 +1,9 @@
 <script setup lang="ts">
 /**
  * Desktop recorder (PLAN §6.3): one-click start/stop, elapsed time, level meters for system audio
- * and microphone, source toggles, device pickers, output folder, warnings and drift, and the
- * recordings with their upload state. In the web build this page only explains that it needs the
+ * and microphone, source presets + toggles, device pickers, output folder, meeting end detection
+ * (auto-stop on silence / when the captured app exits, with a countdown), warnings and drift, and
+ * the recordings with their upload state. In the web build this page only explains that it needs the
  * desktop app; nothing here touches Tauri directly (all IPC goes through the recorder store).
  */
 import {
@@ -26,7 +27,7 @@ import { RouterLink } from 'vue-router'
 import LevelMeter from '@/components/recorder/LevelMeter.vue'
 import RecordingsList from '@/components/recorder/RecordingsList.vue'
 import type { Device } from '@/platform'
-import { useRecorderStore } from '@/stores/recorder'
+import { SILENCE_MINUTE_CHOICES, useRecorderStore, type SourcePreset } from '@/stores/recorder'
 import { formatDuration } from '@/utils/format'
 
 const { t } = useI18n()
@@ -88,6 +89,35 @@ const capturingLabel = computed(() => {
   const proc = recorder.capturedProcess
   return proc ? t('recorder.capturing', { name: proc.name }) : t('recorder.capturingDevice')
 })
+
+const PRESETS: SourcePreset[] = ['online', 'room', 'system']
+
+function onPreset(p: SourcePreset): void {
+  recorder.applyPreset(p)
+}
+
+// --- meeting end detection ---------------------------------------------------------------------
+
+/** NSelect cannot hold null: 0 stands for "off". */
+const silenceMinutes = computed({
+  get: () => recorder.options.autoStop.silenceMinutes ?? 0,
+  set: (v: number) => (recorder.options.autoStop.silenceMinutes = v > 0 ? v : null),
+})
+const silenceOptions = computed(() => {
+  const current = recorder.options.autoStop.silenceMinutes
+  const minutes: number[] = [...SILENCE_MINUTE_CHOICES]
+  if (current != null && !minutes.includes(current)) minutes.push(current)
+  return [
+    { label: t('recorder.autoStop.off'), value: 0 },
+    ...minutes.sort((a, b) => a - b).map((m) => ({ label: t('recorder.autoStop.minutes', { n: m }), value: m })),
+  ]
+})
+/** "Stop when the app exits" only applies to single-app capture. */
+const appExitApplies = computed(() => recorder.options.system && recorder.sourceMode === 'process')
+const countdown = computed(() =>
+  recorder.autoStopIn == null ? null : formatDuration(Math.max(0, Math.ceil(recorder.autoStopIn))),
+)
+const silentFor = computed(() => formatDuration(status.value.silentFor))
 
 const noSource = computed(() => !recorder.options.system && !recorder.options.mic)
 const locked = computed(() => recorder.active || recorder.busy)
@@ -166,6 +196,41 @@ onMounted(() => void recorder.init())
           </div>
         </div>
 
+        <div class="presets">
+          <span class="label">{{ t('recorder.preset.label') }}</span>
+          <NRadioGroup
+            :value="recorder.preset"
+            size="small"
+            :disabled="locked"
+            data-testid="source-preset"
+            @update:value="onPreset"
+          >
+            <NRadioButton
+              v-for="p in PRESETS"
+              :key="p"
+              :value="p"
+              :title="t(`recorder.preset.${p}Hint`)"
+              :data-testid="`preset-${p}`"
+            >
+              {{ t(`recorder.preset.${p}`) }}
+            </NRadioButton>
+          </NRadioGroup>
+          <NText v-if="recorder.preset" depth="3" class="hint" data-testid="preset-hint">
+            {{ t(`recorder.preset.${recorder.preset}Hint`) }}
+          </NText>
+        </div>
+
+        <NAlert
+          v-if="countdown"
+          type="warning"
+          :show-icon="false"
+          class="countdown"
+          data-testid="recorder-countdown"
+        >
+          <div class="countdown-title">{{ t('recorder.autoStop.countdown', { time: countdown }) }}</div>
+          <NText depth="3" class="hint">{{ t('recorder.autoStop.countdownHint', { silent: silentFor }) }}</NText>
+        </NAlert>
+
         <div class="sources">
           <div class="source" :class="{ dropped: systemOff }" data-testid="source-system">
             <div class="source-head">
@@ -192,15 +257,17 @@ onMounted(() => void recorder.init())
                 {{ t('recorder.sourceProcess') }}
               </NRadioButton>
             </NRadioGroup>
-            <NSelect
-              v-if="recorder.sourceMode === 'device'"
-              v-model:value="outputDevice"
-              :options="outputOptions"
-              :disabled="locked || !recorder.options.system"
-              :loading="recorder.loadingDevices"
-              size="small"
-              data-testid="device-output"
-            />
+            <div v-if="recorder.sourceMode === 'device'" class="field">
+              <span class="field-label">{{ t('recorder.recordingDevice') }}</span>
+              <NSelect
+                v-model:value="outputDevice"
+                :options="outputOptions"
+                :disabled="locked || !recorder.options.system"
+                :loading="recorder.loadingDevices"
+                size="small"
+                data-testid="device-output"
+              />
+            </div>
             <template v-else>
               <NSpace :wrap="false" size="small" align="center">
                 <NSelect
@@ -258,14 +325,17 @@ onMounted(() => void recorder.init())
                 <NText depth="3" class="hint">{{ t('recorder.micHint') }}</NText>
               </div>
             </div>
-            <NSelect
-              v-model:value="inputDevice"
-              :options="inputOptions"
-              :disabled="locked || !recorder.options.mic"
-              :loading="recorder.loadingDevices"
-              size="small"
-              data-testid="device-input"
-            />
+            <div class="field">
+              <span class="field-label">{{ t('recorder.recordingDevice') }}</span>
+              <NSelect
+                v-model:value="inputDevice"
+                :options="inputOptions"
+                :disabled="locked || !recorder.options.mic"
+                :loading="recorder.loadingDevices"
+                size="small"
+                data-testid="device-input"
+              />
+            </div>
             <LevelMeter
               :level="status.levels.mic"
               :active="recording && status.sources.mic"
@@ -298,6 +368,44 @@ onMounted(() => void recorder.init())
                 data-testid="recorder-outdir"
               />
               <NText depth="3" class="hint">{{ t('recorder.outDirHint') }}</NText>
+            </NSpace>
+          </div>
+          <div class="detail" data-testid="auto-stop">
+            <span class="label">{{ t('recorder.autoStop.title') }}</span>
+            <NSpace vertical size="small" class="grow">
+              <NSpace align="center" size="small" :wrap="false">
+                <span>{{ t('recorder.autoStop.silence') }}</span>
+                <NSelect
+                  v-model:value="silenceMinutes"
+                  :options="silenceOptions"
+                  :disabled="locked"
+                  size="small"
+                  style="width: 140px"
+                  data-testid="auto-stop-silence"
+                />
+              </NSpace>
+              <NSpace align="center" size="small">
+                <NSwitch
+                  v-model:value="recorder.options.autoStop.whenAppExits"
+                  :disabled="locked"
+                  size="small"
+                  data-testid="auto-stop-app-exit"
+                />
+                <span>{{ t('recorder.autoStop.whenAppExits') }}</span>
+                <NText depth="3" class="hint">
+                  {{ appExitApplies ? t('recorder.autoStop.whenAppExitsHint') : t('recorder.autoStop.whenAppExitsNa') }}
+                </NText>
+              </NSpace>
+              <NSpace align="center" size="small">
+                <NSwitch
+                  v-model:value="recorder.options.autoStop.trimSilence"
+                  :disabled="locked"
+                  size="small"
+                  data-testid="auto-stop-trim"
+                />
+                <span>{{ t('recorder.autoStop.trimSilence') }}</span>
+                <NText depth="3" class="hint">{{ t('recorder.autoStop.trimSilenceHint') }}</NText>
+              </NSpace>
             </NSpace>
           </div>
           <div v-if="status.file" class="detail">
@@ -440,6 +548,34 @@ onMounted(() => void recorder.init())
 
 .hint {
   font-size: 12px;
+}
+
+.presets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 14px;
+}
+
+.countdown {
+  margin-bottom: 14px;
+}
+
+.countdown-title {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field-label {
+  font-size: 12px;
+  opacity: 0.75;
 }
 
 .sources {

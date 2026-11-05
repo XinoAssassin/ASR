@@ -63,6 +63,7 @@ import { formatBytes, formatDateTime, formatDuration } from '@/utils/format'
 import { PiecesMemo, type Piece } from '@/utils/highlight'
 import { findMatches } from '@/utils/search'
 import { findActiveSegment } from '@/utils/segments'
+import { resolveRefs as resolveSummaryRefs, type ResolvedRef } from '@/utils/summary'
 import { exportLocaleOf } from '@/utils/siyuanPath'
 
 const props = defineProps<{ id: string }>()
@@ -388,6 +389,25 @@ function jumpToSegment(segmentId: string): void {
   void scrollTo(segmentId)
 }
 
+/** Segment briefly highlighted after a jump from the summary (so the eye finds it). */
+const flashId = ref<string | null>(null)
+let flashTimer: ReturnType<typeof setTimeout> | null = null
+const FLASH_MS = 1800
+
+async function flash(segmentId: string): Promise<void> {
+  if (flashTimer !== null) clearTimeout(flashTimer)
+  // Same row again: drop the class for a frame so the animation restarts.
+  if (flashId.value === segmentId) {
+    flashId.value = null
+    await nextFrame()
+  }
+  flashId.value = segmentId
+  flashTimer = setTimeout(() => {
+    flashId.value = null
+    flashTimer = null
+  }, FLASH_MS)
+}
+
 function focusCorrection(id: string): void {
   focusedCorrection.value = id
   focusSeq.value++
@@ -425,6 +445,27 @@ async function removeSummary(): Promise<void> {
   } catch (e) {
     notify(e, t('summary.failed'))
   }
+}
+
+const originalSegments = computed<Segment[]>(() =>
+  [...(store.transcript?.original ?? [])].sort((a, b) => a.start - b.start),
+)
+
+/** Summary citations → current segments (stale ids via `original`, unknown ones skipped). */
+function resolveRefs(refs: string[]): ResolvedRef[] {
+  return refs.length ? resolveSummaryRefs(refs, segments.value, originalSegments.value) : []
+}
+
+function speakerName(id: string): string {
+  return speakerOf(id).name
+}
+
+/** Summary chip: seek to the cited moment, bring the segment into view and highlight it. */
+function jumpToRef(target: ResolvedRef): void {
+  player.value?.seek(target.start, true)
+  currentTime.value = target.start
+  void scrollTo(target.segmentId)
+  void flash(target.segmentId)
 }
 
 async function suggest(): Promise<void> {
@@ -571,6 +612,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
+  if (flashTimer !== null) clearTimeout(flashTimer)
   // reset() still sends pending text (on its own transcript id) before clearing the page state.
   store.reset()
 })
@@ -762,6 +804,7 @@ onBeforeUnmount(() => {
                     :editing="item.id === editingId"
                     :is-last="index === segments.length - 1"
                     :busy="structuralPending"
+                    :flash="item.id === flashId"
                     @seek="seekTo(item)"
                     @start-edit="startEdit(item)"
                     @stop-edit="stopEdit"
@@ -791,7 +834,10 @@ onBeforeUnmount(() => {
                 :summary="store.transcript.summary ?? null"
                 :stale="summaryStale"
                 :running="store.summaryRunning"
+                :resolve-refs="resolveRefs"
+                :speaker-name="speakerName"
                 @generate="summarize"
+                @jump="jumpToRef"
                 @remove="removeSummary"
               />
             </NCard>

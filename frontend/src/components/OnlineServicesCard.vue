@@ -269,7 +269,7 @@ async function runLlmTest(): Promise<void> {
 </script>
 
 <template>
-  <NCard :title="t('settings.online.title')" data-testid="online-card">
+  <NCard id="online" :title="t('settings.online.title')" data-testid="online-card">
     <NAlert v-if="settings.error" type="error" style="margin-bottom: 16px">
       {{ describe(settings.error) }}
     </NAlert>

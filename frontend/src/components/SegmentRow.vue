@@ -27,6 +27,8 @@ const props = defineProps<{
   isLast: boolean
   /** A split / merge is pending: ignore further ones until it settles. */
   busy?: boolean
+  /** Briefly highlighted (jumped to from a summary citation). */
+  flash?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -133,7 +135,7 @@ function onPieceClick(p: Piece, e: MouseEvent): void {
 <template>
   <div
     class="segment"
-    :class="{ active, editing }"
+    :class="{ active, editing, flash }"
     :style="{ '--speaker-color': speaker.color }"
     data-testid="transcript-segment"
     :data-segment-id="segment.id"
@@ -232,6 +234,21 @@ function onPieceClick(p: Piece, e: MouseEvent): void {
 
 .segment.active {
   background-color: color-mix(in srgb, var(--speaker-color) 18%, transparent);
+}
+
+.segment.flash {
+  animation: segment-flash 1.8s ease-out;
+}
+
+@keyframes segment-flash {
+  0%,
+  35% {
+    box-shadow: inset 0 0 0 2px #f0a020;
+    background-color: rgba(240, 160, 32, 0.22);
+  }
+  100% {
+    box-shadow: inset 0 0 0 2px transparent;
+  }
 }
 
 .segment.editing {

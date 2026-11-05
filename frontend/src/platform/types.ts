@@ -33,6 +33,10 @@ export interface RecorderStatus {
   sources: { system: boolean; mic: boolean }
   /** Process tree being captured; null = whole device. */
   processId: number | null
+  /** Seconds since the last audio on any source (drives the auto-stop countdown). */
+  silentFor: number
+  /** Seconds until an auto-stop, when one is pending. */
+  autoStopIn: number | null
 }
 
 export interface StartOptions {
@@ -45,6 +49,18 @@ export interface StartOptions {
   outDir: string | null
   /** Capture only this process tree (Windows 10 2004+); null / absent = the whole render device. */
   processId?: number | null
+  /** Meeting end detection; absent = the core's defaults (10 min, true, true). */
+  autoStop?: AutoStopOptions
+}
+
+/** Meeting end detection (D78). */
+export interface AutoStopOptions {
+  /** Stop after this long without audio on any captured source; null = off. Default 10. */
+  silenceMinutes: number | null
+  /** Per-app capture: stop when that process ends. Default true. */
+  whenAppExits: boolean
+  /** Cut the trailing silence that led to an auto-stop (keeping ~2 s). Default true. */
+  trimSilence: boolean
 }
 
 /** A process with an active audio session (`recorder_processes`). */
@@ -98,7 +114,13 @@ export interface Recording {
     error: string | null
     nextRetryAt: string | null
   }
+  /** How the recording ended (absent from older cores). */
+  endReason?: RecordingEndReason
+  /** Trailing silence removed on auto-stop, seconds. */
+  trimmedSeconds?: number
 }
+
+export type RecordingEndReason = 'manual' | 'silence' | 'app_exited' | 'failure' | 'recovered'
 
 export interface BackendConfig {
   /** e.g. http://127.0.0.1:8000 (no trailing slash). */

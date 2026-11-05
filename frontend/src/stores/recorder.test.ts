@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 
 import { setDesktopPlatformForTests } from '@/platform'
+import type { RecorderStatus } from '@/platform'
 import { createFakeDesktop, makeRecording, type FakeDesktop } from '@/platform/testing'
 
 const browser = vi.hoisted(() => ({
@@ -20,8 +21,14 @@ vi.mock('@/api', () => ({
   getJob: vi.fn(async (id: string) => ({ id, transcript_id: `tr-${id}` })),
 }))
 
-const { DESKTOP_DEFAULT_BACKEND, SET_OPTIONS_DEBOUNCE_MS, normalizeStatus, useRecorderStore } =
-  await import('./recorder')
+const {
+  DESKTOP_DEFAULT_BACKEND,
+  SET_OPTIONS_DEBOUNCE_MS,
+  normalizeStatus,
+  parseAutoStop,
+  presetOf,
+  useRecorderStore,
+} = await import('./recorder')
 
 let fake: FakeDesktop
 
@@ -91,9 +98,11 @@ describe('recorder store', () => {
         inputDevice: null,
         outDir: null,
         processId: null,
+        autoStop: { silenceMinutes: 10, whenAppExits: true, trimSilence: true },
       },
     })
     expect(store.recording).toBe(true)
+    // An older core: no silentFor / autoStopIn.
     fake.emitStatus({
       state: 'recording',
       elapsed: 3.2,
@@ -103,8 +112,10 @@ describe('recorder store', () => {
       warnings: ['system audio silent for 60 s'],
       sources: { system: true, mic: false },
       processId: null,
-    })
+    } as RecorderStatus)
     expect(store.status.elapsed).toBe(3.2)
+    expect(store.status.silentFor).toBe(0)
+    expect(store.status.autoStopIn).toBeNull()
     expect(store.status.levels.system).toBe(0.4)
     expect(store.status.warnings).toHaveLength(1)
   })
@@ -122,6 +133,8 @@ describe('recorder store', () => {
       outputDevice: null,
       inputDevice: 'in-1',
       outDir: 'D:\\rec',
+      // Stored before meeting end detection existed: the defaults.
+      autoStop: { silenceMinutes: 10, whenAppExits: true, trimSilence: true },
     })
     store.options.system = true
     await nextTick()
@@ -318,6 +331,7 @@ describe('recorder store', () => {
         inputDevice: null,
         outDir: null,
         processId: null,
+        autoStop: { silenceMinutes: 10, whenAppExits: true, trimSilence: true },
       })
       // Choosing an app sends its pid.
       store.sourceMode = 'process'
@@ -358,6 +372,93 @@ describe('recorder store', () => {
       await nextTick()
       await vi.advanceTimersByTimeAsync(SET_OPTIONS_DEBOUNCE_MS)
       expect(pushes()).toHaveLength(1)
+    })
+  })
+  describe('presets and meeting end detection (D78)', () => {
+    afterEach(() => vi.useRealTimers())
+
+    it('maps presets to the source toggles and back', async () => {
+      const store = useRecorderStore()
+      await store.init()
+      expect(store.preset).toBe('online')
+      store.options.outputDevice = 'out-2'
+      store.applyPreset('room')
+      expect(store.options).toMatchObject({ system: false, mic: true, outputDevice: 'out-2' })
+      expect(store.preset).toBe('room')
+      store.applyPreset('system')
+      expect(store.preset).toBe('system')
+      store.options.system = false
+      expect(store.preset).toBeNull()
+      expect(presetOf({ system: true, mic: true })).toBe('online')
+    })
+
+    it('sends autoStop on start and stores edits via recorder_set_options', async () => {
+      const store = useRecorderStore()
+      await store.init()
+      vi.useFakeTimers()
+      store.options.autoStop.silenceMinutes = null
+      store.options.autoStop.trimSilence = false
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(SET_OPTIONS_DEBOUNCE_MS)
+      expect(fake.calls.filter(([n]) => n === 'recorder_set_options')).toHaveLength(1)
+      expect(fake.state.lastOptions?.autoStop).toEqual({
+        silenceMinutes: null,
+        whenAppExits: true,
+        trimSilence: false,
+      })
+      vi.useRealTimers()
+      await store.start()
+      expect(fake.state.lastOptions?.autoStop?.silenceMinutes).toBeNull()
+      // Persisted with the other options.
+      const stored = JSON.parse(browser.storage.get('asr.recorder.startOptions')!)
+      expect(stored.autoStop).toEqual({ silenceMinutes: null, whenAppExits: true, trimSilence: false })
+    })
+
+    it('restores stored autoStop and repairs malformed values', () => {
+      expect(parseAutoStop(undefined)).toEqual({ silenceMinutes: 10, whenAppExits: true, trimSilence: true })
+      expect(parseAutoStop({ silenceMinutes: 0, whenAppExits: 'yes', trimSilence: false })).toEqual({
+        silenceMinutes: 10,
+        whenAppExits: true,
+        trimSilence: false,
+      })
+      expect(parseAutoStop({ silenceMinutes: 9999 }).silenceMinutes).toBe(240)
+      expect(parseAutoStop({ silenceMinutes: null }).silenceMinutes).toBeNull()
+      browser.storage.set(
+        'asr.recorder.startOptions',
+        JSON.stringify({ system: false, mic: true, autoStop: { silenceMinutes: 30, whenAppExits: false } }),
+      )
+      const store = useRecorderStore()
+      expect(store.options.autoStop).toEqual({ silenceMinutes: 30, whenAppExits: false, trimSilence: true })
+      expect(store.preset).toBe('room')
+    })
+
+    it('exposes the countdown while recording and records how it ended', async () => {
+      const store = useRecorderStore()
+      await store.init()
+      await store.start()
+      expect(store.autoStopIn).toBeNull()
+      fake.emitStatus({ ...fake.state.status, elapsed: 900, silentFor: 108, autoStopIn: 492 })
+      expect(store.status.silentFor).toBe(108)
+      expect(store.autoStopIn).toBe(492)
+      // Sound again: the core clears the countdown.
+      fake.emitStatus({ ...fake.state.status, elapsed: 901, silentFor: 0, autoStopIn: null })
+      expect(store.autoStopIn).toBeNull()
+      fake.state.status.elapsed = 1500
+      const rec = fake.autoStop('silence', 600)
+      expect(store.status.state).toBe('idle')
+      expect(store.autoStopIn).toBeNull()
+      expect(store.recordings[0]).toMatchObject({ id: rec.id, endReason: 'silence', trimmedSeconds: 600 })
+    })
+
+    it('tolerates an older core without the new fields', async () => {
+      fake.state.legacyStatus = true
+      const store = useRecorderStore()
+      await store.init()
+      await store.start()
+      expect(store.status.silentFor).toBe(0)
+      expect(store.autoStopIn).toBeNull()
+      const rec = await store.stop()
+      expect(rec?.endReason).toBeUndefined()
     })
   })
 })

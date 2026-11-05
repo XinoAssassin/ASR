@@ -34,6 +34,7 @@ import { isDesktop } from '@/platform'
 import { useHardwareStore } from '@/stores/hardware'
 import { useHealthStore } from '@/stores/health'
 import { useSettingsStore } from '@/stores/settings'
+import { useSetupGuideStore } from '@/stores/setupGuide'
 import { envVariable } from '@/utils/envFacts'
 import { deviceLabel } from '@/utils/hardware'
 
@@ -45,6 +46,7 @@ const { describe, notify } = useApiErrors()
 const health = useHealthStore()
 const settings = useSettingsStore()
 const hardware = useHardwareStore()
+const guide = useSetupGuideStore()
 const desktop = isDesktop()
 const route = useRoute()
 // Desktop only: a separate chunk the web build never loads.
@@ -312,6 +314,14 @@ onMounted(() => {
 
     <!-- SiYuan export (the backend pushes the documents itself) -->
     <SiyuanSettingsCard />
+
+    <!-- First-run setup guide (also behind the top bar "?") -->
+    <NCard :title="t('guide.title')" data-testid="guide-card">
+      <NSpace align="center" justify="space-between">
+        <NText depth="3">{{ t('guide.settingsText') }}</NText>
+        <NButton data-testid="guide-reopen" @click="guide.openGuide()">{{ t('guide.reopen') }}</NButton>
+      </NSpace>
+    </NCard>
 
     <!-- Read-only: only environment variables set these -->
     <EnvironmentCard

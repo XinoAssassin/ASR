@@ -26,6 +26,25 @@ const STATE_TYPE: Record<UploadState, 'default' | 'info' | 'success' | 'error' |
   failed: 'error',
 }
 
+/** How it ended, when not a plain manual stop (absent from older cores). */
+function endTag(rec: Recording): { type: 'default' | 'info' | 'warning'; text: string } | null {
+  switch (rec.endReason) {
+    case 'silence':
+    case 'app_exited':
+      return { type: 'info', text: t(`recorder.endReason.${rec.endReason}`) }
+    case 'failure':
+    case 'recovered':
+      return { type: 'warning', text: t(`recorder.endReason.${rec.endReason}`) }
+    default:
+      return null
+  }
+}
+
+function trimmedText(rec: Recording): string | null {
+  const s = rec.trimmedSeconds
+  return s && s >= 1 ? t('recorder.list.trimmed', { time: formatDuration(s) }) : null
+}
+
 function canUpload(rec: Recording): boolean {
   return rec.upload.state === 'pending' || rec.upload.state === 'failed'
 }
@@ -88,6 +107,14 @@ watch(
         <NText depth="3" class="meta">
           {{ time(rec.createdAt) }} · {{ formatDuration(rec.duration) }} · {{ formatBytes(rec.size) }}
         </NText>
+        <div v-if="endTag(rec) || trimmedText(rec)" class="ended" data-testid="recording-end">
+          <NTag v-if="endTag(rec)" size="tiny" :type="endTag(rec)!.type" :bordered="false" data-testid="recording-end-reason">
+            {{ endTag(rec)!.text }}
+          </NTag>
+          <NText v-if="trimmedText(rec)" depth="3" class="meta" data-testid="recording-trimmed">
+            {{ trimmedText(rec) }}
+          </NText>
+        </div>
       </div>
       <div class="state">
         <NSpace size="small" align="center" :wrap="false">
@@ -165,6 +192,14 @@ watch(
 
 .meta {
   font-size: 12px;
+}
+
+.ended {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
 }
 
 .state {
