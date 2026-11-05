@@ -33,6 +33,8 @@ type RecorderStatus = {
   sources: { system: boolean; mic: boolean }  // M10: what is actually captured (a missing mic
                                // falls back to system-only with a warning instead of failing)
   processId: number | null     // M10: process tree being captured, null = whole device
+  silentFor: number            // seconds since the last audio on any source (drives the auto-stop countdown)
+  autoStopIn: number | null    // seconds until an auto-stop, when one is pending
 }
 
 type StartOptions = {
@@ -43,6 +45,13 @@ type StartOptions = {
   outDir: string | null        // null = <Documents>/ASR Recordings
   processId?: number | null    // M10: capture only this process tree (Windows 10 2004+ process
                                // loopback); null / absent = the whole render device
+  autoStop?: AutoStopOptions   // absent = defaults below
+}
+
+type AutoStopOptions = {       // meeting end detection (D78)
+  silenceMinutes: number | null  // stop after this long without audio on any captured source; null = off; default 10
+  whenAppExits: boolean        // per-app capture: stop when that process ends; default true
+  trimSilence: boolean         // cut the trailing silence that led to an auto-stop; default true
 }
 
 type AudioProcess = { pid: number; name: string; title: string | null }   // M10
@@ -80,6 +89,8 @@ type Recording = {
     error: string | null       // last error, redacted (no keys / signed URLs)
     nextRetryAt: string | null
   }
+  endReason?: 'manual' | 'silence' | 'app_exited' | 'failure' | 'recovered'  // how the recording ended
+  trimmedSeconds?: number      // trailing silence removed on auto-stop
 }
 
 type BackendConfig = {
@@ -297,4 +308,23 @@ Credentials: `network_get_proxy` / `network_set_proxy` return the URL with the p
 (`user:***@host`). Sending that masked URL back unchanged — same scheme, host, port and user —
 keeps the stored password (like the app's API key `"***"`); `network_test_proxy` with such a draft
 uses the stored password too. Any other change replaces the stored URL as given.
+
+## Meeting end detection
+
+`recorder_start` takes `autoStop` (D78). While recording, the core tracks the last time any
+captured source had audio above the noise floor. After `silenceMinutes` without audio, or when the
+captured process ends (`whenAppExits`, per-app capture only), it stops the recording itself, cuts
+the trailing silence (`trimSilence`, keeping ~2 s), finalises and queues it like a manual stop.
+The recording records `endReason` and `trimmedSeconds`. `RecorderStatus.silentFor` and
+`autoStopIn` let the UI show a countdown, and `recorder_set_options` stores `autoStop` for the
+tray / hotkey toggle like the other options.
+
+## macOS
+
+The same SPA and Rust core build for macOS (Apple Silicon) in GitHub Actions (D79): system audio
+via ScreenCaptureKit (Screen Recording permission), microphone via ScreenCaptureKit on macOS 15+
+or the default input. Releases ship a zipped `.app` (ad-hoc signed, not notarised: first launch
+needs "Open anyway" in System Settings). Portable mode is not used on macOS (app bundles are
+read-only); state lives in `~/Library/Application Support/dev.asr.recorder`. The backend edition
+on macOS installs the `cpu` extra (Apple-GPU / MPS support is not part of this round).
 
