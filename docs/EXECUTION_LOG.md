@@ -476,3 +476,13 @@ passed 20/20 on Linux but failed once on Windows under heavy CPU load — watch 
 Windows clippy (app + selftest), 61 lib tests, release build starts and exits 0. Real audio capture
 was not re-run (no audio endpoint while RDP is disconnected).
 
+## 16. Desktop release workflow and macOS (2026-11-05)
+
+First runs of `.github/workflows/desktop.yml`: the Windows job (MSVC) passes (clippy, tests, release
+exe, smoke start, both portable zips). The macOS job compiles and runs 127 of 128 library tests;
+`managed::tests::cpu_install_verifies_and_starts_the_sidecar` is ignored on macOS only: after a
+stop, the restarted stand-in backend stays `Starting` (process alive, health never answers),
+while the same test passes on Linux and Windows. To debug on the user's Mac (SSH); until then a
+quick restart of the managed backend on macOS may hang in `Starting`. The sidecar now waits up to
+5 s for its port after a stop. Signing / notarisation not exercised yet (no secrets set).
+
