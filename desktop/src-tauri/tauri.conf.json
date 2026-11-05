@@ -54,7 +54,7 @@
     "copyright": "Copyright (c) 2026 ASR Recorder contributors",
     "category": "Productivity",
     "shortDescription": "Records system audio and microphone and sends them to the ASR backend",
-    "longDescription": "ASR Recorder captures what you hear (WASAPI loopback, optionally one application only) plus the microphone into a 2-channel 16 kHz FLAC and uploads it to a self-hosted ASR backend for speaker-labelled transcription.",
+    "longDescription": "ASR Recorder captures what you hear (Windows: WASAPI loopback, macOS: ScreenCaptureKit; optionally one application only) plus the microphone into a 2-channel 16 kHz FLAC and uploads it to a self-hosted ASR backend for speaker-labelled transcription.",
     "windows": {
       "nsis": {
         "installMode": "currentUser",
@@ -65,6 +65,13 @@
         "displayLanguageSelector": false,
         "startMenuFolder": "ASR Recorder"
       }
+    },
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "signingIdentity": "-",
+      "hardenedRuntime": true,
+      "entitlements": "entitlements.plist",
+      "infoPlist": "Info.plist"
     }
   }
 }

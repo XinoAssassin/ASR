@@ -21,14 +21,23 @@
 //!
 //! A portable folder can be moved (another drive letter, a USB stick): paths stored under the
 //! old root are rebased onto the new one at the next start ([`rebase`]).
+//!
+//! * **macOS** (D79): never portable (an app bundle is signed and read-only); Tauri's per-user
+//!   folders are `~/Library/Application Support/dev.asr.recorder` (app data and the managed
+//!   backend's `backend/`, `data/`, `models/`), `~/Library/Logs/dev.asr.recorder` and
+//!   `~/Documents/ASR Recordings`.
 
 use std::path::{Path, PathBuf};
 
 /// Marker files that switch on portable mode (next to the exe).
 pub const PORTABLE_MARKERS: [&str; 2] = ["portable", "portable.txt"];
 
-/// The portable root (the exe's folder) when a marker file sits next to `exe`.
+/// The portable root (the exe's folder) when a marker file sits next to `exe`. Always None on
+/// macOS: the exe lives inside the (signed, read-only) app bundle.
 pub fn portable_root(exe: &Path) -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
     let dir = exe.parent()?;
     PORTABLE_MARKERS
         .iter()
@@ -165,6 +174,16 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn never_portable_on_macos() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("asr-recorder");
+        std::fs::write(dir.path().join("portable"), b"").unwrap();
+        assert!(portable_root(&exe).is_none());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
     fn marker_switches_to_portable_layout() {
         let dir = tempfile::tempdir().unwrap();
         // spaces and CJK in the folder name

@@ -9,9 +9,11 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use super::activity::Activity;
 use super::capture::{self, CaptureSource, Packet, SourceKind};
 use super::timeline::{Timeline, TrackStats, OUT_RATE};
 use super::wav::{Storage, WavWriter};
+use crate::ipc::{AutoStopOptions, EndReason};
 
 const POLL: Duration = Duration::from_millis(10);
 const CHECKPOINT_S: f64 = 1.0;
@@ -24,6 +26,56 @@ pub const SILENCE_WARN_S: f64 = 60.0;
 pub const MAX_BACKLOG_S: f64 = 300.0;
 /// `spawn` gives up when the devices are not open after this long.
 pub const START_TIMEOUT: Duration = Duration::from_secs(20);
+/// Audio kept after the last sound when an auto-stop trims the trailing silence.
+pub const TRIM_KEEP_S: f64 = 2.0;
+/// `autoStopIn` is reported once the silence lasted this long (half the limit when shorter).
+pub const AUTO_STOP_PENDING_S: f64 = 60.0;
+
+/// Meeting end detection of one session (D78); `Default` = off.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct AutoStop {
+    /// Stop after this many seconds without audio on any track.
+    pub silence_s: Option<f64>,
+    /// Stop when the captured process (per-app capture) exits.
+    pub when_app_exits: bool,
+    /// Cut the trailing silence (keeping [`TRIM_KEEP_S`]).
+    pub trim: bool,
+}
+
+impl AutoStop {
+    /// From the IPC options; a non-positive or non-finite `silenceMinutes` is off.
+    pub fn from_options(o: &AutoStopOptions) -> Self {
+        Self {
+            silence_s: o
+                .silence_minutes
+                .filter(|m| m.is_finite() && *m > 0.0)
+                .map(|m| m * 60.0),
+            when_app_exits: o.when_app_exits,
+            trim: o.trim_silence,
+        }
+    }
+}
+
+/// The session stopped itself (auto-stop). Set in [`Live::ended`] when decided.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutoEnded {
+    pub reason: EndReason,
+    /// Bilingual, also pushed to the warnings.
+    pub message: String,
+    /// With trimming on: frames of the file to keep (last audio + [`TRIM_KEEP_S`]). Set when
+    /// the recorder thread has written its last frame; None while it is still finishing.
+    pub keep_frames: Option<u64>,
+}
+
+/// "10 分钟" / "10 min", "30 秒" / "30 s".
+fn duration_label(s: f64) -> (String, String) {
+    let m = s / 60.0;
+    if s >= 60.0 && (m - m.round()).abs() < 1e-6 {
+        (format!("{} 分钟", m.round()), format!("{} min", m.round()))
+    } else {
+        (format!("{} 秒", s.round()), format!("{} s", s.round()))
+    }
+}
 
 /// Platform services the recorder thread uses; tests substitute fakes.
 pub trait Env: Send + Sync + 'static {
@@ -99,6 +151,7 @@ pub struct SessionConfig {
     pub partial: PathBuf,
     /// Seconds of audio held in memory while the file cannot be written ([`MAX_BACKLOG_S`]).
     pub max_backlog_s: f64,
+    pub auto_stop: AutoStop,
 }
 
 /// Live values shared with the UI side.
@@ -117,6 +170,13 @@ pub struct Live {
     /// Set when the session ended by itself (unrecoverable write failure); the caller should
     /// `stop` it so the partial file is finalised.
     pub fatal: Option<String>,
+    /// Seconds since the last audio on any track (meeting end detection).
+    pub silent_for: f64,
+    /// Seconds until an auto-stop, when one is pending.
+    pub auto_stop_in: Option<f64>,
+    /// Set when the session stopped itself (silence / app exit); the caller should `stop` it
+    /// so the partial file is trimmed, finalised and queued.
+    pub ended: Option<AutoEnded>,
 }
 
 #[derive(Debug, Clone)]
@@ -375,6 +435,8 @@ fn run(
     log::info!("recording to {} ({channels} ch)", cfg.partial.display());
 
     let max_backlog = (cfg.max_backlog_s * OUT_RATE) as u64;
+    let mut activity = Activity::new(slots.len());
+    let mut auto_ended: Option<AutoEnded> = None;
     let mut frames: Vec<i16> = Vec::new();
     let mut polled: Vec<Polled> = Vec::new();
     let mut last_checkpoint = t0;
@@ -408,7 +470,7 @@ fn run(
                 }
             }
         }
-        let stopping = stop.load(Ordering::Acquire) || fatal.is_some();
+        let stopping = stop.load(Ordering::Acquire) || fatal.is_some() || auto_ended.is_some();
         polled.clear();
         for (i, s) in slots.iter_mut().enumerate() {
             // A reopen attempt finished?
@@ -488,6 +550,8 @@ fn run(
         if frames.capacity() > (1 << 20) && frames.capacity() > 4 * frames.len() {
             frames.shrink_to(1 << 16);
         }
+        // Exactly the frames that go to the file, in order (the trim cuts at these indices).
+        activity.push(&frames);
         // `write` always keeps the frames (buffered until the disk takes them); while an error
         // persists, retry every iteration.
         let mut res = if frames.is_empty() {
@@ -527,6 +591,44 @@ fn run(
                 }
             }
         }
+        let silent_s = activity.silent_frames() as f64 / OUT_RATE;
+        // The silence timeout arms with the first audio: a recording started before the
+        // meeting (waiting room, nobody talking yet) is not ended before it began.
+        let armed = activity.last_audio_end() > 0;
+        if !stopping && fatal.is_none() {
+            let exited = cfg.auto_stop.when_app_exits && process_gone;
+            let captured = slots.iter().find_map(|s| s.process);
+            let reason = match captured {
+                Some(pid) if exited => Some((
+                    EndReason::AppExited,
+                    format!(
+                        "被录制的进程 {pid} 已退出，录音已自动停止 / captured process {pid} exited, recording stopped automatically"
+                    ),
+                )),
+                _ => cfg
+                    .auto_stop
+                    .silence_s
+                    .filter(|limit| armed && silent_s >= *limit)
+                    .map(|limit| {
+                        let (zh, en) = duration_label(limit);
+                        (
+                            EndReason::Silence,
+                            format!(
+                                "{zh}没有声音，录音已自动停止 / no audio for {en}, recording stopped automatically"
+                            ),
+                        )
+                    }),
+            };
+            if let Some((reason, message)) = reason {
+                log::info!("auto-stop ({reason:?}) after {silent_s:.1} s of silence: {message}");
+                event_warnings.push(message.clone());
+                auto_ended = Some(AutoEnded {
+                    reason,
+                    message,
+                    keep_frames: None,
+                });
+            }
+        }
         {
             let peaks = tl.take_peaks();
             let mut l = live.lock().unwrap_or_else(|p| p.into_inner());
@@ -534,6 +636,16 @@ fn run(
             l.frames = tl.written();
             l.drift_ms = tl.drift_ms();
             l.follower_ppm = tl.follower_ppm();
+            l.silent_for = (silent_s * 10.0).round() / 10.0;
+            l.auto_stop_in = if auto_ended.is_some() {
+                Some(0.0)
+            } else {
+                cfg.auto_stop
+                    .silence_s
+                    .filter(|limit| armed && silent_s >= AUTO_STOP_PENDING_S.min(limit / 2.0))
+                    .map(|limit| ((limit - silent_s).max(0.0) * 10.0).round() / 10.0)
+            };
+            l.ended.clone_from(&auto_ended);
             l.warnings.clone_from(&start_warnings);
             l.warnings.extend(event_warnings.iter().cloned());
             for (i, s) in slots.iter().enumerate() {
@@ -586,6 +698,16 @@ fn run(
     let stats = tl.stats();
     let reference_rate = tl.map.rate();
     drop(slots);
+    if let Some(mut ended) = auto_ended {
+        // The cut: never before the end of the last block with audio (the final, partial block
+        // included) plus the kept margin.
+        activity.flush();
+        if cfg.auto_stop.trim {
+            let keep = activity.last_audio_end() + (TRIM_KEEP_S * OUT_RATE) as u64;
+            ended.keep_frames = Some(keep.min(activity.frames()));
+        }
+        live.lock().unwrap_or_else(|p| p.into_inner()).ended = Some(ended);
+    }
     // A last attempt for whatever is still buffered; what reached the disk stays a valid WAV
     // either way (the caller finalises the partial file).
     let finished = wav.finish();
@@ -618,6 +740,7 @@ mod tests {
             process_id: None,
             partial,
             max_backlog_s,
+            auto_stop: AutoStop::default(),
         }
     }
 

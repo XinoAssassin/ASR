@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged into the app bundle's Info.plist by the Tauri bundler (bundle.macOS.infoPlist). -->
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>ASR Recorder 录制麦克风，与系统声音一起转写。/ ASR Recorder records the microphone together with the system audio for transcription.</string>
+  <!-- ScreenCaptureKit audio needs the Screen Recording permission. macOS shows its own prompt
+       (no usage key is required); this text is for systems / tools that display it. -->
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>ASR Recorder 通过“屏幕录制”权限录制系统声音（不录制画面）。/ ASR Recorder uses the Screen Recording permission to capture system audio (no video is recorded).</string>
+  <key>NSHumanReadableCopyright</key>
+  <string>Copyright (c) 2026 ASR Recorder contributors</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.productivity</string>
+</dict>
+</plist>

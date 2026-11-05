@@ -146,6 +146,8 @@ impl Fixture {
             Arc::new(move |x: &ManagedProgress| p.lock().unwrap().push(x.clone())),
             Arc::new(move |x: &ManagedBackendStatus| s.lock().unwrap().push(x.clone())),
         )
+        // the GPU paths are exercised on every platform (a macOS build allows only cpu)
+        .cpu_only(false)
     }
 
     fn mode(&self, m: &str) {
@@ -328,6 +330,20 @@ fn cpu_install_verifies_and_starts_the_sidecar() {
         .last()
         .unwrap()
         .contains("--extra rocm --extra local"));
+}
+
+/// macOS (D79): only the cpu build is offered and accepted.
+#[test]
+fn cpu_only_platform_refuses_gpu_builds() {
+    let f = fixture(true);
+    let m = f.managed().without_sidecar_start().cpu_only(true);
+    let s = m.detect();
+    assert!(s[0].recommended && s.iter().skip(1).all(|o| !o.available));
+    let err = m.install(opts(ManagedHardware::Rocm)).unwrap_err();
+    assert!(err.contains("MPS"), "{err}");
+    assert_eq!(m.status().state, ManagedState::NotInstalled);
+    m.install(opts(ManagedHardware::Cpu)).unwrap();
+    assert_eq!(wait_done(&m).state, ManagedState::Installed);
 }
 
 #[test]

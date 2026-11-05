@@ -4,9 +4,9 @@ Tauri 2 shell around the SPA in `../frontend` that records **system audio** ("wh
 WASAPI loopback) and the **microphone** into one 2-channel 16 kHz FLAC and uploads it to the
 backend, which transcribes it as a `per_channel` job. Windows first (PLAN §6.3, milestones M9 /
 M10): per-application capture, an optional local backend sidecar and an NSIS installer; macOS
-(ScreenCaptureKit) and Linux (PulseAudio / PipeWire) capture are implemented in the recorder
-library (see the status table at the end). The IPC contract with the SPA is frozen in
-[`docs/desktop-ipc.md`](../docs/desktop-ipc.md).
+(ScreenCaptureKit, Apple Silicon; [macOS](#macos) below) builds in GitHub Actions, and Linux
+(PulseAudio / PipeWire) capture is implemented in the recorder library (see the status table at
+the end). The IPC contract with the SPA is frozen in [`docs/desktop-ipc.md`](../docs/desktop-ipc.md).
 
 ## Layout
 
@@ -15,12 +15,15 @@ desktop/
   package.json              tauri CLI (pnpm tauri dev / build)
   scripts/make_icons.py     regenerates src-tauri/icons (stdlib only)
   scripts/stage-backend.py  stages the bundled backend + pinned uv.exe into build/managed-backend
-  scripts/package-portable.ps1  release zips (both editions), optional NSIS installers
+  scripts/package-portable.ps1  Windows release zips (both editions), optional NSIS installers
+  scripts/macos-build.sh    macOS .app of both editions: sign (ad-hoc / Developer ID), notarise, zip, dmg
+  scripts/macos-dev.sh      user-space toolchain on a Mac (rustup, Node, pnpm, uv) + test / build / run
   build/                    git-ignored: staged resources, downloads, dist/ (release zips)
   src-tauri/
     Cargo.toml              feature `app` (default) = Tauri shell; without it a plain library
     tauri.conf.json         frontendDist ../../frontend/dist, devUrl http://localhost:5173
-    tauri.bundled.conf.json  "desktop + backend" installer: managed-backend/ resources + NSIS hooks
+    tauri.bundled.conf.json  "desktop + backend" edition: managed-backend/ resources + NSIS hooks
+    Info.plist / entitlements.plist  macOS usage strings / hardened-runtime entitlements
     nsis/                   uninstall hooks of that installer
     capabilities/           main window: event listen / unlisten only
     src/
@@ -41,7 +44,9 @@ desktop/
         pulse_capture.rs    PulseAudio-protocol monitor + source, pure Rust (Linux)
         resample.rs         band-limited variable-ratio resampler
         timeline.rs         clock map, drift control, silence fill  (the sync logic)
-        engine.rs           recorder thread: poll -> timeline -> partial WAV, device re-open
+        engine.rs           recorder thread: poll -> timeline -> partial WAV, device re-open,
+                            meeting end detection (auto-stop)
+        activity.rs         which output frames carry audio (adaptive noise floor)
         wav.rs / flac.rs    incremental WAV with patched header; streaming FLAC + verify
         mod.rs              Recorder handle, finalize, crash recovery
       uploader/             persistent queue, chunked upload, job create + poll, backoff
@@ -79,7 +84,9 @@ none), and they also build and run on Linux without WebKitGTK. On Windows the li
 *with* the `app` feature cannot start (`STATUS_ENTRYPOINT_NOT_FOUND`): it links Tauri, which
 needs common controls v6, but tauri-build embeds the manifest only into binaries.
 
-There is no desktop CI: builds and tests run on the dev machine (GNU toolchain).
+CI: [`.github/workflows/desktop.yml`](../.github/workflows/desktop.yml) builds both platforms
+(MSVC on `windows-latest`); see [CI and releases](#ci-and-releases). Day-to-day builds and tests
+still run on the dev machine (GNU toolchain).
 
 Release builds use the GUI subsystem (no console). Logs go to
 `%LOCALAPPDATA%\dev.asr.recorder\logs\` (tauri-plugin-log). App data (backend config, API key,
@@ -110,6 +117,7 @@ Test hooks (environment variables, for automated checks only):
 | `ASR_RECORDER_AUTO_RECORD_DIR=<dir>` | output folder for the auto recording |
 | `ASR_RECORDER_AUTO_RECORD_MIC=1` | include the mic in the auto recording |
 | `ASR_RECORDER_AUTO_RECORD_PID=<pid>` | auto recording captures only this process tree |
+| `ASR_RECORDER_AUTO_RECORD_SILENCE_MIN=<m>` | auto recording stops itself after `m` minutes without audio (e.g. `0.5`); the timed stop is skipped if it already stopped |
 | `ASR_RECORDER_AUTO_TOGGLE=<s>` | press the tray / hotkey toggle, and again `s` seconds later |
 | `ASR_RECORDER_TEST_MIC_SKEW_PPM=<n>` | pretend the mic clock is off by `n` ppm (drift-controller test) |
 | `ASR_RECORDER_AUTO_MANAGED_INSTALL=cpu\|cuda\|rocm` | run `managed_backend_install` 2 s after start (bundled edition) |
@@ -132,6 +140,8 @@ caches) into `build/managed-backend/source/`, plus `uv.exe` of **uv 0.13.1**
 (`x86_64-pc-windows-msvc`, from the astral-sh/uv GitHub release; SHA-256
 `3b2661a4…80a672`, checked against both the value pinned in the script and the release's
 `.sha256` file) and `VERSION` = `<project version>+<sha256 of the staged source, 12 hex>`.
+With `--target aarch64-apple-darwin` (the default on a Mac) it stages the macOS `uv` instead
+(see [macOS](#macos); there the resource dir is `ASR Recorder.app/Contents/Resources`).
 The repository has no licence file; `README.txt` in the resource names uv's licence (MIT / Apache-2.0).
 
 ### Releases are portable zips
@@ -359,6 +369,33 @@ everything; the next start re-syncs.
   process, a write error.
 * **driftMs** is the follower's filtered residual offset against the map (ms) — what is left
   after resampling; it stays well below 1 ms in steady state.
+* **Meeting end detection (auto-stop, D78).** `StartOptions.autoStop` (absent = defaults:
+  `silenceMinutes: 10`, `whenAppExits: true`, `trimSilence: true`; stored for the tray / hotkey
+  like the other options). `recorder/activity.rs` judges the 16 kHz frames exactly as they go to
+  the file, per channel in 100 ms blocks, against an adaptive noise floor: a block has audio when
+  its RMS is 12 dB above the floor, with the threshold clamped to −60 … −34 dBFS (steady hiss or a
+  fan does not count, anything above −34 dBFS always does, a quiet voice over digital silence
+  does). The floor follows quieter blocks at once and rises 6 dB per 10 s otherwise.
+  Silence-filled gaps (lost device, idle loopback) are digital zeros, i.e. silence; one block with
+  audio on any source resets the timer. The silence timeout arms with the first audio, so a
+  recording started before the meeting (waiting room) is not ended before anyone spoke. After
+  `silenceMinutes` without audio, or when the
+  per-app capture target exits (`whenAppExits`, checked every 2 s; a process of another user /
+  a protected one counts as alive), the engine stops writing and sets `Live::ended`; the app's
+  status loop then runs the normal stop path (`Recorder::stop`: trim, FLAC, verify, queue). The
+  trim (`wav::trim_tail`) truncates the partial WAV to *last audio block + 2 s* before encoding;
+  as a safety net it never cuts past a sample above −20 dBFS (the cut moves 2 s behind it), and
+  any trim error keeps the whole file. A failing FLAC keeps the (trimmed) WAV as `<stem>.wav`
+  (rule 8). `RecorderStatus.silentFor` is the time since the last audio (or the start);
+  `autoStopIn` is set once armed and the silence lasted 60 s (or half the limit, if shorter),
+  and is 0 when stopping.
+  `Recording.endReason` is `manual`, `silence`, `app_exited`, `failure` (write failure / dead
+  thread) or `recovered` (crash recovery / adopted files); `trimmedSeconds` is set for an
+  auto-stop with trimming. After an auto-stop the idle status carries a bilingual notice in
+  `warnings` (e.g. "10 分钟没有声音，录音已自动停止（已删除末尾 598 秒静音）/ no audio for 10 min,
+  recording stopped automatically (trailing 598 s of silence removed)") until the next start, and
+  the tray tooltip says "录音已自动停止 / recording stopped automatically". There is no toast
+  (portable Windows builds have no registered AppUserModelID for one).
 
 ## Uploads
 
@@ -472,10 +509,12 @@ redacted (no query strings / keys). Recordings are never deleted.
 
 ## Tray, hotkey, window
 
-* Tray icon: start/stop recording, show window, quit (quit finalises a running recording and
-  stops the sidecar first). Left click shows the window.
-* `Ctrl+Alt+R` toggles recording with the last stored start options (`recorder_start` and
-  `recorder_set_options` store them; default: both sources, default devices, default folder).
+* Tray icon (macOS: menu bar): start/stop recording, show window, quit (quit finalises a running
+  recording and stops the sidecar first). Left click shows the window; on macOS clicking the Dock
+  icon does too. After an auto-stop the tooltip says so until the next start.
+* `Ctrl+Alt+R` (macOS: `Cmd+Option+R`) toggles recording with the last stored start options
+  (`recorder_start` and `recorder_set_options` store them, `autoStop` included; default: both
+  sources, default devices, default folder, auto-stop defaults).
   A missing mic only produces a warning, so the toggle works on mic-less machines. If the
   shortcut is taken by another app, the app still starts (logged).
 * Closing the window hides it to the tray; recording and uploads continue.
@@ -543,12 +582,109 @@ file → Properties → tick **Unblock** before running). Signing with an Authen
 (`bundle.windows.certificateThumbprint` / `signCommand`) removes this once the tool leaves the
 team.
 
+## macOS
+
+Apple Silicon only (`aarch64-apple-darwin`), built in GitHub Actions (D79). Same SPA, same Rust
+core; system audio through ScreenCaptureKit (`recorder/sck_capture.rs`: display audio, or one
+app for `processId`), the microphone through ScreenCaptureKit on macOS 15+ (older: system audio
+only, with a warning).
+
+| | |
+|---|---|
+| Minimum | macOS 13 (ScreenCaptureKit audio); **the backend edition needs macOS 14**: torch 2.14.1 and av ship `macosx_14_0_arm64` wheels only (`tauri.bundled.conf.json` sets `minimumSystemVersion` 14.0) |
+| Release | `ASR-Recorder-<v>-macos-arm64.zip` and `…-macos-arm64-with-backend.zip` (zipped `ASR Recorder.app`); a `.dmg` of each when CI notarises |
+| State | never portable (the bundle is signed and read-only): `~/Library/Application Support/dev.asr.recorder` (settings, queue, key; backend edition: `backend/`, `data/`, `models/`), logs in `~/Library/Logs/dev.asr.recorder`, recordings in `~/Documents/ASR Recordings` |
+| Backend edition | `Contents/Resources/managed-backend/` with the macOS `uv` (0.13.1 `aarch64-apple-darwin`, SHA-256 `cfe45457…01acd2`, pinned in `stage-backend.py`); `cpu` + `local` extras only (`managed_backend_detect` offers cpu, cuda / rocm unavailable "Apple GPU / MPS not supported yet"; `managed_backend_install` refuses them) |
+| Hotkey | `Cmd+Option+R` |
+| Sidecar | own process group, SIGTERM then SIGKILL to the group on stop / quit (as on Linux). Unlike the Windows job object, a crash of the app does not take the sidecar down |
+
+**First launch.**
+
+1. Unzip, move `ASR Recorder.app` to `/Applications` (run from Downloads, macOS "translocates"
+   the app to a random read-only path).
+2. *Notarised build* (CI with the Apple secrets): opens normally. *Ad-hoc build* (no secrets, or a
+   local build): macOS says it "cannot verify" the app → **System Settings → Privacy & Security →
+   "ASR Recorder" was blocked → Open Anyway**, confirm with the password. Alternative for an admin
+   in Terminal: `xattr -dr com.apple.quarantine "/Applications/ASR Recorder.app"` (this also
+   covers the bundled `uv`, which the backend edition starts from inside the bundle).
+3. The first recording asks for **Screen Recording** (System Settings → Privacy & Security →
+   Screen & System Audio Recording; ScreenCaptureKit needs it even for audio only, no video is
+   captured) and **Microphone**. macOS may require restarting the app after granting Screen
+   Recording. Ad-hoc signatures change with every build, so macOS asks again after each update;
+   a Developer ID signature keeps the grant.
+
+**Signing and notarisation** (`scripts/macos-build.sh`, used by CI and `macos-dev.sh build`):
+
+* `APPLE_SIGNING_IDENTITY` unset / `-` → ad-hoc (`bundle.macOS.signingIdentity: "-"`), hardened
+  runtime on. With a Developer ID identity in a keychain the bundler signs the app with it; the
+  bundled `uv` is signed first (`--options runtime --timestamp`; notarisation requires every
+  Mach-O in the bundle to be signed, and the bundler signs only the app).
+* With `APPLE_API_ISSUER` / `APPLE_API_KEY` / `APPLE_API_KEY_PATH` (App Store Connect API key) the
+  Tauri bundler notarises the .app; the script staples it, checks `codesign --verify --deep
+  --strict`, `xcrun stapler validate` and `spctl -a -vv -t exec`, and with `--dmg` builds,
+  signs, notarises (`notarytool --wait`) and staples a .dmg too.
+* `entitlements.plist`: only `com.apple.security.device.audio-input` (the hardened runtime blocks
+  the microphone without it). Not needed: Screen Recording is a TCC permission, not an
+  entitlement; `network.client` / file entitlements belong to the App Sandbox, which the app
+  does not use; `cs.allow-jit` (WKWebView's JIT runs in WebKit's processes); and
+  `cs.disable-library-validation`: the managed backend's Python, torch and their unsigned
+  extension modules run in a separate child process (uv-managed python), never in the app's
+  process, and entitlements do not carry over to child processes.
+* `Info.plist` (merged by the bundler): `NSMicrophoneUsageDescription`,
+  `NSScreenCaptureUsageDescription` (bilingual).
+
+**Building on a Mac** (Xcode command line tools; no Homebrew, no sudo):
+
+```sh
+desktop/scripts/macos-dev.sh setup     # rustup + stable Rust, Node.js 24 (official tarball, SHA-256
+                                       # checked), pnpm (frontend's packageManager), uv 0.13.1 +
+                                       # Python 3.12 (uv-managed) into ~/.cargo, ~/.local/asr-dev
+desktop/scripts/macos-dev.sh test      # fmt --check, clippy -D warnings (app + lib), lib tests
+desktop/scripts/macos-dev.sh build --edition plain      # -> desktop/build/dist/*.zip (ad-hoc)
+desktop/scripts/macos-dev.sh run 20    # start the built app with logs on stdout, quit after 20 s
+desktop/scripts/macos-dev.sh dev       # pnpm tauri dev
+```
+
+`run` / `dev` need the user logged in at the Mac's screen (the window server), also over SSH.
+`macos-build.sh --help` lists its options (`--version`, `--edition plain|backend|both`,
+`--skip-frontend`, `--dmg`).
+
+**Lock check** (`backend/uv.lock`, `--extra cpu --extra local`, macOS arm64, CPython 3.12;
+2026-11-05): all 108 packages resolve; every binary package has a macOS arm64 wheel. Four are
+sdist-only and are built at install time (pure Python, as on Windows): `antlr4-python3-runtime`
+4.9.3, `crcmod` 1.7 (C extension optional, falls back to pure Python), `jieba` 0.42.1, `oss2`
+2.19.1. Wheels needing more than macOS 11: torch, av (14.0); numba, llvmlite, scipy,
+scikit-learn (12.0).
+
+Not verified yet (no Mac in this round): a real ScreenCaptureKit recording, the permission
+prompts, the managed backend install / sidecar on macOS, notarisation with real secrets.
+
+## CI and releases
+
+[`.github/workflows/desktop.yml`](../.github/workflows/desktop.yml), on `workflow_dispatch`
+(inputs `version`, `prerelease` = true) and on `v*` tags:
+
+| Job | Runner | Steps |
+|---|---|---|
+| `windows` | `windows-latest` (MSVC) | SPA, `cargo fmt --check`, clippy `-D warnings` (app and `--no-default-features`), lib tests, release exe (`tauri/custom-protocol`, version via `TAURI_CONFIG`), smoke start with `ASR_RECORDER_AUTO_EXIT` (non-fatal), `package-portable.ps1 -SkipFrontend -SkipBuild -Version <v>` → the two portable zips |
+| `macos` | `macos-15` (arm64) | SPA, fmt, clippy (app + lib), lib tests, `macos-build.sh` → both `.app` editions, zipped (+ `.dmg` when notarised) |
+| `release` | `ubuntu-latest` | only for a tag or a dispatch with `version`: all archives + `checksums.txt` (SHA-256) on the release `v<version>` (created at the commit, pre-release when `prerelease`; an existing release gets its assets replaced) |
+
+macOS signing is optional, through repository secrets: `APPLE_CERTIFICATE` (base64 .p12 of the
+Developer ID Application certificate), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
+`APPLE_TEAM_ID`; notarisation additionally `APPLE_API_ISSUER`, `APPLE_API_KEY` (key id) and
+`APPLE_API_KEY_P8` (the .p8 contents, PEM or base64; written to a temp file at runtime). The
+certificate goes into a temporary keychain that is deleted at the end of the job. Without the
+secrets the build is ad-hoc signed and the job logs a notice. Caches: `Swatinem/rust-cache`
+(per OS) and the pnpm store (`setup-node`). Errors of `macos-build.sh` are annotated with the
+failing step.
+
 ## Platform status
 
 | Platform | Capture | Built / tested here |
 |---|---|---|
 | Windows 10/11 | WASAPI device loopback + mic; process loopback (2004+) | yes: unit tests, self-tests, app + installer |
-| macOS 13+ | ScreenCaptureKit: display audio or one app (`processId`); mic through SCK on macOS 15+ (older: system only + warning); needs Screen Recording / Microphone permission | recorder library `cargo check`/`clippy --target aarch64-apple-darwin --no-default-features` clean from Windows; the Tauri shell needs Apple's toolchain (`objc2-exception-helper` compiles Objective-C); **never run on a Mac** |
+| macOS 13+ (Apple Silicon) | ScreenCaptureKit: display audio or one app (`processId`); mic through SCK on macOS 15+ (older: system only + warning); needs Screen Recording / Microphone permission | `clippy --target aarch64-apple-darwin --all-targets -D warnings` clean from Windows for the library and the Tauri shell (the shell with `CC_aarch64-apple-darwin` pointing to a stub that writes an empty object for `objc2-exception-helper`'s Objective-C file: type-check only, no linking); tests, link and bundles in CI (`macos-15`); **not run on a Mac yet** |
 | Linux | PulseAudio native protocol (pure Rust, works with PipeWire-pulse): monitor of the default sink + default source | unit tests on WSL; a real 2-channel capture through WSLg's PulseAudio (RDP sink / source) recorded a 4.0 s FLAC; per-process capture not supported |
 
 ## Known limitations
@@ -558,6 +694,8 @@ team.
 * Exclusive-mode / DRM-protected audio is silent in loopback (the 60 s silence warning shows).
 * Unsigned binaries: SmartScreen warns on first start (see above).
 * Upload progress within a file is not reported (only state changes).
-* macOS: the Tauri shell has not been built (needs a Mac); `devices()` returns pseudo devices
-  (SCK has no endpoint list); `processes()` lists all shareable apps, not only those with audio.
+* macOS: not run on a Mac yet; `devices()` returns pseudo devices (SCK has no endpoint list);
+  `processes()` lists all shareable apps, not only those with audio; no Apple GPU (MPS) for the
+  managed backend; the SPA is served from `tauri://localhost`, and WebKit may block plain-`http`
+  requests to a remote (non-loopback) backend from it as mixed content (loopback is fine).
 * Linux: no per-process capture; desktop shell untested (needs WebKitGTK).

@@ -319,12 +319,26 @@ The recording records `endReason` and `trimmedSeconds`. `RecorderStatus.silentFo
 `autoStopIn` let the UI show a countdown, and `recorder_set_options` stores `autoStop` for the
 tray / hotkey toggle like the other options.
 
+- The silence timer starts at the **first audio** of the recording: a recording started in a
+  waiting room is not ended before anyone speaks.
+- Audio = a 100 ms block 12 dB above an adaptive noise floor (threshold clamped to −60…−34 dBFS)
+  on any source; silence-filled gaps count as silence.
+- `autoStopIn` is set once silence has lasted 60 s (or half the limit, if shorter) and is 0 while
+  stopping.
+- After an auto-stop the idle `RecorderStatus.warnings` carry a bilingual notice until the next
+  start; the SPA can also react to `recordings://changed` with `endReason` `silence` / `app_exited`.
+- The trim never cuts past a sample above −20 dBFS (it keeps 2 s after the last loud sample).
+
 ## macOS
 
 The same SPA and Rust core build for macOS (Apple Silicon) in GitHub Actions (D79): system audio
 via ScreenCaptureKit (Screen Recording permission), microphone via ScreenCaptureKit on macOS 15+
 or the default input. Releases ship a zipped `.app` (ad-hoc signed, not notarised: first launch
 needs "Open anyway" in System Settings). Portable mode is not used on macOS (app bundles are
-read-only); state lives in `~/Library/Application Support/dev.asr.recorder`. The backend edition
-on macOS installs the `cpu` extra (Apple-GPU / MPS support is not part of this round).
+read-only); state lives in `~/Library/Application Support/dev.asr.recorder`, logs in
+`~/Library/Logs/dev.asr.recorder`. The global hotkey is Cmd+Option+R (Ctrl+Alt+R on Windows / Linux). The backend edition
+on macOS installs the `cpu` extra (Apple-GPU / MPS support is not part of this round) and needs
+macOS 14+ (torch / PyAV wheels); the recorder edition needs macOS 13+. With a Developer ID
+certificate in the CI secrets the app is signed with the hardened runtime and notarised (only the
+`audio-input` entitlement; the managed Python runs as a separate process).
 

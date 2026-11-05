@@ -161,6 +161,28 @@ pub fn suggest(gpus: &[Gpu]) -> Vec<HardwareSuggestion> {
     out
 }
 
+/// Why only `cpu` is offered on macOS (D79: Apple GPU / MPS support is not part of this round).
+pub const MACOS_CPU_ONLY: &str = "macOS 版本只支持 CPU（暂不支持 Apple GPU / MPS）/ \
+     On macOS only the CPU build is available (Apple GPU / MPS is not supported yet)";
+
+/// Suggestions when only the CPU build can be installed (macOS): cuda / rocm unavailable with
+/// `reason`, cpu recommended.
+pub fn suggest_cpu_only(reason: &str) -> Vec<HardwareSuggestion> {
+    let item = |id, label: &str, bytes| HardwareSuggestion {
+        id,
+        available: id == ManagedHardware::Cpu,
+        recommended: id == ManagedHardware::Cpu,
+        label: label.into(),
+        detail: (id != ManagedHardware::Cpu).then(|| reason.to_string()),
+        download_bytes: Some(bytes),
+    };
+    vec![
+        item(ManagedHardware::Cpu, "CPU", DOWNLOAD_CPU),
+        item(ManagedHardware::Cuda, "NVIDIA GPU (CUDA)", DOWNLOAD_CUDA),
+        item(ManagedHardware::Rocm, "AMD GPU (ROCm)", DOWNLOAD_ROCM),
+    ]
+}
+
 /// Display adapters of this PC (best effort; empty when they cannot be listed).
 pub fn detect_gpus() -> Vec<Gpu> {
     let mut v = platform_gpus();
@@ -332,6 +354,17 @@ mod tests {
         assert_eq!(amd_gfx_target(0, "AMD Radeon 880M"), Some("gfx1150"));
         assert_eq!(amd_gfx_target(0, "AMD Radeon 860M"), Some("gfx1152"));
         assert_eq!(amd_gfx_target(0, "AMD Radeon RX 6600"), None);
+    }
+
+    #[test]
+    fn cpu_only_suggestions() {
+        let s = suggest_cpu_only(MACOS_CPU_ONLY);
+        assert_eq!(s.len(), 3);
+        assert!(s[0].available && s[0].recommended && s[0].detail.is_none());
+        for o in &s[1..] {
+            assert!(!o.available && !o.recommended);
+            assert!(o.detail.as_deref().unwrap().contains("MPS"));
+        }
     }
 
     #[test]

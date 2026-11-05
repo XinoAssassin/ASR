@@ -1,5 +1,6 @@
 //! Recorder: capture -> timeline -> `<stem>.partial.wav` -> verified `<stem>.flac`.
 
+mod activity;
 pub mod capture;
 pub mod engine;
 pub mod flac;
@@ -24,8 +25,8 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Local, Utc};
 
-use crate::ipc::{Levels, RecorderState, RecorderStatus, StartOptions};
-use engine::{Env, Live, SessionConfig, SessionResult, SystemEnv};
+use crate::ipc::{EndReason, Levels, RecorderState, RecorderStatus, StartOptions};
+use engine::{AutoStop, Env, Live, SessionConfig, SessionResult, SystemEnv};
 
 pub const PARTIAL_SUFFIX: &str = ".partial.wav";
 
@@ -42,6 +43,10 @@ pub struct Finished {
     pub duration: f64,
     pub channels: u16,
     pub created_at: DateTime<Utc>,
+    /// How the recording ended (None: not known, e.g. a bare `finalize`).
+    pub end_reason: Option<EndReason>,
+    /// Trailing silence removed by an auto-stop (seconds).
+    pub trimmed_seconds: Option<f64>,
 }
 
 /// A recording found by [`Recorder::recover_dir`].
@@ -74,6 +79,8 @@ struct Inner {
     /// Stems whose files are owned by a starting / recording / finalising session or by a
     /// running recovery. Recovery never touches them, `start` never picks them.
     busy: HashSet<String>,
+    /// Shown in the idle status after an auto-stop, until the next start.
+    notice: Option<String>,
 }
 
 pub struct Recorder {
@@ -82,6 +89,32 @@ pub struct Recorder {
     max_backlog_s: f64,
     /// Finished files older than this can be leftovers of an earlier run (see `Recovered`).
     created: SystemTime,
+    /// FLAC encode + verify of `finalize` (tests inject failures).
+    encode_verify: EncodeVerify,
+}
+
+type EncodeVerify = fn(&Path, &Path) -> std::io::Result<u64>;
+
+fn flac_encode_verify(wav: &Path, flac: &Path) -> std::io::Result<u64> {
+    flac::encode(wav, flac)?;
+    flac::verify(flac, wav)
+}
+
+/// An auto-stop trim never cuts past a sample this loud (safety net behind the detector).
+const TRIM_SAFETY_PEAK: i16 = 3277; // -20 dBFS
+
+/// Bilingual notice after an auto-stop, with what was trimmed.
+fn end_notice(message: &str, trimmed: Option<f64>) -> String {
+    match trimmed.filter(|t| *t >= 0.5) {
+        Some(t) => {
+            let (zh, en) = match message.split_once(" / ") {
+                Some(p) => p,
+                None => (message, message),
+            };
+            format!("{zh}（已删除末尾 {t:.0} 秒静音）/ {en} (trailing {t:.0} s of silence removed)")
+        }
+        None => message.to_string(),
+    }
 }
 
 impl Default for Recorder {
@@ -148,10 +181,12 @@ impl Recorder {
                 last_file: None,
                 last_status: None,
                 busy: HashSet::new(),
+                notice: None,
             }),
             env,
             max_backlog_s: engine::MAX_BACKLOG_S,
             created: SystemTime::now(),
+            encode_verify: flac_encode_verify,
         }
     }
 
@@ -175,13 +210,26 @@ impl Recorder {
     pub fn failure(&self) -> Option<String> {
         let inner = self.lock();
         let s = inner.session.as_ref()?;
-        let fatal = s
-            .live
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .fatal
-            .clone();
-        fatal.or_else(|| s.thread.is_finished().then(|| THREAD_ENDED.to_string()))
+        let (fatal, ended) = {
+            let l = s.live.lock().unwrap_or_else(|p| p.into_inner());
+            (l.fatal.clone(), l.ended.is_some())
+        };
+        fatal.or_else(|| (s.thread.is_finished() && !ended).then(|| THREAD_ENDED.to_string()))
+    }
+
+    /// The notice of the last auto-stop (bilingual), until the next start.
+    pub fn notice(&self) -> Option<String> {
+        self.lock().notice.clone()
+    }
+
+    /// Some(reason) once the session stopped itself (meeting end detection: silence or the
+    /// captured app exited). Like [`failure`](Self::failure), the state stays `Recording` until
+    /// [`stop`](Self::stop) trims, finalises and returns the recording.
+    pub fn auto_stopped(&self) -> Option<EndReason> {
+        let inner = self.lock();
+        let s = inner.session.as_ref()?;
+        let l = s.live.lock().unwrap_or_else(|p| p.into_inner());
+        l.ended.as_ref().map(|e| e.reason)
     }
 
     /// Start recording. Blocks while the devices open (bounded by [`engine::START_TIMEOUT`]),
@@ -202,6 +250,7 @@ impl Recorder {
             // Reserved before the file exists, so recovery can never see it unowned.
             inner.busy.insert(stem.clone());
             inner.starting = true;
+            inner.notice = None;
             let partial = out_dir.join(format!("{stem}{PARTIAL_SUFFIX}"));
             (stem, partial, now)
         };
@@ -216,6 +265,7 @@ impl Recorder {
                 process_id: opts.process_id.filter(|_| opts.system),
                 partial: partial.clone(),
                 max_backlog_s: self.max_backlog_s,
+                auto_stop: AutoStop::from_options(&opts.auto_stop.unwrap_or_default()),
             },
             live.clone(),
             stop.clone(),
@@ -279,11 +329,47 @@ impl Recorder {
         if let Err(e) = &result {
             log::error!("recorder thread ended with: {e}");
         }
+        let ended = session
+            .live
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .ended
+            .clone();
+        let reason = match (&ended, &result) {
+            (Some(e), _) => e.reason,
+            (None, Err(_)) => EndReason::Failure,
+            (None, Ok(_)) => EndReason::Manual,
+        };
+        // Auto-stop: cut the trailing silence before encoding. Any error keeps the whole file.
+        let trimmed = ended.as_ref().and_then(|e| e.keep_frames).map(|keep| {
+            match wav::trim_tail(&session.partial, keep, TRIM_SAFETY_PEAK, keep_margin()) {
+                Ok((removed, rate)) => {
+                    let s = removed as f64 / rate.max(1) as f64;
+                    log::info!("auto-stop: trailing {s:.1} s of silence removed");
+                    (s * 10.0).round() / 10.0
+                }
+                Err(e) => {
+                    log::warn!("auto-stop trim skipped: {e}");
+                    0.0
+                }
+            }
+        });
         // Whatever happened, the partial file (if any) is finalised, never discarded.
-        let finished = finalize(&session.partial, &session.stem, session.created_at);
+        let finished = finalize_with(
+            &session.partial,
+            &session.stem,
+            session.created_at,
+            self.encode_verify,
+        )
+        .map(|mut f| {
+            f.end_reason = Some(reason);
+            f.trimmed_seconds = trimmed;
+            f
+        });
         let mut inner = self.lock();
         inner.busy.remove(&session.stem);
         inner.state = RecorderState::Idle;
+        inner.notice = ended.map(|e| end_notice(&e.message, trimmed));
         match &finished {
             Ok(f) => inner.last_file = Some(f.path.to_string_lossy().into_owned()),
             Err(e) => log::error!("finalise failed: {e}"),
@@ -322,9 +408,10 @@ impl Recorder {
             // A session may have finalised it between the listing and the claim.
             if p.exists() {
                 match guarded(|| finalize(&p, &stem, created)) {
-                    Ok(f) => {
+                    Ok(mut f) => {
                         log::info!("recovered {}", f.path.display());
                         done.insert(stem.clone());
+                        f.end_reason = Some(EndReason::Recovered);
                         out.push(Recovered {
                             finished: f,
                             adopted: false,
@@ -346,10 +433,13 @@ impl Recorder {
                 continue;
             }
             match guarded(|| describe(&p, &stem, created)) {
-                Ok(f) => out.push(Recovered {
-                    finished: f,
-                    adopted: true,
-                }),
+                Ok(mut f) => {
+                    f.end_reason = Some(EndReason::Recovered);
+                    out.push(Recovered {
+                        finished: f,
+                        adopted: true,
+                    })
+                }
                 Err(e) => log::warn!("cannot read {}: {e}", p.display()),
             }
             self.release(&stem);
@@ -414,6 +504,8 @@ fn describe(path: &Path, stem: &str, created_at: DateTime<Utc>) -> Result<Finish
         duration: frames as f64 / rate.max(1) as f64,
         channels,
         created_at,
+        end_reason: None,
+        trimmed_seconds: None,
     })
 }
 
@@ -428,6 +520,7 @@ fn status_of(inner: &Inner, take_peaks: bool) -> RecorderStatus {
     let Some(s) = inner.session.as_ref() else {
         let mut st = RecorderStatus::idle(inner.last_file.clone());
         st.state = inner.state;
+        st.warnings.extend(inner.notice.clone());
         return st;
     };
     let mut l = s.live.lock().unwrap_or_else(|p| p.into_inner());
@@ -443,6 +536,8 @@ fn status_of(inner: &Inner, take_peaks: bool) -> RecorderStatus {
         warnings: l.warnings.clone(),
         sources: l.sources,
         process_id: l.process_id,
+        silent_for: l.silent_for,
+        auto_stop_in: l.auto_stop_in,
     };
     if take_peaks {
         l.peak_system = 0.0;
@@ -455,10 +550,12 @@ fn status_of(inner: &Inner, take_peaks: bool) -> RecorderStatus {
 /// Also used for crash recovery (the WAV header is re-derived from the file length first).
 /// If FLAC fails, the WAV is kept as `<stem>.wav` and returned instead (never deleted).
 pub fn finalize(partial: &Path, stem: &str, created_at: DateTime<Utc>) -> Result<Finished, String> {
-    finalize_with(partial, stem, created_at, |wav, flac| {
-        flac::encode(wav, flac)?;
-        flac::verify(flac, wav)
-    })
+    finalize_with(partial, stem, created_at, flac_encode_verify)
+}
+
+/// Frames kept after a loud sample the trim safety net finds past the cut.
+fn keep_margin() -> u64 {
+    (engine::TRIM_KEEP_S * timeline::OUT_RATE) as u64
 }
 
 /// `finalize` with the encode + verify step (returning the verified frame count) injected.
@@ -536,6 +633,8 @@ fn finalize_with(
         duration: info.frames as f64 / info.rate.max(1) as f64,
         channels: info.channels,
         created_at,
+        end_reason: None,
+        trimmed_seconds: None,
     })
 }
 
@@ -859,6 +958,287 @@ mod tests {
         assert!(flac_path.exists() && f.path.exists());
     }
 
+    // ------------------------------------------------------------ meeting end detection (D78)
+
+    fn auto_opts(minutes: Option<f64>, process_id: Option<u32>, app_exit: bool) -> StartOptions {
+        StartOptions {
+            process_id,
+            auto_stop: Some(crate::ipc::AutoStopOptions {
+                silence_minutes: minutes,
+                when_app_exits: app_exit,
+                trim_silence: true,
+            }),
+            ..opts()
+        }
+    }
+
+    fn live_of(rec: &Recorder) -> Arc<Mutex<Live>> {
+        rec.lock().session.as_ref().unwrap().live.clone()
+    }
+
+    fn ended(l: &Live) -> bool {
+        l.ended.is_some()
+    }
+
+    fn silence_all(env: &testenv::FakeEnv) {
+        env.set_level(capture::SourceKind::System, Some(0.0));
+        env.set_level(capture::SourceKind::Mic, Some(0.0));
+    }
+
+    /// Channel `ch` of a finished FLAC / WAV recording.
+    fn channel(path: &Path, ch: usize) -> Vec<i16> {
+        if path.extension().is_some_and(|e| e == "flac") {
+            let mut r = claxon::FlacReader::open(path).unwrap();
+            let n = r.streaminfo().channels as usize;
+            let all: Vec<i32> = r.samples().map(|x| x.unwrap()).collect();
+            all.chunks_exact(n).map(|f| f[ch] as i16).collect()
+        } else {
+            let mut r = wav::WavReader::open(path).unwrap();
+            let n = r.info.channels as usize;
+            let mut out = Vec::new();
+            let mut b = Vec::new();
+            while r.read_bytes(4096, &mut b).unwrap() > 0 {
+                for f in b.chunks_exact(2 * n) {
+                    out.push(i16::from_le_bytes([f[2 * ch], f[2 * ch + 1]]));
+                }
+            }
+            out
+        }
+    }
+
+    /// `x[from_s..to_s]` (seconds at 16 kHz).
+    fn span(x: &[i16], from_s: f64, to_s: f64) -> &[i16] {
+        let a = ((from_s * 16000.0) as usize).min(x.len());
+        let b = ((to_s * 16000.0) as usize).min(x.len());
+        &x[a..b]
+    }
+
+    /// Sound for 3 s, then silence on both sources: after 6 s of silence the session stops by
+    /// itself (countdown in the status first), `stop` cuts the silence to ~2 s and keeps every
+    /// sample of the sound; the idle status carries the notice.
+    #[test]
+    fn silence_timeout_stops_and_trims_the_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = testenv::FakeEnv::manual();
+        let rec = Recorder::with_env(env.clone());
+        rec.start(&auto_opts(Some(0.1), None, true), dir.path())
+            .unwrap();
+        let live = live_of(&rec);
+        assert!(!env.run_until(&live, 3.0, 0.02, ended));
+        assert_eq!(
+            rec.status(false).auto_stop_in,
+            None,
+            "sound: nothing pending"
+        );
+        silence_all(&env);
+        assert!(!env.run_until(&live, 7.5, 0.05, ended));
+        let st = rec.status(false);
+        assert!((3.5..4.8).contains(&st.silent_for), "{st:?}");
+        let left = st.auto_stop_in.expect("countdown pending");
+        assert!((1.2..2.5).contains(&left), "{st:?}");
+        assert!(env.run_until(&live, 12.0, 0.05, ended), "auto-stopped");
+        let at = env.clock_s();
+        assert!((9.0..9.8).contains(&at), "stopped at {at}");
+        assert_eq!(rec.auto_stopped(), Some(EndReason::Silence));
+        assert_eq!(rec.state(), RecorderState::Recording, "until stop()");
+        let st = rec.status(false);
+        assert_eq!(st.auto_stop_in, Some(0.0));
+        assert!(
+            st.warnings.iter().any(|w| w.contains("no audio for 6 s")),
+            "{st:?}"
+        );
+        // the thread ended on purpose: not a failure
+        let t = std::time::Instant::now();
+        while !rec.lock().session.as_ref().unwrap().thread.is_finished()
+            && t.elapsed() < std::time::Duration::from_secs(5)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(rec.failure(), None);
+
+        let f = rec.stop().unwrap();
+        assert_eq!(f.end_reason, Some(EndReason::Silence));
+        assert_eq!(f.path.extension().unwrap(), "flac");
+        let trimmed = f.trimmed_seconds.unwrap();
+        assert!((4.9..5.3).contains(&f.duration), "{f:?}");
+        assert!((3.7..4.8).contains(&trimmed), "{f:?}");
+        assert!((f.duration + trimmed - at).abs() < 0.5, "{f:?} at {at}");
+        let (sys, mic) = (channel(&f.path, 0), channel(&f.path, 1));
+        let tone = |x: &[i16], v: f32| {
+            let want = timeline::to_i16(v);
+            x.iter().all(|&s| (s - want).abs() <= 2)
+        };
+        assert!(tone(span(&sys, 0.5, 2.95), 0.25), "system sound kept");
+        assert!(tone(span(&mic, 0.5, 2.95), -0.125), "mic sound kept");
+        assert!(span(&sys, 3.3, 99.0).iter().all(|s| s.abs() <= 2));
+        assert!(
+            span(&sys, 3.3, 99.0).len() > 16000,
+            "~2 s of the silence kept"
+        );
+        let st = rec.status(false);
+        assert_eq!(st.state, RecorderState::Idle);
+        assert_eq!(st.warnings.len(), 1, "{st:?}");
+        assert!(st.warnings[0].contains("no audio for 6 s"), "{st:?}");
+        assert!(st.warnings[0].contains("silence removed"), "{st:?}");
+        // the next start clears the notice
+        rec.start(&opts(), dir.path()).unwrap();
+        assert!(rec.status(false).warnings.is_empty());
+        rec.stop().unwrap();
+    }
+
+    /// Sound on one source resets the timer: a short mic-only burst 4 s into the silence
+    /// postpones the auto-stop by those 4 s.
+    #[test]
+    fn sound_on_any_source_resets_the_timer() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = testenv::FakeEnv::manual();
+        let rec = Recorder::with_env(env.clone());
+        rec.start(&auto_opts(Some(0.1), None, true), dir.path())
+            .unwrap();
+        let live = live_of(&rec);
+        assert!(!env.run_until(&live, 1.0, 0.02, ended));
+        silence_all(&env);
+        assert!(!env.run_until(&live, 5.0, 0.05, ended));
+        env.set_level(capture::SourceKind::Mic, None);
+        assert!(!env.run_until(&live, 5.5, 0.02, ended));
+        env.set_level(capture::SourceKind::Mic, Some(0.0));
+        assert!(
+            !env.run_until(&live, 10.8, 0.05, ended),
+            "stopped too early"
+        );
+        assert!(env.run_until(&live, 14.0, 0.05, ended));
+        let at = env.clock_s();
+        assert!((11.3..12.3).contains(&at), "stopped at {at}");
+        let f = rec.stop().unwrap();
+        assert_eq!(f.end_reason, Some(EndReason::Silence));
+        let mic = channel(&f.path, 1);
+        let want = timeline::to_i16(-0.125);
+        assert!(span(&mic, 5.05, 5.45)
+            .iter()
+            .all(|&s| (s - want).abs() <= 2));
+        assert!((7.4..7.9).contains(&f.duration), "{f:?}");
+    }
+
+    /// The silence timeout arms with the first audio: 15 s of silence at the start (limit 6 s)
+    /// do not stop the recording; 6 s of silence after the first sound do.
+    #[test]
+    fn silence_before_the_first_audio_does_not_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = testenv::FakeEnv::manual();
+        silence_all(&env);
+        let rec = Recorder::with_env(env.clone());
+        rec.start(&auto_opts(Some(0.1), None, true), dir.path())
+            .unwrap();
+        let live = live_of(&rec);
+        assert!(!env.run_until(&live, 15.0, 0.05, ended));
+        let st = rec.status(false);
+        assert!(st.silent_for > 14.0 && st.auto_stop_in.is_none(), "{st:?}");
+        env.set_level(capture::SourceKind::System, None);
+        assert!(!env.run_until(&live, 16.0, 0.02, ended));
+        env.set_level(capture::SourceKind::System, Some(0.0));
+        assert!(env.run_until(&live, 25.0, 0.05, ended));
+        let at = env.clock_s();
+        assert!((22.0..22.8).contains(&at), "stopped at {at}");
+        let f = rec.stop().unwrap();
+        assert_eq!(f.end_reason, Some(EndReason::Silence));
+        // nothing before the sound is cut (only the tail)
+        assert!((17.9..18.4).contains(&f.duration), "{f:?}");
+    }
+
+    /// Per-app capture: the captured process exits -> the session stops by itself (checked
+    /// every 2 s); the sound up to the end is kept (nothing to trim). With `whenAppExits` off
+    /// only the warning shows.
+    #[test]
+    fn captured_app_exit_stops_the_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = testenv::FakeEnv::manual();
+        let rec = Recorder::with_env(env.clone());
+        rec.start(&auto_opts(Some(10.0), Some(4242), true), dir.path())
+            .unwrap();
+        assert_eq!(rec.status(false).process_id, Some(4242));
+        let live = live_of(&rec);
+        assert!(!env.run_until(&live, 3.0, 0.02, ended));
+        env.kill(4242);
+        assert!(env.run_until(&live, 8.0, 0.02, ended));
+        let at = env.clock_s();
+        assert!((3.0..5.2).contains(&at), "stopped at {at}");
+        assert_eq!(rec.auto_stopped(), Some(EndReason::AppExited));
+        let f = rec.stop().unwrap();
+        assert_eq!(f.end_reason, Some(EndReason::AppExited));
+        assert_eq!(f.trimmed_seconds, Some(0.0));
+        assert!((f.duration - at).abs() < 0.4, "{f:?} at {at}");
+        let st = rec.status(false);
+        assert!(
+            st.warnings[0].contains("captured process 4242 exited"),
+            "{st:?}"
+        );
+
+        // whenAppExits off: keeps recording, with the warning
+        let env = testenv::FakeEnv::manual();
+        let rec = Recorder::with_env(env.clone());
+        rec.start(&auto_opts(Some(10.0), Some(77), false), dir.path())
+            .unwrap();
+        let live = live_of(&rec);
+        env.kill(77);
+        assert!(!env.run_until(&live, 6.0, 0.05, ended));
+        let st = rec.status(false);
+        assert!(
+            st.warnings
+                .iter()
+                .any(|w| w.contains("captured process 77 has exited")),
+            "{st:?}"
+        );
+        let f = rec.stop().unwrap();
+        assert_eq!(f.end_reason, Some(EndReason::Manual));
+        assert_eq!(f.trimmed_seconds, None);
+    }
+
+    /// `silenceMinutes: null` turns the silence timeout off: 20 s of silence, no countdown,
+    /// no stop (silentFor still reported).
+    #[test]
+    fn silence_minutes_null_disables_the_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = testenv::FakeEnv::manual();
+        silence_all(&env);
+        let rec = Recorder::with_env(env.clone());
+        rec.start(&auto_opts(None, None, true), dir.path()).unwrap();
+        let live = live_of(&rec);
+        assert!(!env.run_until(&live, 20.0, 0.1, ended));
+        let st = rec.status(false);
+        assert!((19.0..20.1).contains(&st.silent_for), "{st:?}");
+        assert_eq!(st.auto_stop_in, None);
+        let f = rec.stop().unwrap();
+        assert_eq!(f.end_reason, Some(EndReason::Manual));
+        assert!((f.duration - 20.0).abs() < 0.2, "{f:?}");
+    }
+
+    /// Rule 8 on the auto-stop path: FLAC fails after the trim -> the (trimmed) WAV is kept
+    /// as `<stem>.wav` with all the sound, and returned for the queue.
+    #[test]
+    fn auto_stop_with_failing_flac_keeps_the_wav() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = testenv::FakeEnv::manual();
+        let mut rec = Recorder::with_env(env.clone());
+        rec.encode_verify = |_, _| Err(std::io::Error::other("encoder broken (simulated)"));
+        rec.start(&auto_opts(Some(0.05), None, true), dir.path())
+            .unwrap();
+        let live = live_of(&rec);
+        assert!(!env.run_until(&live, 1.0, 0.02, ended));
+        silence_all(&env);
+        assert!(env.run_until(&live, 10.0, 0.05, ended));
+        let f = rec.stop().unwrap();
+        assert_eq!(f.path, dir.path().join(format!("{}.wav", f.stem)));
+        assert!(f.path.exists());
+        assert!(!dir.path().join(format!("{}.flac", f.stem)).exists());
+        assert_eq!(f.end_reason, Some(EndReason::Silence));
+        assert!(f.trimmed_seconds.unwrap() > 0.5, "{f:?}");
+        let sys = channel(&f.path, 0);
+        assert_eq!(sys.len() as f64 / 16000.0, f.duration);
+        let want = timeline::to_i16(0.25);
+        assert!(span(&sys, 0.2, 0.95).iter().all(|&s| (s - want).abs() <= 2));
+        assert!((2.9..3.3).contains(&f.duration), "{f:?}");
+    }
+
     /// The disk fails for good: `failure()` reports it, the state stays Recording until `stop`,
     /// which still finalises what reached the disk.
     #[test]
@@ -880,6 +1260,7 @@ mod tests {
         let f = rec.stop().unwrap();
         assert_eq!(f.path.extension().unwrap(), "flac");
         assert!((0.9..1.4).contains(&f.duration), "{f:?}");
+        assert_eq!(f.end_reason, Some(EndReason::Failure));
         assert_eq!(rec.state(), RecorderState::Idle);
         assert_eq!(rec.failure(), None);
     }

@@ -84,6 +84,8 @@ pub fn recording_from(f: &Finished) -> Recording {
             error: None,
             next_retry_at: None,
         },
+        end_reason: f.end_reason,
+        trimmed_seconds: f.trimmed_seconds,
     }
 }
 

@@ -142,6 +142,8 @@ pub struct Managed {
     on_status: OnStatus,
     /// Start the sidecar after an install (tests without a server switch it off).
     start_sidecar: AtomicBool,
+    /// Only the `cpu` build can be installed (macOS, D79).
+    cpu_only: AtomicBool,
     proxy: Mutex<Option<crate::proxy::ProxyFn>>,
 }
 
@@ -211,6 +213,7 @@ impl Managed {
             on_progress,
             on_status,
             start_sidecar: AtomicBool::new(true),
+            cpu_only: AtomicBool::new(cfg!(target_os = "macos")),
             proxy: Mutex::new(None),
         });
         me.register_launch();
@@ -220,6 +223,13 @@ impl Managed {
     #[cfg(all(test, unix))]
     fn without_sidecar_start(self: Arc<Self>) -> Arc<Self> {
         self.start_sidecar.store(false, Ordering::SeqCst);
+        self
+    }
+
+    /// Tests: allow (or forbid) the GPU builds whatever the platform.
+    #[cfg(all(test, unix))]
+    fn cpu_only(self: Arc<Self>, on: bool) -> Arc<Self> {
+        self.cpu_only.store(on, Ordering::SeqCst);
         self
     }
 
@@ -374,6 +384,9 @@ impl Managed {
     }
 
     pub fn detect(&self) -> Vec<HardwareSuggestion> {
+        if self.cpu_only.load(Ordering::SeqCst) {
+            return hardware::suggest_cpu_only(hardware::MACOS_CPU_ONLY);
+        }
         let gpus = hardware::detect_gpus();
         log::info!("managed backend: display adapters {gpus:?}");
         hardware::suggest(&gpus)
@@ -401,6 +414,9 @@ impl Managed {
     ) -> Result<ManagedBackendStatus, String> {
         if self.bundle.is_none() {
             return Err("这个版本不含内置后端 / This build has no bundled backend".into());
+        }
+        if self.cpu_only.load(Ordering::SeqCst) && opts.hardware != ManagedHardware::Cpu {
+            return Err(hardware::MACOS_CPU_ONLY.into());
         }
         let p = self.persisted();
         // None = keep the earlier choice (default when there is none); a path = use it.

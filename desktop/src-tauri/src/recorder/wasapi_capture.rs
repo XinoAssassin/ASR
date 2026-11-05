@@ -390,14 +390,17 @@ pub fn processes() -> Result<Vec<AudioProcess>, String> {
 }
 
 pub fn process_exists(pid: u32) -> bool {
-    use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows::Win32::Foundation::{CloseHandle, E_ACCESSDENIED, STILL_ACTIVE};
     use windows::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     // SAFETY: plain Win32 calls; the handle is closed below.
     unsafe {
-        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
-            return false;
+        let h = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            Ok(h) => h,
+            // A protected process exists but cannot be opened (a false "gone" would auto-stop
+            // the recording).
+            Err(e) => return e.code() == E_ACCESSDENIED,
         };
         let mut code = 0u32;
         let ok = GetExitCodeProcess(h, &mut code).is_ok();

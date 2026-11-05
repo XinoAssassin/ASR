@@ -200,8 +200,10 @@ pub fn process_exists(pid: u32) -> bool {
     }
     #[cfg(unix)]
     {
-        // SAFETY: kill(pid, 0) only checks for existence / permission.
-        unsafe { libc::kill(pid as i32, 0) == 0 }
+        // SAFETY: kill(pid, 0) only checks for existence / permission. EPERM = it exists but
+        // belongs to another user (a false "gone" would auto-stop the recording).
+        let alive = unsafe { libc::kill(pid as i32, 0) == 0 };
+        alive || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
     #[cfg(not(any(windows, unix)))]
     {

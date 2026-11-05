@@ -269,6 +269,8 @@ fn env_with(url: &str, tweak: impl FnOnce(&mut BackendConfig)) -> Env {
             duration: 1.0,
             channels: 2,
             created_at: Utc::now(),
+            end_reason: None,
+            trimmed_seconds: None,
         },
         true,
     );
@@ -628,6 +630,8 @@ fn re_adding_an_indexed_file_keeps_its_state() {
             duration: 1.0,
             channels: 2,
             created_at: Utc::now(),
+            end_reason: None,
+            trimmed_seconds: None,
         },
         true,
     );

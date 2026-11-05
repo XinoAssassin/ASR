@@ -28,7 +28,15 @@ pub const EV_RECORDINGS: &str = "recordings://changed";
 pub const EV_SIDECAR: &str = "sidecar://status";
 pub const EV_MANAGED_PROGRESS: &str = "managed-backend://progress";
 pub const EV_MANAGED_STATUS: &str = "managed-backend://status";
+/// Global toggle: Ctrl+Alt+R, on macOS Cmd+Option+R.
+#[cfg(not(target_os = "macos"))]
 const HOTKEY: &str = "ctrl+alt+r";
+#[cfg(target_os = "macos")]
+const HOTKEY: &str = "cmd+alt+r";
+#[cfg(not(target_os = "macos"))]
+const HOTKEY_LABEL: &str = "Ctrl+Alt+R";
+#[cfg(target_os = "macos")]
+const HOTKEY_LABEL: &str = "Cmd+Option+R";
 
 pub struct AppState {
     recorder: Arc<Recorder>,
@@ -60,14 +68,18 @@ fn refresh_tray(app: &AppHandle) {
     let recording = state.recorder.state() == RecorderState::Recording;
     if let Some(item) = crate::util::lock(&state.tray_toggle).as_ref() {
         let _ = item.set_text(if recording {
-            "停止录音 (Ctrl+Alt+R)"
+            format!("停止录音 ({HOTKEY_LABEL})")
         } else {
-            "开始录音 (Ctrl+Alt+R)"
+            format!("开始录音 ({HOTKEY_LABEL})")
         });
     }
     if let Some(tray) = app.tray_by_id("main") {
+        // After an auto-stop the tooltip says so until the next start (the full bilingual
+        // notice is in the idle RecorderStatus.warnings and the recording's endReason).
         let _ = tray.set_tooltip(Some(if recording {
             "ASR Recorder — 录音中"
+        } else if state.recorder.notice().is_some() {
+            "ASR Recorder — 录音已自动停止 / recording stopped automatically"
         } else {
             "ASR Recorder"
         }));
@@ -405,20 +417,37 @@ fn open_folder(dir: &std::path::Path) -> Res<()> {
         .map_err(|e| e.to_string())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn open_folder(dir: &std::path::Path) -> Res<()> {
+    std::process::Command::new("/usr/bin/open")
+        .arg(dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn open_folder(dir: &std::path::Path) -> Res<()> {
     reveal(&dir.join("."))
 }
 
-#[cfg(not(windows))]
+/// Finder: select the file (`open -R`), or open its folder when it is gone. Full path: a bare
+/// name would follow PATH.
+#[cfg(target_os = "macos")]
+fn reveal(path: &std::path::Path) -> Res<()> {
+    let mut cmd = std::process::Command::new("/usr/bin/open");
+    if path.exists() {
+        cmd.arg("-R").arg(path);
+    } else {
+        cmd.arg(path.parent().unwrap_or(path));
+    }
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn reveal(path: &std::path::Path) -> Res<()> {
     let dir = path.parent().unwrap_or(path);
-    let opener = if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-    std::process::Command::new(opener)
+    std::process::Command::new("xdg-open")
         .arg(dir)
         .spawn()
         .map(|_| ())
@@ -598,8 +627,13 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Tray.
-    let toggle_item =
-        MenuItem::with_id(app, "toggle", "开始录音 (Ctrl+Alt+R)", true, None::<&str>)?;
+    let toggle_item = MenuItem::with_id(
+        app,
+        "toggle",
+        format!("开始录音 ({HOTKEY_LABEL})"),
+        true,
+        None::<&str>,
+    )?;
     let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
@@ -689,7 +723,20 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             let state = handle.state::<AppState>();
             if state.recorder.state() == RecorderState::Recording {
                 emit_status(&handle, &state.recorder.status(true));
-                if let Some(reason) = state.recorder.failure() {
+                // Meeting end detection (D78): silence / captured app exited. The normal stop
+                // path trims, finalises, verifies and queues the recording.
+                if let Some(reason) = state.recorder.auto_stopped() {
+                    log::info!("recording stopped itself ({reason:?}); finalising");
+                    match do_stop(&handle) {
+                        Ok(r) => log::info!(
+                            "auto-stopped recording {}: {:?}, {:?} s trimmed",
+                            r.id,
+                            r.end_reason,
+                            r.trimmed_seconds
+                        ),
+                        Err(e) => log::error!("stop after auto-stop: {e}"),
+                    }
+                } else if let Some(reason) = state.recorder.failure() {
                     log::error!("recording ended by itself: {reason}; finalising");
                     if let Err(e) = do_stop(&handle) {
                         log::error!("stop after failure: {e}");
@@ -714,6 +761,14 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 process_id: std::env::var("ASR_RECORDER_AUTO_RECORD_PID")
                     .ok()
                     .and_then(|v| v.parse().ok()),
+                // e.g. 0.5: stop after 30 s of silence (auto-stop end-to-end check)
+                auto_stop: std::env::var("ASR_RECORDER_AUTO_RECORD_SILENCE_MIN")
+                    .ok()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .map(|m| crate::ipc::AutoStopOptions {
+                        silence_minutes: Some(m),
+                        ..Default::default()
+                    }),
                 ..StartOptions::default()
             };
             match do_start(&handle, opts) {
@@ -721,6 +776,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => return log::error!("auto-record start failed: {e}"),
             }
             std::thread::sleep(Duration::from_secs(secs));
+            if handle.state::<AppState>().recorder.state() != RecorderState::Recording {
+                return log::info!("auto-record: already stopped (auto-stop)");
+            }
             match do_stop(&handle) {
                 Ok(r) => log::info!(
                     "auto-record finished: {}",
@@ -888,6 +946,11 @@ pub fn run() {
         .build(context)
         .expect("error while building the Tauri application");
     app.run(|handle, event| {
+        // macOS: clicking the Dock icon of the running app (window hidden) shows it again.
+        #[cfg(target_os = "macos")]
+        if let RunEvent::Reopen { .. } = &event {
+            show_main(handle);
+        }
         if let RunEvent::ExitRequested { api, code, .. } = &event {
             // Exit requested elsewhere (e.g. session end) while recording: finalise first.
             if code.is_none()

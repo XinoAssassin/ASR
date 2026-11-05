@@ -1,0 +1,333 @@
+# Desktop app (desktop/, Tauri 2): checks, builds and portable release archives.
+#
+#   windows  windows-latest (MSVC): SPA, rustfmt, clippy -D warnings, lib tests, release exe,
+#            the two portable zips (desktop/scripts/package-portable.ps1)
+#   macos    macos-15 (Apple Silicon): SPA, rustfmt, clippy, lib tests, the .app of both editions
+#            (desktop/scripts/macos-build.sh), zipped; signed + notarised (+ .dmg) when the Apple
+#            secrets below exist, else ad-hoc signed
+#   release  for `v*` tags and for a dispatch with a version: all archives + checksums.txt on the
+#            GitHub release of that tag (created, as a pre-release when `prerelease` is true)
+#
+# Optional repository secrets (macOS signing / notarisation; all of the first group, or none):
+#   APPLE_CERTIFICATE            base64 of the "Developer ID Application" .p12
+#   APPLE_CERTIFICATE_PASSWORD   its password
+#   APPLE_SIGNING_IDENTITY       "Developer ID Application: Name (TEAMID)"
+#   APPLE_TEAM_ID                TEAMID
+#   APPLE_API_ISSUER, APPLE_API_KEY (key id), APPLE_API_KEY_P8 (contents of AuthKey_<id>.p8,
+#                                PEM or base64): App Store Connect API key for notarytool
+name: desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without the v (e.g. 0.2.0 or 0.2.0-beta.1). Set = also publish the release v<version>; empty = artifacts only (tauri.conf.json version)"
+        required: false
+        default: ""
+      prerelease:
+        description: "Publish the release as a pre-release"
+        type: boolean
+        default: true
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}-${{ inputs.version || 'none' }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  meta:
+    name: version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.v.outputs.release }}
+      tag: ${{ steps.v.outputs.tag }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Resolve version and release
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          conf=$(python3 -c 'import json; print(json.load(open("desktop/src-tauri/tauri.conf.json"))["version"])')
+          if [[ "$EVENT" == push && "$REF_TYPE" == tag ]]; then
+            version="${REF_NAME#v}"; release=true; prerelease=true
+          elif [[ -n "$INPUT_VERSION" ]]; then
+            version="${INPUT_VERSION#v}"; release=true; prerelease="$INPUT_PRERELEASE"
+          else
+            version="$conf"; release=false; prerelease=true
+          fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error title=version::'$version' is not a semantic version (X.Y.Z or X.Y.Z-pre)"
+            exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "release=$release"
+            echo "tag=v$version"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "### Desktop $version (release: $release, pre-release: $prerelease)" >> "$GITHUB_STEP_SUMMARY"
+
+  windows:
+    name: windows (x64, MSVC)
+    needs: meta
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            frontend/pnpm-lock.yaml
+            desktop/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+          key: windows
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: SPA (frontend build)
+        run: |
+          pnpm --dir frontend install --frozen-lockfile
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pnpm --dir frontend build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: rustfmt
+        working-directory: desktop/src-tauri
+        run: cargo fmt --check
+      - name: clippy (app)
+        working-directory: desktop/src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: clippy (recorder library)
+        working-directory: desktop/src-tauri
+        run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
+      - name: tests (library)
+        working-directory: desktop/src-tauri
+        run: cargo test --locked --no-default-features
+      - name: release exe
+        working-directory: desktop/src-tauri
+        env:
+          TAURI_CONFIG: '{"version":"${{ needs.meta.outputs.version }}"}'
+        run: cargo build --locked --release --features tauri/custom-protocol
+      - name: smoke test (start, quit after 8 s)
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          $env:ASR_RECORDER_AUTO_EXIT = "8"
+          $p = Start-Process -FilePath desktop\src-tauri\target\release\asr-recorder.exe -PassThru
+          if (-not $p.WaitForExit(90000)) { $p.Kill(); throw "asr-recorder.exe did not quit within 90 s" }
+          "exit code $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { throw "asr-recorder.exe exited with $($p.ExitCode)" }
+      - name: portable zips
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}\desktop\src-tauri\target
+        run: |
+          ./desktop/scripts/package-portable.ps1 -SkipFrontend -SkipBuild -Version "${{ needs.meta.outputs.version }}"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows
+          path: desktop/build/dist/*.zip
+          if-no-files-found: error
+
+  macos:
+    name: macos (Apple Silicon)
+    needs: meta
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+      HAS_APPLE_NOTARY: ${{ secrets.APPLE_API_ISSUER != '' && secrets.APPLE_API_KEY != '' && secrets.APPLE_API_KEY_P8 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            frontend/pnpm-lock.yaml
+            desktop/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+          key: macos
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: SPA (frontend build)
+        run: |
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend build
+      - name: rustfmt
+        working-directory: desktop/src-tauri
+        run: cargo fmt --check
+      - name: clippy (app)
+        working-directory: desktop/src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: clippy (recorder library)
+        working-directory: desktop/src-tauri
+        run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
+      - name: tests (library)
+        working-directory: desktop/src-tauri
+        run: cargo test --locked --no-default-features
+
+      - name: signing certificate (temporary keychain)
+        if: env.HAS_APPLE_CERT == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/asr-signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/asr-cert.p12"
+          security create-keychain -p "$password" "$keychain"
+          echo "ASR_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/asr-cert.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -f pkcs12 -A -t cert -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$RUNNER_TEMP/asr-cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          if ! security find-identity -v -p codesigning "$keychain" | grep -qF "$APPLE_SIGNING_IDENTITY"; then
+            echo "::error title=signing::APPLE_SIGNING_IDENTITY is not an identity of APPLE_CERTIFICATE"
+            security find-identity -v -p codesigning "$keychain"
+            exit 1
+          fi
+      - name: notarisation key
+        if: env.HAS_APPLE_CERT == 'true' && env.HAS_APPLE_NOTARY == 'true'
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/asr-AuthKey.p8"
+          if printf '%s' "$APPLE_API_KEY_P8" | grep -q -- "-----BEGIN"; then
+            printf '%s\n' "$APPLE_API_KEY_P8" > "$key"
+          else
+            printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$key"
+          fi
+          chmod 600 "$key"
+          echo "ASR_API_KEY_PATH=$key" >> "$GITHUB_ENV"
+      - name: build, sign and package (.app of both editions)
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          set -euo pipefail
+          args=(--version "$VERSION" --skip-frontend)
+          if [[ "$HAS_APPLE_CERT" == true ]]; then
+            export APPLE_SIGNING_IDENTITY="$SIGN_IDENTITY"
+            [[ -n "$TEAM_ID" ]] && export APPLE_TEAM_ID="$TEAM_ID"
+            if [[ -n "${ASR_API_KEY_PATH:-}" ]]; then
+              # Tauri's bundler notarises the .app with these; the script staples and verifies.
+              export APPLE_API_ISSUER="$API_ISSUER" APPLE_API_KEY="$API_KEY" APPLE_API_KEY_PATH="$ASR_API_KEY_PATH"
+              args+=(--dmg)
+            else
+              echo "::warning title=macOS::signed with Developer ID but not notarised (APPLE_API_* secrets missing)"
+            fi
+          else
+            export APPLE_SIGNING_IDENTITY="-"
+            echo "::notice title=macOS::no Apple signing secrets: ad-hoc signed, not notarised (first launch needs 'Open Anyway')"
+          fi
+          desktop/scripts/macos-build.sh "${args[@]}"
+      - name: remove signing keychain and key
+        if: always()
+        run: |
+          if [[ -n "${ASR_KEYCHAIN:-}" ]]; then security delete-keychain "$ASR_KEYCHAIN" || true; fi
+          rm -f "$RUNNER_TEMP/asr-AuthKey.p8" "$RUNNER_TEMP/asr-cert.p12"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-macos
+          path: |
+            desktop/build/dist/*.zip
+            desktop/build/dist/*.dmg
+          if-no-files-found: error
+
+  release:
+    name: GitHub release
+    needs: [meta, windows, macos]
+    if: needs.meta.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: dist
+          merge-multiple: true
+      - name: checksums.txt
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum -- * > ../checksums.txt
+          mv ../checksums.txt .
+          cat checksums.txt
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          ASR Recorder $VERSION: portable desktop builds (no installer).
+
+          - Windows x64: \`…-win-x64-portable.zip\` (recorder) or \`…-win-x64-with-backend-portable.zip\` (with the local backend). Unpack anywhere and run \`asr-recorder.exe\`; SmartScreen may ask once ("More info" → "Run anyway").
+          - macOS (Apple Silicon, macOS 13+; the backend edition needs macOS 14+): \`…-macos-arm64.zip\` / \`…-macos-arm64-with-backend.zip\`. Unzip, move "ASR Recorder.app" to Applications. Builds that are not notarised need "Open Anyway" in System Settings → Privacy & Security once. Allow Screen Recording (system audio) and Microphone when asked.
+
+          SHA-256 of every file: \`checksums.txt\`. Commit: $GITHUB_SHA.
+          EOF
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG exists: replacing its desktop assets"
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$TAG" --prerelease="$PRERELEASE" --repo "$GITHUB_REPOSITORY"
+          else
+            flags=()
+            if [[ "$PRERELEASE" == true ]]; then flags+=(--prerelease); fi
+            gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "ASR Recorder $VERSION" --notes-file notes.md "${flags[@]}"
+          fi
+          echo "Published $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url -q .url)" >> "$GITHUB_STEP_SUMMARY"

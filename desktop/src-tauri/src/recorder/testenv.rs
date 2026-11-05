@@ -37,6 +37,8 @@ struct Tone {
     rate: f64,
     next: f64,
     level: f32,
+    /// Overrides `level` while set (shared with [`FakeEnv::set_level`]).
+    level_now: Arc<Mutex<Option<f32>>>,
     dies_at: Option<f64>,
     panics_at: Option<f64>,
     id: Option<String>,
@@ -56,11 +58,12 @@ impl CaptureSource for Tone {
             return Err("unplugged".into());
         }
         let n = (self.rate / 100.0) as usize;
+        let level = get(&self.level_now).unwrap_or(self.level);
         // 1 µs slack: the manual clock and `next` are sums of the same steps in another order.
         while self.next + 0.01 <= now + 1e-6 {
             out.push(Packet {
                 t: self.next,
-                samples: vec![self.level; n],
+                samples: vec![level; n],
             });
             self.next += 0.01;
         }
@@ -129,6 +132,10 @@ pub struct FakeEnv {
     pub opens: [AtomicUsize; 2],
     /// `(kind, process)` of every open call, in order.
     pub open_log: Mutex<Vec<(SourceKind, Option<u32>)>>,
+    /// Level of every source of a kind while set (None: the default tone; 0.0: silence).
+    pub levels: [Arc<Mutex<Option<f32>>>; 2],
+    /// Process ids `process_exists` reports as gone.
+    pub dead_pids: Mutex<Vec<u32>>,
     /// Clock time at which each running open returns (manual clock: `run_to` waits for the
     /// ones that are due).
     opening: Mutex<Vec<f64>>,
@@ -164,12 +171,28 @@ impl FakeEnv {
             fail_writes: Arc::new(AtomicBool::new(false)),
             opens: [AtomicUsize::new(0), AtomicUsize::new(0)],
             open_log: Mutex::new(Vec::new()),
+            levels: [Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None))],
+            dead_pids: Mutex::new(Vec::new()),
             opening: Mutex::new(Vec::new()),
         })
     }
 
     pub fn opens(&self, kind: SourceKind) -> usize {
         self.opens[kind as usize].load(Ordering::SeqCst)
+    }
+
+    /// Level of the sources of `kind` from now on (None: the default tone, 0.0: silence).
+    pub fn set_level(&self, kind: SourceKind, level: Option<f32>) {
+        *self.levels[kind as usize]
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = level;
+    }
+
+    pub fn kill(&self, pid: u32) {
+        self.dead_pids
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(pid);
     }
 
     pub fn set_default_id(&self, kind: SourceKind, id: Option<&str>) {
@@ -212,6 +235,49 @@ impl FakeEnv {
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
+    }
+
+    /// Like [`run_to`](Self::run_to), but returns true as soon as `done(live)` holds (e.g. the
+    /// session stopped itself, after which `elapsed` no longer follows the clock); false when
+    /// `elapsed` was reached first or the thread stopped following.
+    pub fn run_until(
+        &self,
+        live: &Mutex<Live>,
+        elapsed: f64,
+        step: f64,
+        done: impl Fn(&Live) -> bool,
+    ) -> bool {
+        let check = || done(&live.lock().unwrap_or_else(|p| p.into_inner()));
+        loop {
+            if check() {
+                return true;
+            }
+            let at = self.clock.now() - T0;
+            if at >= elapsed - 1e-9 {
+                return false;
+            }
+            self.advance(step.min(elapsed - at));
+            let want = self.clock.now() - T0;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let due = || {
+                let now = self.clock.now();
+                get(&self.opening).iter().any(|t| *t <= now + 1e-9)
+            };
+            while due()
+                || (live.lock().unwrap_or_else(|p| p.into_inner()).elapsed < want - 1e-9
+                    && !check())
+            {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+
+    /// Seconds since the manual clock started.
+    pub fn clock_s(&self) -> f64 {
+        self.clock.now() - T0
     }
 
     /// Block for `d` on the session clock (real sleep, or until the manual clock passed it).
@@ -301,6 +367,7 @@ impl FakeEnv {
             rate,
             next: now,
             level,
+            level_now: self.levels[kind as usize].clone(),
             dies_at,
             panics_at,
             id,
@@ -326,8 +393,8 @@ impl Env for FakeEnv {
         get(&self.default_id[kind as usize])
     }
 
-    fn process_exists(&self, _pid: u32) -> bool {
-        true
+    fn process_exists(&self, pid: u32) -> bool {
+        !get(&self.dead_pids).contains(&pid)
     }
 
     fn create_wav(

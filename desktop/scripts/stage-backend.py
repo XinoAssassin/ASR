@@ -7,15 +7,17 @@ as the ``managed-backend/`` resource folder next to the exe:
     managed-backend/
       source/            backend/asr, backend/server, pyproject.toml, uv.lock, .python-version
                          (no tests, data, models, .venv, __pycache__)
-      uv.exe             astral-sh/uv release for x86_64-pc-windows-msvc, pinned and verified
+      uv.exe / uv        astral-sh/uv release for the target (x86_64-pc-windows-msvc: uv.exe,
+                         aarch64-apple-darwin: uv), pinned and verified
       VERSION            <project version>+<sha256 of the staged source, 12 hex>
       README.txt         what this is, uv's licence
 
 The uv archive is downloaded once into ``desktop/build/downloads/`` and verified against the
-SHA-256 pinned here *and* the release's own ``.sha256`` file. Stdlib only; runs on Windows or
-Linux / WSL. ``HTTPS_PROXY`` is honoured (urllib).
+SHA-256 pinned here *and* the release's own ``.sha256`` file. Stdlib only; runs on Windows,
+macOS or Linux / WSL. ``HTTPS_PROXY`` is honoured (urllib). ``--target`` defaults to the
+macOS build on macOS and to the Windows build elsewhere.
 
-    python desktop/scripts/stage-backend.py [--out DIR]
+    python desktop/scripts/stage-backend.py [--out DIR] [--target aarch64-apple-darwin]
 """
 
 from __future__ import annotations
@@ -26,15 +28,32 @@ import io
 import shutil
 import sys
 import time
+import tarfile
 import tomllib
 import urllib.request
 import zipfile
 from pathlib import Path
 
 UV_VERSION = "0.13.1"  # 2026-10-14
-UV_TARGET = "x86_64-pc-windows-msvc"
-UV_SHA256 = "3b2661a463a5baea7f5076ea2b25ab71d77f36a6c0d809e5350651792f80a672"
-UV_URL = f"https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/uv-{UV_TARGET}.zip"
+# target -> (archive suffix, executable name, pinned SHA-256 of the archive)
+UV_BUILDS = {
+    "x86_64-pc-windows-msvc": (
+        "zip",
+        "uv.exe",
+        "3b2661a463a5baea7f5076ea2b25ab71d77f36a6c0d809e5350651792f80a672",
+    ),
+    "aarch64-apple-darwin": (
+        "tar.gz",
+        "uv",
+        "cfe454573412ff7380d15fc7dae5997ab53ffce72fce0a78e91ddbc84001acd2",
+    ),
+}
+DEFAULT_TARGET = "aarch64-apple-darwin" if sys.platform == "darwin" else "x86_64-pc-windows-msvc"
+
+
+def uv_url(target: str) -> str:
+    suffix = UV_BUILDS[target][0]
+    return f"https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/uv-{target}.{suffix}"
 
 REPO = Path(__file__).resolve().parents[2]
 BACKEND = REPO / "backend"
@@ -91,27 +110,45 @@ def source_version(dst: Path, staged: list[Path]) -> str:
     return f"{project['project']['version']}+{h.hexdigest()[:12]}"
 
 
-def stage_uv(out: Path, downloads: Path) -> None:
+def extract_member(data: bytes, suffix: str, exe: str) -> bytes:
+    """The single member called ``exe`` of the zip / tar.gz archive ``data``."""
+    if suffix == "zip":
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            names = [n for n in z.namelist() if n.rsplit("/", 1)[-1] == exe]
+            if len(names) != 1:
+                sys.exit(f"{exe} not found in the uv archive: {z.namelist()}")
+            return z.read(names[0])
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as t:
+        members = [m for m in t.getmembers() if m.isfile() and m.name.rsplit("/", 1)[-1] == exe]
+        if len(members) != 1:
+            sys.exit(f"{exe} not found in the uv archive: {t.getnames()}")
+        f = t.extractfile(members[0])
+        assert f is not None
+        return f.read()
+
+
+def stage_uv(out: Path, downloads: Path, target: str) -> None:
+    suffix, exe, pinned = UV_BUILDS[target]
+    url = uv_url(target)
     downloads.mkdir(parents=True, exist_ok=True)
-    archive = downloads / f"uv-{UV_VERSION}-{UV_TARGET}.zip"
-    if not archive.exists() or hashlib.sha256(archive.read_bytes()).hexdigest() != UV_SHA256:
-        print(f"downloading {UV_URL}")
-        data = fetch(UV_URL)
+    archive = downloads / f"uv-{UV_VERSION}-{target}.{suffix}"
+    if not archive.exists() or hashlib.sha256(archive.read_bytes()).hexdigest() != pinned:
+        print(f"downloading {url}")
+        data = fetch(url)
         archive.write_bytes(data)
     data = archive.read_bytes()
     digest = hashlib.sha256(data).hexdigest()
-    published = fetch(UV_URL + ".sha256").decode().split()[0].lower()
-    if digest != UV_SHA256 or digest != published:
+    published = fetch(url + ".sha256").decode().split()[0].lower()
+    if digest != pinned or digest != published:
         archive.unlink(missing_ok=True)
-        sys.exit(
-            f"uv checksum mismatch: got {digest}, pinned {UV_SHA256}, release file {published}"
-        )
-    with zipfile.ZipFile(io.BytesIO(data)) as z:
-        names = [n for n in z.namelist() if n.rsplit("/", 1)[-1] == "uv.exe"]
-        if len(names) != 1:
-            sys.exit(f"uv.exe not found in {archive.name}: {z.namelist()}")
-        (out / "uv.exe").write_bytes(z.read(names[0]))
-    print(f"uv {UV_VERSION} ({UV_TARGET}) verified: sha256 {digest}")
+        sys.exit(f"uv checksum mismatch: got {digest}, pinned {pinned}, release file {published}")
+    # Only one uv per staging folder (a Windows and a macOS build must not end up together).
+    for name in ("uv.exe", "uv"):
+        (out / name).unlink(missing_ok=True)
+    dest = out / exe
+    dest.write_bytes(extract_member(data, suffix, exe))
+    dest.chmod(0o755)
+    print(f"uv {UV_VERSION} ({target}) verified: sha256 {digest}")
 
 
 README = """ASR backend for the "desktop + backend" edition of ASR Recorder
@@ -119,10 +156,11 @@ README = """ASR backend for the "desktop + backend" edition of ASR Recorder
 
 source/   The ASR backend (FastAPI server, core library and CLI) of this app version.
           On first run the app creates a Python 3.12 environment for it with uv
-          (cpu / cuda / rocm), next to the app in portable mode, else under
-          %LOCALAPPDATA%\\dev.asr.recorder\\backend.
-uv.exe    uv {uv} by Astral (https://github.com/astral-sh/uv), dual-licensed under the
-          MIT licence and the Apache License 2.0.
+          (cpu / cuda / rocm; macOS: cpu), next to the app in portable mode, else under
+          %LOCALAPPDATA%\\dev.asr.recorder\\backend (macOS:
+          ~/Library/Application Support/dev.asr.recorder/backend).
+{exe:<9} uv {uv} ({target}) by Astral (https://github.com/astral-sh/uv), dual-licensed
+          under the MIT licence and the Apache License 2.0.
 VERSION   Version of the bundled backend source: {version}
 """
 
@@ -131,15 +169,20 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", type=Path, default=DESKTOP / "build" / "managed-backend")
     ap.add_argument("--downloads", type=Path, default=DESKTOP / "build" / "downloads")
+    ap.add_argument("--target", choices=sorted(UV_BUILDS), default=DEFAULT_TARGET)
     args = ap.parse_args()
     out: Path = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     staged = stage_source(out / "source")
     version = source_version(out / "source", staged)
-    stage_uv(out, args.downloads.resolve())
+    stage_uv(out, args.downloads.resolve(), args.target)
     (out / "VERSION").write_text(version + "\n", encoding="utf-8")
     (out / "README.txt").write_text(
-        README.format(uv=UV_VERSION, version=version), encoding="utf-8", newline="\r\n"
+        README.format(
+            uv=UV_VERSION, version=version, target=args.target, exe=UV_BUILDS[args.target][1]
+        ),
+        encoding="utf-8",
+        newline="\r\n" if args.target.endswith("windows-msvc") else "\n",
     )
     size = sum(p.stat().st_size for p in out.rglob("*") if p.is_file())
     print(f"staged {len(staged)} source files, version {version}, {size / 1e6:.1f} MB -> {out}")

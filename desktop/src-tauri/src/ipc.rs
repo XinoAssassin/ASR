@@ -52,6 +52,10 @@ pub struct RecorderStatus {
     pub sources: Sources,
     /// Process tree being captured; None = whole render device.
     pub process_id: Option<u32>,
+    /// Seconds since the last audio on any captured source (0 when idle).
+    pub silent_for: f64,
+    /// Seconds until an auto-stop, when one is pending (D78).
+    pub auto_stop_in: Option<f64>,
 }
 
 impl RecorderStatus {
@@ -65,11 +69,57 @@ impl RecorderStatus {
             warnings: Vec::new(),
             sources: Sources::default(),
             process_id: None,
+            silent_for: 0.0,
+            auto_stop_in: None,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+fn default_silence_minutes() -> Option<f64> {
+    Some(10.0)
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// Meeting end detection (D78). Absent fields take the defaults; `silenceMinutes: null` = off.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoStopOptions {
+    /// Stop after this long without audio on any captured source; None = off.
+    #[serde(default = "default_silence_minutes")]
+    pub silence_minutes: Option<f64>,
+    /// Per-app capture: stop when that process ends.
+    #[serde(default = "yes")]
+    pub when_app_exits: bool,
+    /// Cut the trailing silence that led to an auto-stop (keeping ~2 s).
+    #[serde(default = "yes")]
+    pub trim_silence: bool,
+}
+
+impl Default for AutoStopOptions {
+    fn default() -> Self {
+        Self {
+            silence_minutes: default_silence_minutes(),
+            when_app_exits: true,
+            trim_silence: true,
+        }
+    }
+}
+
+/// How a recording ended (`Recording.endReason`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EndReason {
+    Manual,
+    Silence,
+    AppExited,
+    Failure,
+    Recovered,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct StartOptions {
     pub system: bool,
@@ -83,6 +133,9 @@ pub struct StartOptions {
     /// Capture only this process tree (Windows process loopback); None = whole render device.
     #[serde(default)]
     pub process_id: Option<u32>,
+    /// Meeting end detection; None (absent) = the defaults of [`AutoStopOptions`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_stop: Option<AutoStopOptions>,
 }
 
 impl Default for StartOptions {
@@ -94,6 +147,7 @@ impl Default for StartOptions {
             input_device: None,
             out_dir: None,
             process_id: None,
+            auto_stop: None,
         }
     }
 }
@@ -346,6 +400,12 @@ pub struct Recording {
     pub duration: f64,
     pub created_at: String,
     pub upload: UploadInfo,
+    /// How the recording ended (absent for entries indexed before D78).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<EndReason>,
+    /// Trailing silence removed on auto-stop (seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trimmed_seconds: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -431,6 +491,50 @@ mod tests {
         assert_eq!(u["state"], "transcribing");
         assert!(u.get("transcriptId").is_some());
         assert!(u.get("nextRetryAt").is_some());
+    }
+
+    #[test]
+    fn auto_stop_payloads_match_the_contract() {
+        let s = serde_json::to_value(RecorderStatus::idle(None)).unwrap();
+        assert_eq!(s["silentFor"], 0.0);
+        assert!(s["autoStopIn"].is_null());
+        // absent = defaults; null minutes = off; absent fields default
+        let o: StartOptions =
+            serde_json::from_value(serde_json::json!({"system": true, "mic": true})).unwrap();
+        assert_eq!(o.auto_stop, None);
+        let o: StartOptions = serde_json::from_value(serde_json::json!({
+            "system": true, "mic": true,
+            "autoStop": {"silenceMinutes": null, "whenAppExits": false, "trimSilence": true}
+        }))
+        .unwrap();
+        let a = o.auto_stop.unwrap();
+        assert_eq!(a.silence_minutes, None);
+        assert!(!a.when_app_exits && a.trim_silence);
+        let a: AutoStopOptions = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(a, AutoStopOptions::default());
+        assert_eq!(a.silence_minutes, Some(10.0));
+        let v = serde_json::to_value(&o).unwrap();
+        assert_eq!(v["autoStop"]["silenceMinutes"], serde_json::Value::Null);
+        assert_eq!(v["autoStop"]["whenAppExits"], false);
+        assert_eq!(
+            serde_json::to_value(EndReason::AppExited).unwrap(),
+            "app_exited"
+        );
+        // Recording: endReason / trimmedSeconds optional (old index entries load)
+        let mut r: Recording = serde_json::from_value(serde_json::json!({
+            "id": "a", "path": "p", "name": "n", "size": 1, "duration": 1.0,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "upload": {"state": "pending", "attempts": 0, "uploadId": null, "jobId": null,
+                       "error": null, "nextRetryAt": null}
+        }))
+        .unwrap();
+        assert_eq!(r.end_reason, None);
+        assert!(serde_json::to_value(&r).unwrap().get("endReason").is_none());
+        r.end_reason = Some(EndReason::Silence);
+        r.trimmed_seconds = Some(12.5);
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["endReason"], "silence");
+        assert_eq!(v["trimmedSeconds"], 12.5);
     }
 
     #[test]

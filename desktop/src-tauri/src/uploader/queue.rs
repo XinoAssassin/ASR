@@ -286,6 +286,8 @@ mod tests {
                 error: None,
                 next_retry_at: None,
             },
+            end_reason: None,
+            trimmed_seconds: None,
         }
     }
 

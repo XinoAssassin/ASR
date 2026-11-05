@@ -241,6 +241,50 @@ pub fn repair(path: &Path) -> io::Result<WavInfo> {
     })
 }
 
+/// Cut a recorder WAV to its first `keep` frames (auto-stop: drop the trailing silence), but
+/// never past a sample louder than `max_peak`: if the tail holds one, the cut moves to `margin`
+/// frames after the last such frame. Returns `(frames removed, sample rate)`. The file is
+/// repaired first; a crash between the truncation and the header rewrite is repaired again by
+/// recovery (sizes come from the file length).
+pub fn trim_tail(path: &Path, keep: u64, max_peak: i16, margin: u64) -> io::Result<(u64, u32)> {
+    let info = repair(path)?;
+    if keep >= info.frames {
+        return Ok((0, info.rate));
+    }
+    let block = info.channels as u64 * 2;
+    let mut f = OpenOptions::new().read(true).write(true).open(path)?;
+    f.seek(SeekFrom::Start(HEADER_LEN + keep * block))?;
+    let mut rd = io::BufReader::with_capacity(1 << 16, &mut f);
+    let mut last_loud: Option<u64> = None;
+    let mut frame = vec![0u8; block as usize];
+    for i in keep..info.frames {
+        rd.read_exact(&mut frame)?;
+        let loud = frame
+            .chunks_exact(2)
+            .any(|b| i16::from_le_bytes([b[0], b[1]]).unsigned_abs() > max_peak.unsigned_abs());
+        if loud {
+            last_loud = Some(i);
+        }
+    }
+    drop(rd);
+    let keep = match last_loud {
+        Some(i) => {
+            log::warn!("trim: sound at frame {i} past the cut, keeping it");
+            (i + 1 + margin).max(keep)
+        }
+        None => keep,
+    };
+    if keep >= info.frames {
+        return Ok((0, info.rate));
+    }
+    let data = keep * block;
+    f.set_len(HEADER_LEN + data)?;
+    f.seek(SeekFrom::Start(0))?;
+    f.write_all(&header(info.channels, info.rate, clamp_u32(data)))?;
+    f.sync_all()?;
+    Ok((info.frames - keep, info.rate))
+}
+
 /// Streaming reader over the PCM payload of a recorder WAV (sizes taken from the header).
 pub struct WavReader {
     file: io::BufReader<File>,
@@ -295,6 +339,33 @@ impl WavReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The trim cuts silence only: a loud sample past the requested cut moves the cut behind
+    /// it (plus the margin); a cut past the end or onto silence works as asked.
+    #[test]
+    fn trim_never_cuts_sound() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.partial.wav");
+        let mut w = WavWriter::create(&p, 2, 16000).unwrap();
+        let mut pcm = vec![0i16; 2 * 1000];
+        pcm[2 * 600 + 1] = 5000; // a click on channel 1 at frame 600
+        w.write(&pcm).unwrap();
+        drop(w); // unpatched header: trim repairs first
+        assert_eq!(trim_tail(&p, 2000, 3277, 10).unwrap(), (0, 16000));
+        // cut at 400: the click at 600 stays, with 10 frames after it
+        assert_eq!(trim_tail(&p, 400, 3277, 10).unwrap(), (1000 - 611, 16000));
+        let mut r = WavReader::open(&p).unwrap();
+        assert_eq!(r.info.frames, 611);
+        let mut b = Vec::new();
+        r.read_bytes(1000, &mut b).unwrap();
+        assert_eq!(i16::from_le_bytes([b[2402], b[2403]]), 5000);
+        assert_eq!(std::fs::metadata(&p).unwrap().len(), 44 + 611 * 4);
+        // the margin would reach past the end: nothing removed
+        assert_eq!(trim_tail(&p, 100, 3277, 50).unwrap().0, 0);
+        // quiet noise below the safety peak is cut as asked
+        assert_eq!(trim_tail(&p, 605, 6000, 0).unwrap().0, 6);
+        assert_eq!(repair(&p).unwrap().frames, 605);
+    }
 
     #[test]
     fn header_is_patched_and_crash_is_repairable() {

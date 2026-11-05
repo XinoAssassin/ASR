@@ -8,6 +8,9 @@
       "nsis": {
         "installerHooks": "nsis/managed-backend-hooks.nsh"
       }
+    },
+    "macOS": {
+      "minimumSystemVersion": "14.0"
     }
   }
 }

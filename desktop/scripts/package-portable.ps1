@@ -20,11 +20,16 @@
   Needs: rustup / cargo on PATH, pnpm, Python 3.11+ (py or python). Honours CARGO_TARGET_DIR
   and the proxy variables of the calling shell.
 
+  CI (.github/workflows/desktop.yml) builds the SPA and the exe itself and runs this with
+  -SkipFrontend -SkipBuild -Version <v> (the zip names; the exe gets the version through the
+  TAURI_CONFIG variable at build time).
+
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File desktop\scripts\package-portable.ps1
 #>
 param(
   [string]$OutDir = "",
+  [string]$Version = "",
   [switch]$SkipFrontend,
   [switch]$SkipBuild,
   [switch]$Installer
@@ -38,7 +43,7 @@ $Tauri = Join-Path $Desktop "src-tauri"
 if (-not $OutDir) { $OutDir = Join-Path $Desktop "build\dist" }
 $Target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $Tauri "target" }
 $Conf = Get-Content (Join-Path $Tauri "tauri.conf.json") -Raw -Encoding UTF8 | ConvertFrom-Json
-$Version = $Conf.version
+if (-not $Version) { $Version = $Conf.version }
 
 function Exec([string]$what, [scriptblock]$cmd) {
   Write-Host "== $what"

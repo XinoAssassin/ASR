@@ -479,6 +479,12 @@ mod win {
                 input_device: a.mic_device.clone(),
                 out_dir: None,
                 process_id,
+                // the self-test plays its own silence gaps: never stop by itself
+                auto_stop: Some(asr_recorder::ipc::AutoStopOptions {
+                    silence_minutes: None,
+                    when_app_exits: false,
+                    trim_silence: false,
+                }),
             },
             &a.out,
         )?;
