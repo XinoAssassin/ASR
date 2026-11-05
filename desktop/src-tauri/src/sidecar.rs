@@ -202,6 +202,23 @@ pub fn validate(c: &SidecarConfig) -> Result<SidecarConfig, String> {
     })
 }
 
+/// A backend that is still shutting down (e.g. right after the app restarted it) may hold the
+/// port for a moment; wait this long before reporting it as taken.
+const PORT_RELEASE_WAIT: Duration = Duration::from_secs(5);
+
+fn port_free_within(port: u16, wait: Duration) -> bool {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if !port_in_use(port) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
 fn port_in_use(port: u16) -> bool {
     std::net::TcpStream::connect_timeout(
         &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
@@ -353,7 +370,7 @@ impl Sidecar {
         if cfg.command.trim().is_empty() {
             return self.fail("no sidecar command configured".into());
         }
-        if port_in_use(cfg.port) {
+        if !port_free_within(cfg.port, PORT_RELEASE_WAIT) {
             return self.fail(format!(
                 "port {} is already in use (another backend running?); not starting a second one",
                 cfg.port

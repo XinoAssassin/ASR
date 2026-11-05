@@ -975,11 +975,10 @@ mod tests {
         let r = h.join().unwrap().unwrap();
         let produced = live.lock().unwrap().frames;
         assert_eq!(r.frames, produced);
-        assert!(
-            (r.frames as f64 / OUT_RATE - 2.3).abs() < 0.2,
-            "{}",
-            r.frames
-        );
+        // ~2.3 s of wall clock; slow CI runners oversleep, so only bound it loosely (the point
+        // of the test is that nothing is lost: frames written == frames produced).
+        let secs = r.frames as f64 / OUT_RATE;
+        assert!((2.1..3.5).contains(&secs), "{secs} s");
         let len = std::fs::metadata(&p).unwrap().len();
         assert_eq!(len, 44 + r.frames * 4);
         assert_eq!(

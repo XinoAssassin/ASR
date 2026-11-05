@@ -310,7 +310,11 @@ fn cpu_install_verifies_and_starts_the_sidecar() {
     assert!(m2.startup(), "managed sidecar is started by startup()");
     let t = Instant::now();
     while f.sidecar.status().state != SidecarState::Running {
-        assert!(t.elapsed() < Duration::from_secs(30));
+        assert!(
+            t.elapsed() < Duration::from_secs(30),
+            "sidecar not running after restart: {:?}",
+            f.sidecar.status()
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(f.calls().lines().count(), calls_before, "no uv call");
