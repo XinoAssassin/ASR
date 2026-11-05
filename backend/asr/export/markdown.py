@@ -11,7 +11,9 @@ Layout (``flavor="md"``, see ``docs/research/siyuan-export.md`` for the SiYuan d
 
     > 2026-10-29 14:00 · 时长 33:52 · 4 位发言人 · 本地识别（qwen3-asr-1.7b）
 
-    ## 摘要                  only with a summary: overview, ### 要点 / 决定 / 待办 (task list)
+    ## 摘要                  only with a summary: overview, ### 要点 / 决定 / 待办 (task list);
+                             a cited item ends with its first cited segment's start
+                             （00:03:41）unless timestamps=False
     ## 发言人                table: name | turns | talk time | share
     ## 文字稿                one paragraph per segment (or per turn with merge_same_speaker):
     **张三** `00:03:12`\\    bold name, start time as inline code, hard line break,
@@ -42,7 +44,7 @@ from datetime import datetime
 from typing import Literal
 
 from asr.providers.base import Segment, Transcript
-from asr.summarize import TranscriptSummary
+from asr.summarize import SummaryPoint, TranscriptSummary, cited_start
 
 Locale = Literal["zh", "en"]
 Flavor = Literal["md", "siyuan"]
@@ -93,6 +95,7 @@ _LABELS: dict[str, dict[str, str]] = {
         "owner": "负责人：{x}",
         "due": "期限：{x}",
         "item_meta": "（{x}）",
+        "cited_at": "（{t}）",
         "summary_note": "由 {model} 自动生成，仅供参考。",
         "summary_stale": "摘要生成后文字稿有修改，内容可能已过时。",
         "sentence_sep": "",
@@ -121,6 +124,7 @@ _LABELS: dict[str, dict[str, str]] = {
         "owner": "owner: {x}",
         "due": "due: {x}",
         "item_meta": " ({x})",
+        "cited_at": " ({t})",
         "summary_note": "Generated automatically by {model}; it may contain mistakes.",
         "summary_stale": "The transcript was edited after this summary was written, "
         "so it may be out of date.",
@@ -326,10 +330,19 @@ def _meta_line(transcript: Transcript, meta: ExportMeta, labels: dict[str, str])
     return "> " + escape_inline(" · ".join(parts))
 
 
-def _summary_blocks(meta: ExportMeta, labels: dict[str, str]) -> list[str]:
+def _summary_blocks(
+    transcript: Transcript, meta: ExportMeta, labels: dict[str, str], *, timestamps: bool
+) -> list[str]:
     summary = meta.summary
     if summary is None:
         return []
+    starts = {seg.id: seg.start for seg in transcript.segments} if timestamps else {}
+
+    def when(refs: Sequence[str]) -> str:
+        # First cited segment that still exists (a merge edit can remove one).
+        start = cited_start(refs, starts)
+        return "" if start is None else labels["cited_at"].format(t=_hms(start))
+
     blocks = [f"## {labels['summary']}"]
     note = labels["summary_note"].format(model=one_line(summary.model) or "LLM")
     if meta.summary_stale:
@@ -337,8 +350,10 @@ def _summary_blocks(meta: ExportMeta, labels: dict[str, str]) -> list[str]:
     blocks.append("> " + escape_inline(note))
     blocks += [escape_line(p) for p in summary.overview.splitlines() if p.strip()]
 
-    def bullets(items: Sequence[str]) -> str:
-        return "\n".join(f"- {escape_line(one_line(i))}" for i in items if one_line(i))
+    def bullets(items: Sequence[SummaryPoint]) -> str:
+        return "\n".join(
+            f"- {escape_line(one_line(i.text))}{when(i.refs)}" for i in items if one_line(i.text)
+        )
 
     for key, items in (("key_points", summary.key_points), ("decisions", summary.decisions)):
         if text := bullets(items):
@@ -354,7 +369,7 @@ def _summary_blocks(meta: ExportMeta, labels: dict[str, str]) -> list[str]:
             if v and one_line(v)
         ]
         suffix = labels["item_meta"].format(x=" · ".join(extra)) if extra else ""
-        tasks.append(f"- [ ] {task}{suffix}")
+        tasks.append(f"- [ ] {task}{suffix}{when(item.refs)}")
     if tasks:
         blocks += [f"### {labels['action_items']}", "\n".join(tasks)]
     return blocks
@@ -412,7 +427,7 @@ def render_markdown(
         blocks.append(_front_matter(transcript, meta, labels))
         blocks.append(f"# {escape_inline(_title(meta, labels))}")
     blocks.append(_meta_line(transcript, meta, labels))
-    blocks += _summary_blocks(meta, labels)
+    blocks += _summary_blocks(transcript, meta, labels, timestamps=timestamps)
     blocks += _speakers_table(transcript, labels)
 
     blocks.append(f"## {labels['transcript']}")

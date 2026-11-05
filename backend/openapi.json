@@ -27,6 +27,14 @@
             "description": "Speaker name or person named in the meeting, when stated.",
             "title": "Owner"
           },
+          "refs": {
+            "description": "Ids of the segments the item is based on (at most 3), in transcript order: the first is the earliest supporting line. Empty for summaries written before citations existed, and an id may no longer exist after edits (merge) - clients skip those.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Refs",
+            "type": "array"
+          },
           "task": {
             "title": "Task",
             "type": "string"
@@ -2285,6 +2293,28 @@
         "title": "SplitOp",
         "type": "object"
       },
+      "SummaryPoint": {
+        "description": "A key point or decision with the segments it cites.\n\nSummaries stored before citations existed hold plain strings; they load as\n``{\"text\": \"...\", \"refs\": []}``.",
+        "properties": {
+          "refs": {
+            "description": "Ids of the segments the item is based on (at most 3), in transcript order: the first is the earliest supporting line. Empty for summaries written before citations existed, and an id may no longer exist after edits (merge) - clients skip those.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Refs",
+            "type": "array"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "SummaryPoint",
+        "type": "object"
+      },
       "Term": {
         "properties": {
           "aliases": {
@@ -2598,6 +2628,7 @@
         "type": "object"
       },
       "TranscriptSummary": {
+        "description": "LLM meeting summary.\n\nJSON shape::\n\n    {\"overview\": \"...\",\n     \"key_points\": [{\"text\": \"...\", \"refs\": [\"seg_00012\"]}],\n     \"decisions\": [{\"text\": \"...\", \"refs\": [\"seg_00030\", \"seg_00031\"]}],\n     \"action_items\": [{\"task\": \"...\", \"owner\": \"张三\" | null, \"due\": \"周五\" | null,\n                       \"refs\": [\"seg_00041\"]}],\n     \"model\": \"qwen-plus\", \"chunks\": 1, \"created_at\": \"2026-11-05T10:00:00Z\"}\n\n``refs`` are segment ids (see ``SummaryPoint``). Older stored summaries with\n``key_points`` / ``decisions`` as lists of strings and action items without ``refs`` are\nstill accepted and come out in the shape above with empty ``refs``.",
         "properties": {
           "action_items": {
             "items": {
@@ -2620,14 +2651,14 @@
           },
           "decisions": {
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/SummaryPoint"
             },
             "title": "Decisions",
             "type": "array"
           },
           "key_points": {
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/SummaryPoint"
             },
             "title": "Key Points",
             "type": "array"

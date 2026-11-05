@@ -510,7 +510,7 @@ def summarize(
     text = (
         result.model_dump_json(indent=2) + "\n"
         if fmt is SummaryFormat.json
-        else summary_markdown(result)
+        else summary_markdown(result, segments=transcript.segments)
     )
     if output is None:
         sys.stdout.write(text)

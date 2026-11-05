@@ -13,7 +13,7 @@ from asr.export.markdown import (
     siyuan_doc_attrs,
 )
 from asr.providers.base import Segment, Speaker, Transcript
-from asr.summarize import ActionItem, TranscriptSummary
+from asr.summarize import ActionItem, SummaryPoint, TranscriptSummary
 from asr.writers import MEDIA_TYPES, write
 
 CST = timezone(timedelta(hours=8))
@@ -156,6 +156,34 @@ def test_english_merge_no_timestamps(transcript: Transcript, meta: ExportMeta) -
     assert out.count("**李四**") == 1
     assert "`00:" not in out
     assert 'tags: ["meeting-notes"]' in out
+
+
+def test_cited_items_show_their_first_timestamp(transcript: Transcript, meta: ExportMeta) -> None:
+    assert meta.summary is not None
+    summary = meta.summary.model_copy(
+        update={
+            "key_points": [SummaryPoint(text="timing 收敛", refs=["b", "c"])],
+            "decisions": [SummaryPoint(text="下周复测", refs=["gone", "d"])],
+            "action_items": [
+                ActionItem(task="整理报告", owner="张三", due="周五", refs=["a"]),
+                ActionItem(task="联系供应商", refs=["gone"]),
+            ],
+        }
+    )
+    cited = dataclasses.replace(meta, summary=summary)
+    out = render_markdown(transcript, cited)
+    assert "### 要点\n\n- timing 收敛（00:03:40）\n" in out
+    assert "### 决定\n\n- 下周复测（01:00:00）\n" in out  # first ref that still exists
+    assert "- [ ] 整理报告（负责人：张三 · 期限：周五）（00:03:12）\n" in out
+    assert "- [ ] 联系供应商\n" in out
+    en = render_markdown(transcript, cited, locale="en")
+    assert "- timing 收敛 (00:03:40)\n" in en
+    assert "- [ ] 整理报告 (owner: 张三 · due: 周五) (00:03:12)\n" in en
+    siyuan = render_markdown(transcript, cited, flavor="siyuan")
+    assert "- timing 收敛（00:03:40）\n" in siyuan
+    assert "- timing 收敛\n" in render_markdown(transcript, cited, timestamps=False)
+    # the golden fixture holds an old-style summary (plain strings, no refs): no timestamps
+    assert "- timing 收敛\n" in render_markdown(transcript, meta)
 
 
 def test_stale_summary_and_defaults(transcript: Transcript, meta: ExportMeta) -> None:
