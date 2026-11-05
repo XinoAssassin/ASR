@@ -207,7 +207,8 @@ export interface paths {
         };
         /**
          * List Local Models
-         * @description Registry models and whether they are in ``ASR_MODEL_CACHE_DIR``.
+         * @description Registry models, whether they are in ``ASR_MODEL_CACHE_DIR``, and which ones a local job
+         *     with the current settings needs (``required``).
          */
         get: operations["list_local_models_api_settings_local_models_get"];
         put?: never;
@@ -1288,6 +1289,12 @@ export interface components {
              * @description Hub repository id.
              */
             name: string;
+            /**
+             * Required
+             * @description Needed by a local job with the current settings.
+             * @default false
+             */
+            required: boolean;
             /** Size Mb */
             size_mb?: number | null;
             /**
@@ -1317,6 +1324,11 @@ export interface components {
             device: "cpu" | "cuda" | "rocm";
             /** Diarize Model */
             diarize_model: string | null;
+            /**
+             * Effective Asr Model
+             * @description Model a local job uses now: asr_model, else the hardware default (null when the local stack is not installed).
+             */
+            effective_asr_model?: string | null;
             /** Model Cache Dir */
             model_cache_dir: string;
         };

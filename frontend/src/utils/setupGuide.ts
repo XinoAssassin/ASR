@@ -31,14 +31,16 @@ export interface RecognitionState {
 
 /**
  * Models a local job loads: VAD, the ASR model (configured, or for "auto" either Qwen3-ASR size),
- * the forced aligner when that engine needs one, and the diarization model. Mirrors
- * `asr.providers.local.models.required_models` as far as the API exposes it.
+ * the forced aligner when that engine needs one, and the diarization model. Uses the backend's
+ * `required` flags when present; otherwise mirrors `required_models` as far as the API exposes it.
  */
 export function missingLocalModels(
   models: readonly LocalModelOut[],
   asrModel: string | null | undefined,
   diarizeModel: string | null | undefined,
 ): LocalModelOut[] {
+  // Newer backends mark exactly what the current settings need (incl. the hardware default model).
+  if (models.some((m) => m.required)) return models.filter((m) => m.required && !m.downloaded)
   const missing: LocalModelOut[] = []
   const ofKind = (kind: LocalModelOut['kind']) => models.filter((m) => m.kind === kind)
   const need = (candidates: LocalModelOut[], preferred?: string | null): void => {

@@ -1289,6 +1289,12 @@
             "title": "Name",
             "type": "string"
           },
+          "required": {
+            "default": false,
+            "description": "Needed by a local job with the current settings.",
+            "title": "Required",
+            "type": "boolean"
+          },
           "size_mb": {
             "anyOf": [
               {
@@ -1397,6 +1403,18 @@
               }
             ],
             "title": "Diarize Model"
+          },
+          "effective_asr_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Model a local job uses now: asr_model, else the hardware default (null when the local stack is not installed).",
+            "title": "Effective Asr Model"
           },
           "model_cache_dir": {
             "title": "Model Cache Dir",
@@ -3469,7 +3487,7 @@
     },
     "/api/settings/local-models": {
       "get": {
-        "description": "Registry models and whether they are in ``ASR_MODEL_CACHE_DIR``.",
+        "description": "Registry models, whether they are in ``ASR_MODEL_CACHE_DIR``, and which ones a local job\nwith the current settings needs (``required``).",
         "operationId": "list_local_models_api_settings_local_models_get",
         "responses": {
           "200": {

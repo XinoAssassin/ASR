@@ -69,6 +69,8 @@ async def test_get_defaults(client: httpx.AsyncClient, env: EnvSettings) -> None
     environment, env_only = body.pop("environment"), body.pop("env_only")
     assert environment["upload_roots"] == [str(r) for r in env.upload_roots]
     assert env_only["upload_roots"] == "ASR_UPLOAD_ROOTS"
+    # The effective model depends on this machine's hardware (bf16 → 1.7B, else 0.6B).
+    assert body["local"].pop("effective_asr_model") in (None, "qwen3-asr-0.6b", "qwen3-asr-1.7b")
     assert body == {
         "provider_default": "cloud",
         "api_key_required": False,
@@ -319,3 +321,22 @@ async def test_failed_download_reports_error(
         await asyncio.sleep(0.02)
     assert rows["campplus"]["status"] == "failed"
     assert "network down" in rows["campplus"]["error"]
+
+
+async def test_local_models_marks_what_the_current_settings_need(
+    client: httpx.AsyncClient,
+) -> None:
+    resp = await client.put("/api/settings", json={"local": {"asr_model": "qwen3-asr-0.6b"}})
+    assert resp.status_code == 200
+    assert resp.json()["local"]["effective_asr_model"] == "qwen3-asr-0.6b"
+    rows = {m["id"]: m["required"] for m in (await client.get("/api/settings/local-models")).json()}
+    assert {k for k, v in rows.items() if v} == {
+        "fsmn-vad",
+        "qwen3-asr-0.6b",
+        "qwen3-forced-aligner",
+        "campplus",
+    }
+    # A model that emits its own timestamps needs no aligner.
+    await client.put("/api/settings", json={"local": {"asr_model": "seaco-paraformer"}})
+    rows = {m["id"]: m["required"] for m in (await client.get("/api/settings/local-models")).json()}
+    assert {k for k, v in rows.items() if v} == {"fsmn-vad", "seaco-paraformer", "campplus"}

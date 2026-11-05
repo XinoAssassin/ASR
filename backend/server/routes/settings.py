@@ -99,17 +99,37 @@ def _api_key_source(eff: EffectiveSettings) -> Literal["env", "config", "setting
     return source if source in ("env", "config", "settings") else None  # type: ignore[return-value]
 
 
+def effective_asr_model(eff: EffectiveSettings) -> str | None:
+    """The ASR model a local job would use with these settings (configured, else the hardware
+    default); None when the local stack is not installed."""
+    if eff.local_asr_model:
+        return eff.local_asr_model
+    if not local_models.local_stack_installed():
+        return None
+    from asr.providers.local.pipeline import default_asr_model
+
+    try:
+        return default_asr_model(eff.local_device)
+    except Exception:  # torch / device probe failure: report unknown rather than fail the page
+        log.debug("cannot resolve the default ASR model", exc_info=True)
+        return None
+
+
 async def _current(env: EnvSettings, db: Database) -> SettingsOut:
-    return _settings_out(env, await load_effective_settings(env, db))
+    eff = await load_effective_settings(env, db)
+    return _settings_out(env, eff, await run_in_threadpool(effective_asr_model, eff))
 
 
-def _settings_out(env: EnvSettings, eff: EffectiveSettings) -> SettingsOut:
+def _settings_out(
+    env: EnvSettings, eff: EffectiveSettings, effective_model: str | None = None
+) -> SettingsOut:
     return SettingsOut(
         provider_default=eff.provider_default,
         api_key_required=env.api_key_required,
         upload_roots=[str(r) for r in env.upload_roots],
         local=LocalSettingsOut(
             asr_model=eff.local_asr_model,
+            effective_asr_model=effective_model,
             diarize_model=eff.local_diarize_model,
             device=eff.local_device,
             model_cache_dir=str(env.model_cache_dir),
@@ -358,11 +378,21 @@ def _model_row(cache: Path, downloads: ModelDownloads, key: str) -> LocalModelOu
 
 
 @router.get("/local-models", response_model=list[LocalModelOut])
-async def list_local_models(env: EnvDep, downloads: ModelDownloadsDep) -> list[LocalModelOut]:
-    """Registry models and whether they are in ``ASR_MODEL_CACHE_DIR``."""
+async def list_local_models(
+    env: EnvDep, db: DbDep, downloads: ModelDownloadsDep
+) -> list[LocalModelOut]:
+    """Registry models, whether they are in ``ASR_MODEL_CACHE_DIR``, and which ones a local job
+    with the current settings needs (``required``)."""
+    eff = await load_effective_settings(env, db)
 
     def scan() -> list[LocalModelOut]:
-        return [_model_row(env.model_cache_dir, downloads, key) for key in local_models.MODELS]
+        model = effective_asr_model(eff)
+        try:
+            needed = set(local_models.required_models(model)) if model else set()
+        except KeyError:
+            needed = set()
+        rows = [_model_row(env.model_cache_dir, downloads, key) for key in local_models.MODELS]
+        return [row.model_copy(update={"required": row.id in needed}) for row in rows]
 
     return await run_in_threadpool(scan)
 

@@ -406,6 +406,11 @@ class TermSetOut(BaseModel):
 # -------------------------------------------------------------------------------------- settings
 class LocalSettingsOut(BaseModel):
     asr_model: str | None
+    effective_asr_model: str | None = Field(
+        default=None,
+        description="Model a local job uses now: asr_model, else the hardware default (null when "
+        "the local stack is not installed).",
+    )
     diarize_model: str | None
     device: Device
     model_cache_dir: str
@@ -578,6 +583,9 @@ class LocalModelOut(BaseModel):
     status: Literal["missing", "downloading", "downloaded", "failed"] = "missing"
     error: str | None = None
     has_mirror: bool = Field(default=False, description="Also available on ModelScope.")
+    required: bool = Field(
+        default=False, description="Needed by a local job with the current settings."
+    )
 
 
 # ---------------------------------------------------------------------------- export / SiYuan

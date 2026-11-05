@@ -13,6 +13,7 @@ const model = (id: string, kind: LocalModelOut['kind'], downloaded = false): Loc
   size_mb: 100,
   error: null,
   has_mirror: false,
+  required: false,
 })
 
 const registry = (downloaded: string[] = []): LocalModelOut[] =>
@@ -95,3 +96,19 @@ describe('parseStoredSample', () => {
     expect(parseStoredSample(null)).toBeNull()
   })
 })
+
+describe('missingLocalModels with required flags', () => {
+  it('trusts the backend required flags (hardware default included)', () => {
+    const row = (id: string, kind: string, downloaded: boolean, required: boolean) =>
+      ({ id, name: id, kind, downloaded, required, status: downloaded ? 'downloaded' : 'missing' }) as never
+    const models = [
+      row('fsmn-vad', 'vad', true, true),
+      row('qwen3-asr-0.6b', 'asr', true, false),
+      row('qwen3-asr-1.7b', 'asr', false, true),
+      row('qwen3-forced-aligner', 'aligner', true, true),
+      row('campplus', 'diarization', true, true),
+    ]
+    expect(missingLocalModels(models, null, null).map((m) => m.id)).toEqual(['qwen3-asr-1.7b'])
+  })
+})
+
